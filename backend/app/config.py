@@ -28,3 +28,7 @@ PROVIDERS = {
 
 DISABLED_TOOLS: set[str] = set()   # ferramentas desligadas na tela de Configurações
 CUSTOM_INSTRUCTIONS = ""           # texto extra no fim do system prompt
+AUTO_APPROVE_TOOLS: list[str] = []     # globs de nomes de ferramenta que dispensam aprovação
+AUTO_APPROVE_COMMANDS: list[str] = []  # globs de comandos do run_command que dispensam aprovação
+PROJECT_MEMORY = True                  # ler/oferecer o arquivo de memória do projeto
+PROJECT_MEMORY_FILE = "FORJA.md"

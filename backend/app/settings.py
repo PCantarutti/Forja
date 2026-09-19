@@ -23,7 +23,13 @@ ENV_DEFAULTS: dict[str, Any] = {
     "searxng_url": config.SEARXNG_URL,
     "disabled_tools": [],
     "custom_instructions": "",
+    "auto_approve_tools": [],
+    "auto_approve_commands": [],
+    "project_memory": True,
+    "project_memory_file": "FORJA.md",
 }
+
+LISTS = ("disabled_tools", "auto_approve_tools", "auto_approve_commands")
 
 NUMBERS = {  # chave: (tipo, mínimo, máximo)
     "num_ctx": (int, 1024, 4_194_304),
@@ -59,6 +65,10 @@ def apply(values: dict | None = None) -> dict:
     config.SEARXNG_URL = values["searxng_url"]
     config.DISABLED_TOOLS = set(values["disabled_tools"])
     config.CUSTOM_INSTRUCTIONS = values["custom_instructions"]
+    config.AUTO_APPROVE_TOOLS = list(values["auto_approve_tools"])
+    config.AUTO_APPROVE_COMMANDS = list(values["auto_approve_commands"])
+    config.PROJECT_MEMORY = bool(values["project_memory"])
+    config.PROJECT_MEMORY_FILE = values["project_memory_file"]
     return values
 
 
@@ -116,10 +126,17 @@ def validate(patch: dict, current: dict) -> dict:
             if not lo <= v <= hi:
                 raise SettingsError(f"'{key}' deve ficar entre {lo} e {hi}.")
             values[key] = v
-        elif key == "disabled_tools":
+        elif key in LISTS:
             if not isinstance(raw, list):
-                raise SettingsError("'disabled_tools' precisa ser uma lista.")
-            values[key] = sorted({str(x) for x in raw})
+                raise SettingsError(f"'{key}' precisa ser uma lista.")
+            values[key] = sorted({str(x).strip() for x in raw if str(x).strip()})
+        elif key == "project_memory":
+            values[key] = bool(raw)
+        elif key == "project_memory_file":
+            name = str(raw).strip() or "FORJA.md"
+            if "/" in name or "\\" in name or name.startswith("."):
+                raise SettingsError("O arquivo de memória deve ser um nome simples na raiz da pasta de trabalho.")
+            values[key] = name
         elif key == "searxng_url":
             url = str(raw).strip().rstrip("/")
             if not url.startswith(("http://", "https://")):

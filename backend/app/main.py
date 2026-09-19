@@ -2,12 +2,12 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from . import config, db, llm, mcp_client, memory, settings
+from . import config, db, llm, mcp_client, memory, settings, uploads
 from .agent import RUNS, Run, RunRequest, active_run
 from .tools import REGISTRY
 
@@ -79,6 +79,20 @@ async def put_mcp_config(body: dict):
 @app.get("/api/memory")
 async def get_memory():
     return await memory.read()
+
+
+@app.get("/api/memory/project")
+def get_project_memory():
+    return memory.project_read()
+
+
+@app.put("/api/memory/project")
+def put_project_memory(body: dict):
+    from .tools import ToolError
+    try:
+        return memory.project_write(body.get("content", ""))
+    except ToolError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/memory/delete")
@@ -177,11 +191,21 @@ def delete_conversation(conv_id: int):
 # ------------------------------------------------------------------ execução
 
 class RunBody(BaseModel):
-    content: str
+    content: str | None = None  # None = continua de onde parou (regenerar ou mensagem editada)
     provider: str
     model: str
     mode: str = "agent"
     write_policy: str = "ask"
+    attachments: list | None = None
+
+
+@app.post("/api/uploads")
+async def upload(file: UploadFile = File(...)):
+    """Salva o anexo dentro da pasta de trabalho para o agente conseguir abrir."""
+    try:
+        return uploads.save(file.filename or "arquivo", await file.read(), file.content_type)
+    except (ValueError, OSError) as e:
+        raise HTTPException(400, str(e))
 
 
 def _sse(run: Run, cursor: int) -> StreamingResponse:
@@ -206,6 +230,23 @@ async def start_run(conv_id: int, body: RunBody):
     RUNS[run.id] = run
     run.start(RunRequest(**body.model_dump()))
     return _sse(run, 0)
+
+
+@app.post("/api/conversations/{conv_id}/rewind")
+def rewind(conv_id: int, body: dict):
+    """Apaga da mensagem indicada em diante (editar) ou tudo depois dela (regenerar)."""
+    message_id = int(body.get("message_id"))
+    keep = bool(body.get("keep"))  # True = mantém a própria mensagem (regenerar)
+    if active_run(conv_id):
+        raise HTTPException(409, "Espere a execução atual terminar")
+    with db.session() as s:
+        c = _get_conv(s, conv_id)
+        removed = [m for m in c.messages if (m.id > message_id if keep else m.id >= message_id)]
+        for m in removed:
+            s.delete(m)
+        s.commit()
+        c = _get_conv(s, conv_id)
+        return {"messages": [m.to_dict() for m in c.messages], "removed": len(removed)}
 
 
 @app.get("/api/conversations/{conv_id}/live")

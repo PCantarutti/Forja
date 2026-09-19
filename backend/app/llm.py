@@ -145,11 +145,29 @@ async def _openai_stream(provider, model, messages, tools, num_ctx):
 
 # ------------------------------------------------------------------ Ollama nativo
 
+def _split_parts(content) -> tuple[str, list[str]]:
+    """content parts do formato OpenAI -> (texto, imagens em base64) para a API do Ollama."""
+    if isinstance(content, str):
+        return content, []
+    text, images = [], []
+    for part in content:
+        if part.get("type") == "text":
+            text.append(part["text"])
+        elif part.get("type") == "image_url":
+            url = part["image_url"]["url"]
+            images.append(url.split(",", 1)[1] if url.startswith("data:") else url)
+    return "\n".join(text), images
+
+
 def _to_ollama(messages: list[dict]) -> list[dict]:
     names: dict[str, str] = {}
     out = []
     for m in messages:
         m = dict(m)
+        if not isinstance(m.get("content"), str):
+            m["content"], images = _split_parts(m["content"])
+            if images:
+                m["images"] = images
         if m.get("tool_calls"):
             tcs = []
             for tc in m["tool_calls"]:

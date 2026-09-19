@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 
-from .tools import REGISTRY, ToolError, execute
+from . import config
+from .tools import REGISTRY, ToolError, execute, run_tool
 
 
 class MemoryError(Exception):
@@ -55,3 +56,38 @@ async def delete(names: list[str]) -> dict:
     except ToolError as e:
         raise MemoryError(str(e)) from None
     return await read()
+
+
+# ------------------------------------------------------------------ memória do projeto
+
+MAX_PROJECT_MEMORY = 8000
+
+
+def project_path():
+    return config.WORKSPACE_ROOT / config.PROJECT_MEMORY_FILE
+
+
+def project_text() -> str:
+    """Conteúdo do arquivo de memória do projeto, truncado, ou "" se desligado/inexistente."""
+    if not config.PROJECT_MEMORY:
+        return ""
+    p = project_path()
+    if not p.is_file():
+        return ""
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return text[:MAX_PROJECT_MEMORY]
+
+
+def project_read() -> dict:
+    p = project_path()
+    return {"enabled": config.PROJECT_MEMORY, "file": config.PROJECT_MEMORY_FILE,
+            "exists": p.is_file(), "content": p.read_text(encoding="utf-8", errors="replace") if p.is_file() else "",
+            "truncated_at": MAX_PROJECT_MEMORY}
+
+
+def project_write(content: str) -> dict:
+    run_tool("write_file", {"path": config.PROJECT_MEMORY_FILE, "content": content})
+    return project_read()

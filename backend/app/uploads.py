@@ -1,0 +1,77 @@
+"""Anexos do chat.
+
+Arquivos enviados vão para `.forja/uploads/` DENTRO da pasta de trabalho, então o agente pode
+lê-los com read_file/run_command como qualquer outro arquivo. Imagens são enviadas ao modelo
+como visão (content parts `image_url` no formato OpenAI; a conversão para Ollama fica em llm.py).
+"""
+from __future__ import annotations
+
+import base64
+import mimetypes
+import re
+import time
+from pathlib import Path
+
+from . import config
+
+UPLOAD_DIR = ".forja/uploads"
+MAX_IMAGE_BYTES = 8_000_000  # imagem maior que isso não vira data URL (estoura o contexto)
+IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+
+
+def kind_of(mime: str) -> str:
+    if mime in IMAGE_TYPES:
+        return "image"
+    if mime.startswith("text/") or mime in ("application/json", "application/xml", "application/javascript"):
+        return "text"
+    return "file"
+
+
+def safe_name(name: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(name).name).strip("._") or "arquivo"
+    return name[:80]
+
+
+def save(name: str, data: bytes, mime: str | None = None) -> dict:
+    if len(data) > config.MAX_FILE_BYTES:
+        raise ValueError(f"Arquivo maior que o limite ({config.MAX_FILE_BYTES} bytes). "
+                         "Aumente em Configurações › Geral se precisar.")
+    mime = mime or mimetypes.guess_type(name)[0] or "application/octet-stream"
+    folder = config.WORKSPACE_ROOT / UPLOAD_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    filename = f"{time.strftime('%Y%m%d-%H%M%S')}-{safe_name(name)}"
+    (folder / filename).write_bytes(data)
+    return {"path": f"{UPLOAD_DIR}/{filename}", "name": name, "size": len(data), "mime": mime,
+            "kind": kind_of(mime)}
+
+
+def data_url(attachment: dict) -> str | None:
+    p = config.WORKSPACE_ROOT / attachment["path"]
+    try:
+        raw = p.read_bytes()
+    except OSError:
+        return None
+    if len(raw) > MAX_IMAGE_BYTES:
+        return None
+    return f"data:{attachment['mime']};base64,{base64.b64encode(raw).decode()}"
+
+
+def user_message(content: str, attachments: list | None) -> dict:
+    """Mensagem do usuário no formato OpenAI, com imagens como content parts."""
+    attachments = attachments or []
+    images = [a for a in attachments if a.get("kind") == "image"]
+    others = [a for a in attachments if a.get("kind") != "image"]
+    text = content
+    if others:
+        lista = ", ".join(a["path"] for a in others)
+        text += f"\n\n[Arquivos anexados na pasta de trabalho: {lista} — use read_file para ler.]"
+    if not images:
+        return {"role": "user", "content": text}
+    parts: list[dict] = [{"type": "text", "text": text}]
+    for a in images:
+        url = data_url(a)
+        if url:
+            parts.append({"type": "image_url", "image_url": {"url": url}})
+        else:
+            parts[0]["text"] += f"\n[Imagem {a['path']} não pôde ser enviada (muito grande ou ausente).]"
+    return {"role": "user", "content": parts}
