@@ -45,7 +45,14 @@ def register(tool: Tool) -> Tool:
     return tool
 
 
+def active() -> list[Tool]:
+    """Ferramentas ligadas nas Configurações (as desligadas não vão para o modelo)."""
+    return [t for t in REGISTRY.values() if t.name not in config.DISABLED_TOOLS]
+
+
 def get_tool(name: str) -> Tool:
+    if name in config.DISABLED_TOOLS:
+        raise ToolError(f"A ferramenta '{name}' está desativada nas configurações do Forja.")
     tool = REGISTRY.get(name)
     if not tool:
         raise ToolError(f"Ferramenta desconhecida: '{name}'. Disponíveis: {', '.join(REGISTRY)}")

@@ -27,4 +27,5 @@ export const Square = ({ className = "size-3.5" }: P) => (
 export const Edit = base(<><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /></>);
 export const Search = base(<><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></>);
 export const Trash = base(<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" />);
+export const Gear = base(<><circle cx="12" cy="12" r="3" /><path d="M19.4 13.5a7.7 7.7 0 0 0 0-3l1.7-1.3-2-3.4-2 .8a7.7 7.7 0 0 0-2.6-1.5L14.2 3H9.8l-.3 2.1a7.7 7.7 0 0 0-2.6 1.5l-2-.8-2 3.4 1.7 1.3a7.7 7.7 0 0 0 0 3L2.9 15l2 3.4 2-.8a7.7 7.7 0 0 0 2.6 1.5l.3 2.1h4.4l.3-2.1a7.7 7.7 0 0 0 2.6-1.5l2 .8 2-3.4z" /></>);
 export const Wrench = base(<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z" />);

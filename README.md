@@ -10,6 +10,7 @@ Ambiente de desenvolvimento pessoal com agente de IA **local**. Uma interface we
 - Execuções continuam no servidor: recarregar a página (F5) reconecta, inclusive com aprovação pendente
 - Compactação automática do contexto quando a conversa fica grande
 - Tokens, tempo e tokens/s de cada resposta
+- Tela de Configurações: provedores e chaves de API, liga/desliga de ferramentas, MCP e memória da IA
 
 ## Requisitos
 
@@ -66,6 +67,26 @@ O formato é o mesmo do Claude Desktop:
 - **HTTP** (`url`): streamable HTTP. Para um servidor rodando no Windows, use `host.docker.internal`.
 - Depois de editar, clique em **recarregar** no painel *Servidores MCP*. Não precisa reiniciar o container.
 - Servidor com erro não derruba o app. O erro aparece no painel.
+
+## Configurações
+
+Botão **Configurações** no rodapé da barra lateral. O que você muda ali fica no banco e vale na próxima requisição, sem reiniciar o container; o que não for alterado continua vindo do `.env`. "Restaurar padrões" apaga tudo o que foi salvo e volta ao `.env`.
+
+| Aba | O que dá para fazer |
+|---|---|
+| **Geral** | Instruções personalizadas (vão no fim do system prompt, sempre), `num_ctx`, máximo de iterações, limite da compactação, tamanho máximo de arquivo, timeout do shell e URL do SearXNG |
+| **Provedores** | Editar Ollama/LM Studio e **adicionar qualquer API compatível com OpenAI** (OpenRouter, OpenAI, Groq...) com chave. Botão *Testar conexão* lista os modelos |
+| **Ferramentas** | Ligar/desligar cada ferramenta, nativa ou de MCP. O que está desligado não vai no `tools` nem é citado no prompt, e recusa ser chamado |
+| **MCP** | Editar o `mcp.json` com validação, salvar e reconectar, e ver o status de cada servidor |
+| **Memória** | Ver o grafo de conhecimento do servidor MCP de memória (entidades, observações, relações), buscar e apagar entidades |
+
+**Chaves de API** ficam no SQLite e **nunca voltam para o navegador**: a tela só mostra se existe chave e os 4 últimos caracteres. Como é uso pessoal em localhost, elas são gravadas sem criptografia; quem tiver acesso ao volume `forja-data` lê o arquivo.
+
+Para acrescentar uma configuração nova no futuro: adicione a chave em `ENV_DEFAULTS` (e a regra em `NUMBERS`, se for número) em `backend/app/settings.py`, aplique em `apply()` e mostre o campo na aba certa de `frontend/src/components/Settings.tsx`.
+
+### Memória da IA
+
+A memória vem de um servidor MCP de grafo de conhecimento; qualquer servidor que exponha `read_graph` aparece na aba. O exemplo usa o `@modelcontextprotocol/server-memory` com `MEMORY_FILE_PATH=/data/memoria.json`, ou seja, dentro do volume `forja-data` — sem isso o arquivo fica dentro do container e some no próximo `--build`.
 
 ## Contexto longo: compactação
 
@@ -165,6 +186,8 @@ backend/app/
   compact.py     compactação de contexto
   llm.py         cliente OpenAI-compatível (SSE) e Ollama nativo
   agent.py       loop do agente, execução em background (Run), aprovações
+  settings.py    configurações editáveis na UI (banco + aplicação em runtime)
+  memory.py      leitura/limpeza da memória (via servidor MCP de grafo)
   main.py        rotas FastAPI
 config/          mcp.json (seu, fora do git) e mcp.example.json
 searxng/         settings.yml do SearXNG

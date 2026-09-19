@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { Settings, ToolsSent } from "../types";
 import { Chevron, Wrench } from "./icons";
 
-export type ToolInfo = { name: string; mutating: boolean; always_ask?: boolean; source?: string };
+export type ToolInfo = { name: string; description?: string; mutating: boolean; always_ask?: boolean; source?: string; enabled?: boolean };
 export type McpStatus = {
   config: string;
   config_error: string;
@@ -114,6 +114,7 @@ export default function InfoPanel(props: {
   const agent = settings.mode === "agent";
   const nextVia = !agent ? "none" : props.toolMode === "text" ? "prompt" : "native";
   const info = new Map(props.allTools.map((t) => [t.name, t]));
+  const enabled = props.allTools.filter((t) => t.enabled !== false); // desligadas em Configurações não vão
 
   return (
     <aside className="flex w-72 shrink-0 flex-col gap-3 overflow-y-auto border-l border-line bg-bg p-3 text-xs">
@@ -155,9 +156,9 @@ export default function InfoPanel(props: {
       <Section title="Próxima requisição enviará">
         <div className="mb-2 text-muted">
           via {VIA[nextVia]}
-          {agent && ` · ${props.allTools.length} ferramentas`}
+          {agent && ` · ${enabled.length} ferramentas`}
         </div>
-        <Tools list={agent ? props.allTools : []} info={info} />
+        <Tools list={agent ? enabled : []} info={info} />
         {!agent && <div className="mt-1 text-muted">Modo Chat não envia ferramentas. Troque para Agente.</div>}
       </Section>
 

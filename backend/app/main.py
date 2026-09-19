@@ -7,9 +7,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from . import config, db, llm, mcp_client
+from . import config, db, llm, mcp_client, memory, settings
 from .agent import RUNS, Run, RunRequest, active_run
 from .tools import REGISTRY
+
+
+settings.apply()
 
 
 @asynccontextmanager
@@ -26,14 +29,64 @@ app = FastAPI(title="Forja", lifespan=lifespan)
 
 @app.get("/api/config")
 def get_config():
-    return {"providers": list(config.PROVIDERS), "provider_urls": config.PROVIDERS,
+    return {"providers": [{"id": p["id"], "name": p["name"]} for p in config.PROVIDERS.values()],
             "num_ctx": config.NUM_CTX, "max_iterations": config.MAX_ITERATIONS, "workspace": "/workspace"}
 
 
 @app.get("/api/tools")
 def get_tools():
     return [{"name": t.name, "description": t.description, "mutating": t.mutating, "always_ask": t.always_ask,
-             "source": t.source} for t in REGISTRY.values()]
+             "source": t.source, "enabled": t.name not in config.DISABLED_TOOLS} for t in REGISTRY.values()]
+
+
+# ------------------------------------------------------------------ configurações
+
+@app.get("/api/settings")
+def get_settings():
+    return settings.public()
+
+
+@app.put("/api/settings")
+def put_settings(patch: dict):
+    try:
+        return settings.update(patch)
+    except settings.SettingsError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/settings/reset")
+def reset_settings(body: dict | None = None):
+    return settings.reset((body or {}).get("keys"))
+
+
+@app.get("/api/mcp/config")
+def get_mcp_config():
+    return {"path": str(config.MCP_CONFIG), "text": settings.read_mcp_config()}
+
+
+@app.put("/api/mcp/config")
+async def put_mcp_config(body: dict):
+    if any(not r.finished for r in RUNS.values()):
+        raise HTTPException(409, "Espere a execução atual terminar")
+    try:
+        settings.write_mcp_config(body.get("text", ""))
+    except settings.SettingsError as e:
+        raise HTTPException(400, str(e))
+    await mcp_client.start()
+    return mcp_client.status()
+
+
+@app.get("/api/memory")
+async def get_memory():
+    return await memory.read()
+
+
+@app.post("/api/memory/delete")
+async def delete_memory(body: dict):
+    try:
+        return await memory.delete(body.get("names") or [])
+    except memory.MemoryError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/mcp")

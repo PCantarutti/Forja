@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, streamSSE } from "./api";
 import Sidebar from "./components/Sidebar";
 import InfoPanel, { type McpStatus, type ToolInfo } from "./components/InfoPanel";
+import SettingsDialog from "./components/Settings";
 import { CopyButton, EventNotice, Markdown, StatsRow, Thinking, ToolBlock, type TurnStats } from "./components/MessageView";
 import { ArrowUp, ChevronDown, Cube, Square } from "./components/icons";
 import type { Approval, Conversation, Message, Settings, Stats, ToolsSent } from "./types";
 
-type Config = { providers: string[]; num_ctx: number };
+type Config = { providers: { id: string; name: string }[]; num_ctx: number };
 type Live = {
   messages: Message[];
   run: { run_id: string; cursor: number; draft: { content: string; thinking: string } | null; sent: ToolsSent | null; approvals: { call: { id: string }; preview: any }[] } | null;
@@ -38,7 +39,8 @@ function aggregate(list: Stats[]): TurnStats {
 const fmt = (n: number) => n.toLocaleString("pt-BR");
 
 export default function App() {
-  const [config, setConfig] = useState<Config>({ providers: ["ollama", "lmstudio"], num_ctx: 32768 });
+  const [config, setConfig] = useState<Config>({ providers: [], num_ctx: 32768 });
+  const [showSettings, setShowSettings] = useState(false);
   const [allTools, setAllTools] = useState<ToolInfo[]>([]);
   const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [settings, setSettings] = useState<Settings>(loadSettings);
@@ -119,6 +121,7 @@ export default function App() {
   }
 
   function refreshTools() {
+    api.get<Config>("/config").then(setConfig).catch(() => {});
     api.get<ToolInfo[]>("/tools").then(setAllTools).catch(() => {});
     api.get<McpStatus>("/mcp").then(setMcp).catch(() => {});
   }
@@ -333,7 +336,11 @@ export default function App() {
         onSelect={openConversation}
         onNew={newConversation}
         onDelete={deleteConversation}
+        onSettings={() => setShowSettings(true)}
       />
+      {showSettings && (
+        <SettingsDialog onClose={() => setShowSettings(false)} tools={allTools} mcp={mcp} onChanged={refreshTools} />
+      )}
 
       <main className="flex min-w-0 flex-1 flex-col bg-bg">
         <header className="flex items-center gap-1 px-4 py-2.5">
@@ -344,8 +351,8 @@ export default function App() {
               className="appearance-none bg-transparent py-1 pr-6 pl-2 text-sm hover:text-fg focus:outline-none"
             >
               {config.providers.map((p) => (
-                <option key={p} value={p} className="bg-surface">
-                  {p === "lmstudio" ? "LM Studio" : p === "ollama" ? "Ollama" : p}
+                <option key={p.id} value={p.id} className="bg-surface">
+                  {p.name}
                 </option>
               ))}
             </select>

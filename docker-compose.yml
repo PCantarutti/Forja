@@ -19,7 +19,7 @@ services:
     volumes:
       - forja-data:/data
       - ${WORKSPACE_PATH:?defina WORKSPACE_PATH no .env}:/workspace
-      - ./config:/config:ro
+      - ./config:/config
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

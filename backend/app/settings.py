@@ -1,0 +1,172 @@
+"""Configurações editáveis na UI.
+
+Só o que o usuário muda é gravado (tabela app_settings); o resto continua vindo do .env.
+`apply()` escreve os valores em `config`, então mudanças valem na próxima requisição, sem
+reiniciar o container. Chaves de API nunca voltam para o frontend: só um "tem chave/final".
+"""
+from __future__ import annotations
+
+import copy
+import json
+import re
+from typing import Any
+
+from . import config, db
+
+ENV_DEFAULTS: dict[str, Any] = {
+    "providers": [copy.deepcopy(p) for p in config.PROVIDERS.values()],
+    "num_ctx": config.NUM_CTX,
+    "max_iterations": config.MAX_ITERATIONS,
+    "max_file_bytes": config.MAX_FILE_BYTES,
+    "shell_timeout_max": config.SHELL_TIMEOUT_MAX,
+    "compact_at": config.COMPACT_AT,
+    "searxng_url": config.SEARXNG_URL,
+    "disabled_tools": [],
+    "custom_instructions": "",
+}
+
+NUMBERS = {  # chave: (tipo, mínimo, máximo)
+    "num_ctx": (int, 1024, 4_194_304),
+    "max_iterations": (int, 1, 200),
+    "max_file_bytes": (int, 1_000, 200_000_000),
+    "shell_timeout_max": (int, 5, 3_600),
+    "compact_at": (float, 0.3, 0.95),
+}
+TYPES = ("ollama", "lmstudio", "openai")
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
+
+
+class SettingsError(ValueError):
+    """Valor inválido vindo da UI."""
+
+
+def load() -> dict:
+    values = copy.deepcopy(ENV_DEFAULTS)
+    with db.session() as s:
+        for row in s.query(db.AppSetting).all():
+            values[row.key] = row.value
+    return values
+
+
+def apply(values: dict | None = None) -> dict:
+    values = values or load()
+    config.PROVIDERS = {p["id"]: p for p in values["providers"]}
+    config.NUM_CTX = int(values["num_ctx"])
+    config.MAX_ITERATIONS = int(values["max_iterations"])
+    config.MAX_FILE_BYTES = int(values["max_file_bytes"])
+    config.SHELL_TIMEOUT_MAX = int(values["shell_timeout_max"])
+    config.COMPACT_AT = float(values["compact_at"])
+    config.SEARXNG_URL = values["searxng_url"]
+    config.DISABLED_TOOLS = set(values["disabled_tools"])
+    config.CUSTOM_INSTRUCTIONS = values["custom_instructions"]
+    return values
+
+
+def public(values: dict | None = None) -> dict:
+    """Mesmos valores, sem as chaves de API."""
+    values = copy.deepcopy(values or load())
+    for p in values["providers"]:
+        key = p.pop("api_key", "") or ""
+        p["has_api_key"] = bool(key)
+        p["api_key_hint"] = f"…{key[-4:]}" if key else ""
+    return values
+
+
+# ------------------------------------------------------------------ validação
+
+def _providers(new: list, old: list) -> list:
+    if not isinstance(new, list) or not new:
+        raise SettingsError("Defina pelo menos um provedor.")
+    previous = {p["id"]: p for p in old}
+    out, seen = [], set()
+    for p in new:
+        pid = str(p.get("id", "")).strip().lower()
+        if not ID_RE.match(pid):
+            raise SettingsError(f"Id inválido: '{pid}'. Use letras minúsculas, números, '-' ou '_'.")
+        if pid in seen:
+            raise SettingsError(f"Id repetido: '{pid}'.")
+        seen.add(pid)
+        url = str(p.get("url", "")).strip().rstrip("/")
+        if not url.startswith(("http://", "https://")):
+            raise SettingsError(f"URL inválida em '{pid}': precisa começar com http:// ou https://")
+        if p.get("type") not in TYPES:
+            raise SettingsError(f"Tipo inválido em '{pid}': use {', '.join(TYPES)}.")
+        # api_key ausente = mantém a atual; "" = remove.
+        key = p.get("api_key")
+        if key is None:
+            key = previous.get(pid, {}).get("api_key", "")
+        out.append({"id": pid, "name": str(p.get("name") or pid)[:60], "type": p["type"], "url": url,
+                    "api_key": str(key)})
+    return out
+
+
+def validate(patch: dict, current: dict) -> dict:
+    values = copy.deepcopy(current)
+    for key, raw in patch.items():
+        if key not in ENV_DEFAULTS:
+            raise SettingsError(f"Configuração desconhecida: '{key}'.")
+        if key == "providers":
+            values[key] = _providers(raw, current["providers"])
+        elif key in NUMBERS:
+            cast, lo, hi = NUMBERS[key]
+            try:
+                v = cast(raw)
+            except (TypeError, ValueError):
+                raise SettingsError(f"'{key}' precisa ser um número.") from None
+            if not lo <= v <= hi:
+                raise SettingsError(f"'{key}' deve ficar entre {lo} e {hi}.")
+            values[key] = v
+        elif key == "disabled_tools":
+            if not isinstance(raw, list):
+                raise SettingsError("'disabled_tools' precisa ser uma lista.")
+            values[key] = sorted({str(x) for x in raw})
+        elif key == "searxng_url":
+            url = str(raw).strip().rstrip("/")
+            if not url.startswith(("http://", "https://")):
+                raise SettingsError("URL do SearXNG precisa começar com http:// ou https://")
+            values[key] = url
+        else:
+            values[key] = str(raw)[:20_000]
+    return values
+
+
+def update(patch: dict) -> dict:
+    values = validate(patch, load())
+    with db.session() as s:
+        for key in patch:
+            s.merge(db.AppSetting(key=key, value=values[key]))
+        s.commit()
+    apply(values)
+    return public(values)
+
+
+def reset(keys: list[str] | None = None) -> dict:
+    with db.session() as s:
+        q = s.query(db.AppSetting)
+        if keys:
+            q = q.filter(db.AppSetting.key.in_(keys))
+        q.delete(synchronize_session=False)
+        s.commit()
+    return public(apply())
+
+
+# ------------------------------------------------------------------ mcp.json
+
+def read_mcp_config() -> str:
+    if not config.MCP_CONFIG.exists():
+        return json.dumps({"mcpServers": {}}, indent=2)
+    return config.MCP_CONFIG.read_text(encoding="utf-8")
+
+
+def write_mcp_config(text: str) -> None:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise SettingsError(f"JSON inválido: {e}") from None
+    if not isinstance(data.get("mcpServers", {}), dict):
+        raise SettingsError("'mcpServers' precisa ser um objeto.")
+    try:
+        config.MCP_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        config.MCP_CONFIG.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        raise SettingsError(f"Não consegui gravar {config.MCP_CONFIG}: {e}") from None

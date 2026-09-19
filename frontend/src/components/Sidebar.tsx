@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Conversation } from "../types";
-import { Edit, Search, Trash } from "./icons";
+import { Edit, Gear, Search, Trash } from "./icons";
 
 export default function Sidebar(props: {
   conversations: Conversation[];
@@ -8,6 +8,7 @@ export default function Sidebar(props: {
   onSelect: (id: number) => void;
   onNew: () => void;
   onDelete: (id: number) => void;
+  onSettings: () => void;
 }) {
   const [q, setQ] = useState("");
   const list = props.conversations.filter((c) => c.title.toLowerCase().includes(q.toLowerCase()));
@@ -30,7 +31,7 @@ export default function Sidebar(props: {
           className="w-full bg-transparent text-fg placeholder:text-muted focus:outline-none"
         />
       </label>
-      <nav className="flex-1 overflow-y-auto px-2 pb-3">
+      <nav className="flex-1 overflow-y-auto px-2 pb-1">
         {list.map((c) => (
           <div
             key={c.id}
@@ -53,6 +54,12 @@ export default function Sidebar(props: {
           </div>
         ))}
       </nav>
+      <button
+        onClick={props.onSettings}
+        className="m-2 flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted hover:bg-surface hover:text-fg"
+      >
+        <Gear /> Configurações
+      </button>
     </aside>
   );
 }

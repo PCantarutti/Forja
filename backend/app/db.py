@@ -52,6 +52,13 @@ class ModelSetting(Base):
     tool_mode: Mapped[str] = mapped_column(String(10), default="auto")  # native | text | auto
 
 
+class AppSetting(Base):
+    """Configurações editadas na UI. Só existem aqui as chaves que o usuário mudou."""
+    __tablename__ = "app_settings"
+    key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    value: Mapped[object] = mapped_column(JSON)
+
+
 Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 engine = create_engine(f"sqlite:///{config.DB_PATH}", connect_args={"check_same_thread": False})
 Base.metadata.create_all(engine)

@@ -27,10 +27,19 @@ class LLMError(Exception):
         self.status = status
 
 
-def base_url(provider: str) -> str:
+def spec(provider: str) -> dict:
     if provider not in config.PROVIDERS:
         raise LLMError(f"Provider desconhecido: {provider}")
-    return config.PROVIDERS[provider].rstrip("/")
+    return config.PROVIDERS[provider]
+
+
+def base_url(provider: str) -> str:
+    return spec(provider)["url"].rstrip("/")
+
+
+def headers(provider: str) -> dict:
+    key = spec(provider).get("api_key")
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 def _conn_error(provider: str, e: Exception) -> LLMError:
@@ -40,13 +49,13 @@ def _conn_error(provider: str, e: Exception) -> LLMError:
     hint = {
         "ollama": "Ollama está rodando? Ele precisa escutar em 0.0.0.0 (OLLAMA_HOST=0.0.0.0) para o Docker alcançar.",
         "lmstudio": "LM Studio está com o servidor ligado e 'Serve on Local Network' ativo?",
-    }.get(provider, "")
+    }.get(spec(provider)["type"], "Confira a URL em Configurações › Provedores.")
     return LLMError(f"Não foi possível conectar em {base_url(provider)}: {e.__class__.__name__}. {hint}")
 
 
 async def list_models(provider: str) -> list[str]:
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
+        async with httpx.AsyncClient(timeout=10, headers=headers(provider)) as c:
             r = await c.get(f"{base_url(provider)}/models")
     except httpx.HTTPError as e:
         raise _conn_error(provider, e) from e
@@ -57,9 +66,10 @@ async def list_models(provider: str) -> list[str]:
 
 async def context_limit(provider: str, model: str, num_ctx: int) -> int | None:
     """Tamanho real da janela de contexto. Ollama: o num_ctx que enviamos. LM Studio: o carregado."""
-    if provider == "ollama":
+    kind = spec(provider)["type"]
+    if kind == "ollama":
         return num_ctx
-    if provider == "lmstudio":
+    if kind == "lmstudio":
         try:
             async with httpx.AsyncClient(timeout=5) as c:
                 r = await c.get(f"{base_url(provider).removesuffix('/v1')}/api/v0/models/{model}")
@@ -77,7 +87,7 @@ def _raise_for(provider: str, status: int, body: bytes) -> None:
 
 async def chat_stream(provider: str, model: str, messages: list[dict], tools: list[dict] | None,
                       num_ctx: int) -> AsyncIterator[tuple[str, object]]:
-    impl = _ollama_stream if provider == "ollama" else _openai_stream
+    impl = _ollama_stream if spec(provider)["type"] == "ollama" else _openai_stream
     try:
         async for ev in impl(provider, model, messages, tools, num_ctx):
             yield ev
@@ -94,7 +104,7 @@ async def _openai_stream(provider, model, messages, tools, num_ctx):
         body["tools"] = tools
     calls: dict[int, dict] = {}
     prompt_tokens = completion_tokens = None
-    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+    async with httpx.AsyncClient(timeout=TIMEOUT, headers=headers(provider)) as c:
         async with c.stream("POST", f"{base_url(provider)}/chat/completions", json=body) as r:
             if r.status_code >= 400:
                 _raise_for(provider, r.status_code, await r.aread())
@@ -161,7 +171,7 @@ async def _ollama_stream(provider, model, messages, tools, num_ctx):
     if tools:
         body["tools"] = tools
     calls, prompt_tokens, completion_tokens = [], None, None
-    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+    async with httpx.AsyncClient(timeout=TIMEOUT, headers=headers(provider)) as c:
         async with c.stream("POST", f"{host}/api/chat", json=body) as r:
             if r.status_code >= 400:
                 _raise_for(provider, r.status_code, await r.aread())
