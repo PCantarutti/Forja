@@ -7,6 +7,7 @@ import RightPanel, { type RightTab } from "./components/RightPanel";
 import SettingsDialog from "./components/Settings";
 import FolderPicker, { folderName } from "./components/FolderPicker";
 import ModelPicker from "./components/ModelPicker";
+import { LogoMark } from "./components/Logo";
 import {
   Attachments,
   CopyButton,
@@ -664,7 +665,7 @@ export default function App() {
           <div className="mx-auto max-w-3xl px-5 py-6">
             {!messages.length && !draft && (
               <div className="mt-[22vh]">
-                <div className="mb-4 grid size-11 place-items-center rounded-full bg-fg text-xl font-bold text-black">F</div>
+                <LogoMark className="mb-4 size-14 text-fg" title="Forja" />
                 <div className="text-3xl font-semibold">Olá!</div>
                 <div className="text-3xl text-faint">Como posso ajudar hoje?</div>
                 <div className="mt-4 text-sm text-muted">

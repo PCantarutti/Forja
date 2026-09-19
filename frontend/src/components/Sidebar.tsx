@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Conversation } from "../types";
+import { LogoMark, LogoText } from "./Logo";
 import { Edit, Gear, Search, Trash } from "./icons";
 
 export default function Sidebar(props: {
@@ -16,8 +17,8 @@ export default function Sidebar(props: {
   return (
     <aside className="flex w-64 shrink-0 flex-col bg-side">
       <div className="flex items-center gap-2.5 px-4 pt-4 pb-2">
-        <div className="grid size-7 place-items-center rounded-full bg-fg text-sm font-bold text-black">F</div>
-        <span className="font-medium">Forja</span>
+        <LogoMark className="size-7 shrink-0 text-fg" />
+        <LogoText className="h-3.5 text-fg" />
         <button onClick={props.onNew} title="Nova conversa" className="ml-auto rounded-lg p-1.5 text-muted hover:bg-raised hover:text-fg">
           <Edit />
         </button>
