@@ -3,7 +3,7 @@ export type ToolCall = { id: string; name: string; arguments: Record<string, unk
 export type Preview = { kind: "diff" | "new" | "command"; path: string; text: string };
 
 /** Aprovação pendente: preview é null para ferramentas sem preview (ex.: MCP); sent = decisão já enviada. */
-export type Approval = { preview: Preview | null; suggest?: string; tool?: string; sent?: boolean };
+export type Approval = { preview: Preview | null; suggest?: string; tool?: string; plan?: string; sent?: boolean };
 
 export type Attachment = { path: string; name: string; size: number; mime: string; kind: "image" | "text" | "file" };
 
@@ -29,6 +29,10 @@ export type ToolsSent = {
   via: "native" | "prompt" | "none";
   num_ctx: number | null;
   tools: { name: string; mutating: boolean }[];
+  permission?: string;
+  permission_label?: string;
+  effort?: string;
+  max_iterations?: number;
   /** Capacidades efetivas do modelo nesta requisição (ex.: "vision") e de onde veio a informação. */
   capabilities?: string[];
   capabilities_detected?: string[] | null;
@@ -55,8 +59,8 @@ export type BrowserState = {
 export type Settings = {
   provider: string;
   model: string;
-  mode: "chat" | "agent";
-  writePolicy: "ask" | "auto";
+  permission: "auto" | "manual" | "edits" | "plan" | "bypass";
+  effort: "baixo" | "medio" | "alto" | "maximo";
 };
 
 export type Stats = {

@@ -2,7 +2,9 @@
 
 Ambiente de desenvolvimento pessoal com agente de IA **local**. Uma interface web de chat onde um modelo rodando no seu PC (Ollama ou LM Studio) lê e escreve arquivos numa pasta de trabalho, sempre com aprovação visível e sem ferramentas escondidas.
 
-- **Chat** (sem ferramentas) ou **Agente** (arquivos, shell, busca web, navegador e servidores MCP)
+- **Chat** e **Agente** em seções separadas (seletor no canto superior esquerdo, barra de conversas recolhível)
+- **Modos de permissão** como no Claude: Automático, Manual, Aceitar edições, Plano e Ignorar permissões
+- **Esforço** (Baixo a Máximo): controla o raciocínio do modelo e quantos passos o agente pode dar
 - **Navegador integrado**: o agente abre rotas, clica, lê o DOM e tira screenshot; você assiste ao vivo na aba *Navegador* e pode interagir também
 - Tool calling nativo, com fallback para chamadas escritas em texto (`<tool_call>`, blocos ```json e XML)
 - Card de aprovação com diff antes de qualquer escrita
@@ -39,12 +41,12 @@ Para atualizar depois de mudar o código, rode `docker compose up -d --build` de
 | Ferramenta | O que faz | Aprovação |
 |---|---|---|
 | `list_dir`, `read_file` | Lê a pasta de trabalho | não |
-| `write_file`, `edit_file` | Cria e edita arquivos (card com diff) | conforme **Escrita** (perguntar/automática) |
+| `write_file`, `edit_file` | Cria e edita arquivos (card com diff) | conforme o **modo de permissão** |
 | `run_command` | `bash` no container Linux, com cwd em `/workspace` (python, git, node, uv) | **sempre**, mesmo com escrita automática |
 | `web_search` | Busca via SearXNG local (sem chave, sem conta) | não |
 | `fetch_url` | Baixa uma página e devolve o texto. Bloqueia endereços da rede local. | não |
 | `browser_navigate`, `browser_read`, `browser_console` | Abre uma URL no navegador integrado, lê a página como árvore de acessibilidade (com refs `eN`) e o console | não |
-| `browser_click`, `browser_type`, `browser_upload` | Clica / preenche um campo / anexa arquivo da pasta de trabalho a um input[type=file] (por ref ou seletor) | conforme **Escrita** |
+| `browser_click`, `browser_type`, `browser_upload` | Clica / preenche um campo / anexa arquivo da pasta de trabalho a um input[type=file] (por ref ou seletor) | conforme o **modo de permissão** |
 | `browser_tabs` | Lista, abre, troca ou fecha abas da sessão | não |
 | `browser_eval` | Executa JavaScript na página | **sempre** |
 | `browser_screenshot` | Screenshot da página: aparece no chat para você; vai ao modelo como imagem **só se ele tiver visão** | não |
@@ -68,8 +70,43 @@ Um Chromium (Playwright, `chromium-headless-shell`) roda dentro do container do 
 - **Endereços**: um servidor subido por `run_command` fica em `http://localhost:PORTA` (mesmo container). Um app rodando no Windows fica em `http://host.docker.internal:PORTA`. Só `http(s)`; `file:` e afins são bloqueados.
 - **Servidor de desenvolvimento** sem travar o `run_command`: `setsid nohup npm run dev > /tmp/dev.log 2>&1 &` e depois `tail /tmp/dev.log`. O system prompt já ensina isso ao modelo.
 - **Visão**: `browser_screenshot` sempre funciona (o print aparece no chat para você), mas a imagem só entra no contexto do modelo se ele tiver visão; sem visão ele recebe um aviso e valida pelo `browser_read`. O Forja detecta no Ollama (`/api/show` → `capabilities`) e no LM Studio (`type: vlm`); para outros providers, ou para forçar, use **Visão do modelo** (auto/sim/não) no painel Info. A imagem entra no contexto como mensagem do usuário; só as 2 últimas ficam como imagem, as anteriores viram texto.
-- **Permissões**: `browser_click`/`browser_type` seguem a política de escrita (perguntar/automática) e aceitam regras em *Permissões* (ex.: `browser_*`). `browser_eval` sempre pergunta. Conteúdo lido da página chega ao modelo marcado como dado não confiável.
+- **Permissões**: `browser_click`/`browser_type` seguem o modo de permissão e aceitam regras em *Permissões* (ex.: `browser_*`). `browser_eval` sempre pergunta. Conteúdo lido da página chega ao modelo marcado como dado não confiável.
 - O perfil do navegador é limpo e some ao fechar a sessão. Não peça ao agente para entrar em contas pessoais.
+
+## Seções: Chat e Agente
+
+O seletor no canto superior esquerdo troca entre as duas seções, e cada uma lista só as suas conversas. O botão ao lado esconde e mostra a barra de conversas.
+
+- **Chat**: conversa comum. Nenhuma ferramenta é enviada ao modelo e não há pasta de trabalho.
+- **Agente**: ferramentas, pasta de trabalho, permissões e checkpoints.
+
+O tipo é da conversa, não um interruptor: abrir uma conversa antiga leva você para a seção dela. Conversas criadas antes desta versão foram classificadas automaticamente (quem usou ferramenta virou Agente).
+
+## Modos de permissão
+
+No rodapé do campo de mensagem, no Agente. `Shift+Tab` alterna, e os números 1 a 5 escolhem com o menu aberto.
+
+| Modo | O que passa sem perguntar |
+|---|---|
+| **Automático** | Edições de arquivo e ações na página (clique, digitar). Shell, JavaScript e MCP perguntam |
+| **Manual** | Nada. Toda alteração mostra o card |
+| **Aceitar edições** | Só `write_file` e `edit_file`. O resto pergunta |
+| **Plano** | Nada é alterado: o agente só lê e propõe um plano |
+| **Ignorar permissões** | Tudo, inclusive shell e JavaScript. Aparece um aviso fixo no rodapé |
+
+As regras de *Configurações › Permissões* valem em todos os modos (menos Plano) e, como sempre, o bloco da ferramenta mostra o motivo de algo ter passado sem perguntar.
+
+### Modo Plano
+
+O agente recebe **só as ferramentas de leitura** mais uma, `exit_plan_mode`, e o painel lateral mostra exatamente isso. Ele investiga, apresenta o plano num card e espera: você **aprova escolhendo o modo de execução** (por padrão Aceitar edições) ou pede mudanças, e ele replaneja. Depois de aprovado, as ferramentas de escrita voltam e o Forja avisa na conversa qual modo passou a valer.
+
+## Esforço
+
+Baixo, Médio, Alto ou Máximo, ao lado do modo. Mexe em três coisas:
+
+- **Raciocínio do modelo**: `think` no Ollama (só em modelo que declara suporte), `reasoning_effort` nos modelos de raciocínio via API OpenAI (gpt-oss, gpt-5, o-series, deepseek-r) e o interruptor `/no_think` nos Qwen quando o esforço é baixo.
+- **Passos**: multiplica o limite de iterações (Baixo 0,4× · Médio 1× · Alto 1,6× · Máximo 3× de `MAX_ITERATIONS`).
+- **Instrução**: uma linha no system prompt pedindo mais objetividade ou mais verificação.
 
 ## Conversa: anexos, editar e regenerar
 

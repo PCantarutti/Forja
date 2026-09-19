@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from . import checkpoints, config, db, llm, mcp_client, memory, settings, subagents, uploads, workspace
+from . import checkpoints, config, db, llm, mcp_client, memory, policy, settings, subagents, uploads, workspace
 from .agent import RUNS, Run, RunRequest, active_run
 from .browser import MANAGER
 from .tools import REGISTRY, ToolError
@@ -332,15 +332,18 @@ async def browser_close(conv: str = "0"):
 # ------------------------------------------------------------------ conversas
 
 def _conv_dict(c: db.Conversation) -> dict:
-    return {"id": c.id, "title": c.title, "updated_at": c.updated_at.isoformat(),
+    return {"id": c.id, "title": c.title, "updated_at": c.updated_at.isoformat(), "kind": c.kind or "agent",
             "workspace": c.workspace, "workspace_label": workspace.label(c.workspace)}
 
 
 @app.get("/api/conversations")
-def list_conversations():
+def list_conversations(kind: str | None = None):
+    """Sem `kind`, todas; com `kind`, só as da seção (chat ou agent)."""
     with db.session() as s:
-        rows = s.scalars(select(db.Conversation).order_by(db.Conversation.updated_at.desc())).all()
-        return [_conv_dict(c) for c in rows]
+        q = select(db.Conversation).order_by(db.Conversation.updated_at.desc())
+        if kind:
+            q = q.where(db.Conversation.kind == kind)
+        return [_conv_dict(c) for c in s.scalars(q).all()]
 
 
 @app.post("/api/conversations")
@@ -352,8 +355,11 @@ def create_conversation(body: dict | None = None):
             folder = workspace.normalize(folder)
         except workspace.WorkspaceError as e:
             raise HTTPException(400, str(e))
+    kind = (body or {}).get("kind") or "agent"
+    if kind not in ("chat", "agent"):
+        raise HTTPException(400, "kind deve ser chat ou agent")
     with db.session() as s:
-        c = db.Conversation(workspace=folder)
+        c = db.Conversation(workspace=folder, kind=kind)
         s.add(c)
         s.commit()
         return _conv_dict(c)
@@ -420,8 +426,8 @@ class RunBody(BaseModel):
     content: str | None = None  # None = continua de onde parou (regenerar ou mensagem editada)
     provider: str
     model: str
-    mode: str = "agent"
-    write_policy: str = "ask"
+    permission: str = "manual"  # auto | manual | edits | plan | bypass
+    effort: str = "medio"       # baixo | medio | alto | maximo
     attachments: list | None = None
 
 
@@ -461,13 +467,17 @@ def _sse(run: Run, cursor: int) -> StreamingResponse:
 async def start_run(conv_id: int, body: RunBody):
     with db.session() as s:
         _get_conv(s, conv_id)
-    if body.mode not in ("chat", "agent") or body.write_policy not in ("ask", "auto"):
-        raise HTTPException(400, "mode deve ser chat|agent e write_policy ask|auto")
+    if body.permission not in policy.MODES:
+        raise HTTPException(400, f"permission deve ser um de {', '.join(policy.MODES)}")
+    if body.effort not in ("baixo", "medio", "alto", "maximo"):
+        raise HTTPException(400, "effort deve ser baixo, medio, alto ou maximo")
     if active_run(conv_id):
         raise HTTPException(409, "Esta conversa já tem uma execução em andamento")
+    with db.session() as s:
+        kind = _get_conv(s, conv_id).kind or "agent"  # o tipo é da conversa, não do pedido
     run = Run(conv_id)
     RUNS[run.id] = run
-    run.start(RunRequest(**body.model_dump()))
+    run.start(RunRequest(mode=kind, **body.model_dump()))
     return _sse(run, 0)
 
 
@@ -510,6 +520,8 @@ def stream_run(run_id: str, cursor: int = 0):
 class ApproveBody(BaseModel):
     call_id: str
     approved: bool
+    mode: str | None = None       # modo escolhido ao aprovar um plano
+    feedback: str | None = None   # o que mudar no plano, quando não aprovado
 
 
 def _get_run(run_id: str) -> Run:
@@ -521,7 +533,8 @@ def _get_run(run_id: str) -> Run:
 
 @app.post("/api/runs/{run_id}/approve")
 def approve(run_id: str, body: ApproveBody):
-    if not _get_run(run_id).resolve(body.call_id, body.approved):
+    decision = {"approved": body.approved, "mode": body.mode, "feedback": body.feedback}
+    if not _get_run(run_id).resolve(body.call_id, decision):
         raise HTTPException(409, "Nenhuma aprovação pendente para esta chamada")
     return {"ok": True}
 

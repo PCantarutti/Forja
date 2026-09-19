@@ -9,6 +9,10 @@ export type McpStatus = {
   servers: { name: string; status: string; error: string; tools: string[]; transport: string }[];
 };
 
+const PERMISSION_LABEL: Record<string, string> = {
+  auto: "Automático", manual: "Manual", edits: "Aceitar edições", plan: "Plano", bypass: "Ignorar permissões",
+};
+
 const VIA: Record<string, string> = {
   native: "nativo (campo tools da API)",
   prompt: "texto (schema no system prompt)",
@@ -120,9 +124,10 @@ export default function InfoPanel(props: {
   mcp: McpStatus | null;
   onReloadMcp: () => void;
   usage: { model: string; tokens: number; seconds: number; tps: number | null }[];
+  section: "chat" | "agent";
 }) {
   const { settings, sent, mcp } = props;
-  const agent = settings.mode === "agent";
+  const agent = props.section === "agent";
   const nextVia = !agent ? "none" : props.toolMode === "text" ? "prompt" : "native";
   const info = new Map(props.allTools.map((t) => [t.name, t]));
   const enabled = props.allTools.filter((t) => t.enabled !== false); // desligadas em Configurações não vão
@@ -137,12 +142,16 @@ export default function InfoPanel(props: {
   return (
     <aside className="flex h-full flex-col gap-3 overflow-y-auto bg-bg p-3 text-xs">
       <Section title="Estado">
-        <Row k="Modo">{agent ? "Agente" : "Chat"}</Row>
+        <Row k="Seção">{agent ? "Agente" : "Chat"}</Row>
         <Row k="Provider">{settings.provider}</Row>
         <Row k="Modelo">
           <span title={settings.model}>{settings.model || "—"}</span>
         </Row>
-        <Row k="Escrita">{settings.writePolicy === "ask" ? "perguntar" : "automática"}</Row>
+        {agent && <Row k="Permissão">{sent?.permission_label ?? PERMISSION_LABEL[settings.permission]}</Row>}
+        <Row k="Esforço">
+          {settings.effort}
+          {sent?.max_iterations ? ` · até ${sent.max_iterations} passos` : ""}
+        </Row>
         <Row k="Visão">{visionLabel}</Row>
         {sent && sameModel && (
           <Row k="Capacidades">

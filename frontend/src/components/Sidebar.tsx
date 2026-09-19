@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Conversation } from "../types";
 import { LogoMark, LogoText } from "./Logo";
+import { SectionTabs, type Section } from "./Controls";
 import { Edit, Gear, Search, Trash } from "./icons";
 
 export default function Sidebar(props: {
@@ -10,16 +11,22 @@ export default function Sidebar(props: {
   onNew: () => void;
   onDelete: (id: number) => void;
   onSettings: () => void;
+  section: Section;
+  onSection: (s: Section) => void;
+  onHide: () => void;
 }) {
   const [q, setQ] = useState("");
   const list = props.conversations.filter((c) => c.title.toLowerCase().includes(q.toLowerCase()));
 
   return (
     <aside className="flex w-64 shrink-0 flex-col bg-side">
-      <div className="flex items-center gap-2.5 px-4 pt-4 pb-2">
+      <div className="flex items-center gap-2 px-3 pt-3 pb-1">
+        <SectionTabs value={props.section} onChange={props.onSection} sidebarHidden={false} onToggleSidebar={props.onHide} />
+      </div>
+      <div className="flex items-center gap-2.5 px-4 pt-2 pb-2">
         <LogoMark className="size-7 shrink-0 text-fg" />
         <LogoText className="h-3.5 text-fg" />
-        <button onClick={props.onNew} title="Nova conversa" className="ml-auto rounded-lg p-1.5 text-muted hover:bg-raised hover:text-fg">
+        <button onClick={props.onNew} title={props.section === "chat" ? "Nova conversa de chat" : "Nova conversa do agente"} className="ml-auto rounded-lg p-1.5 text-muted hover:bg-raised hover:text-fg">
           <Edit />
         </button>
       </div>

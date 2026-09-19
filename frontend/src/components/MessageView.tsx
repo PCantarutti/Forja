@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import type { Approval, Attachment, Message, Preview, ToolCall } from "../types";
-import { Brain, Check, Chevron, Split, Clock, Copy, Cube, Gauge, Shield, Tokens, X } from "./icons";
+import { Brain, Check, Chevron, Clipboard, Split, Clock, Copy, Cube, Gauge, Shield, Tokens, X } from "./icons";
 
 export function Markdown({ text }: { text: string }) {
   return (
@@ -388,6 +388,86 @@ export function SubagentSteps(props: {
           onDecide={(ok, always) => props.onDecide(st.call.id, ok, always)}
         />
       ))}
+    </div>
+  );
+}
+
+
+/** Plano proposto no modo Plano: aprovar (escolhendo o modo de execução) ou pedir mudanças. */
+export function PlanCard(props: {
+  plan: string;
+  done?: Message; // resultado, quando o turno já terminou
+  onDecide: (approved: boolean, mode?: string, feedback?: string) => void;
+}) {
+  const [mode, setMode] = useState("edits");
+  const [feedback, setFeedback] = useState("");
+  const [asking, setAsking] = useState(false);
+  const decided = props.done?.status;
+
+  return (
+    <div className={`my-3 overflow-hidden rounded-2xl border ${decided ? "border-line" : "border-sky-500/50"} bg-surface`}>
+      <div className="flex items-center gap-2 border-b border-line px-4 py-2.5 text-sm">
+        <Clipboard className="size-4 text-sky-300" />
+        <span className="text-fg">Plano proposto</span>
+        {decided && (
+          <span className={`ml-auto text-xs ${decided === "ok" ? "text-emerald-400" : "text-orange-400"}`}>
+            ● {decided === "ok" ? `aprovado (${props.done?.meta?.approved_mode ?? "executando"})` : "ajustes pedidos"}
+          </span>
+        )}
+      </div>
+      <div className="px-4 py-3">
+        <Markdown text={props.plan} />
+      </div>
+      {!decided && (
+        <div className="space-y-2 border-t border-line p-4">
+          {asking ? (
+            <>
+              <textarea
+                autoFocus
+                rows={3}
+                value={feedback}
+                onChange={(e) => setFeedback(e.target.value)}
+                placeholder="O que mudar no plano?"
+                className="w-full rounded-xl border border-line bg-raised px-3 py-2 text-sm text-fg focus:outline-none"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={() => props.onDecide(false, undefined, feedback)}
+                  className="rounded-full bg-fg px-4 py-1.5 text-sm font-medium text-black hover:bg-white"
+                >
+                  Enviar observações
+                </button>
+                <button onClick={() => setAsking(false)} className="rounded-full border border-line px-4 py-1.5 text-sm text-fg hover:bg-raised">
+                  Voltar
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => props.onDecide(true, mode)}
+                className="rounded-full bg-fg px-4 py-1.5 text-sm font-medium text-black hover:bg-white"
+              >
+                Aprovar e executar
+              </button>
+              <select
+                value={mode}
+                onChange={(e) => setMode(e.target.value)}
+                title="Modo de permissão para executar o plano"
+                className="rounded-full border border-line bg-transparent px-3 py-1.5 text-xs text-muted"
+              >
+                <option value="edits" className="bg-surface">no modo Aceitar edições</option>
+                <option value="auto" className="bg-surface">no modo Automático</option>
+                <option value="manual" className="bg-surface">no modo Manual</option>
+                <option value="bypass" className="bg-surface">ignorando permissões</option>
+              </select>
+              <button onClick={() => setAsking(true)} className="rounded-full border border-line px-4 py-1.5 text-sm text-fg hover:bg-raised">
+                Pedir mudanças
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

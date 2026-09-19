@@ -78,10 +78,13 @@ async def run(conv_id: int, call: dict, req, run_obj, out: dict,
     setting = db.get_model_setting(model)
     via = "prompt" if setting["tool_mode"] == "text" else "native"
     caps = vision_caps(await llm.capabilities(provider, model), setting["vision"])
-    tools = [t for t in active(caps) if t.name != "delegate_task"]
+    from .agent import available_tools
+    tools = available_tools(caps, run_obj.permission, exclude={"delegate_task"})
     schemas = [t.openai_schema() for t in tools] if via == "native" else None
     messages: list[dict] = [
-        {"role": "system", "content": system_prompt(via, caps, exclude={"delegate_task"}) + SUB_PROMPT},
+        {"role": "system", "content": system_prompt(via, caps, exclude={"delegate_task"},
+                                                    permission=run_obj.permission, effort=getattr(req, "effort", "medio"))
+                                    + SUB_PROMPT},
         {"role": "user", "content": task}]
 
     info = {"level": used_level, "provider": provider, "model": model, "steps": [], "tokens": 0,
@@ -102,7 +105,8 @@ async def run(conv_id: int, call: dict, req, run_obj, out: dict,
         content = ""
         done: dict = {"tool_calls": []}
         try:
-            async for kind, val in llm.chat_stream(provider, model, messages, schemas, config.NUM_CTX):
+            async for kind, val in llm.chat_stream(provider, model, messages, schemas, config.NUM_CTX,
+                                                   getattr(req, "effort", "medio")):
                 if run_obj.cancel.is_set():
                     break
                 if kind == "content":

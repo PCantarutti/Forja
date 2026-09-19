@@ -172,7 +172,7 @@ def test_delegation_runs_subagent_and_returns_report(monkeypatch, tmp_path):
     seen_models = []
     step = {"main": 0, "mini": 0}
 
-    async def fake_stream(provider, model, messages, tools, num_ctx):
+    async def fake_stream(provider, model, messages, tools, num_ctx, effort=None):
         seen_models.append(model)
         if model == "main":
             step["main"] += 1
@@ -204,7 +204,7 @@ def test_delegation_runs_subagent_and_returns_report(monkeypatch, tmp_path):
         conv = _conv()
         run = agent.Run(conv)
         req = agent.RunRequest(content="use o subagente", provider="lmstudio", model="main",
-                               mode="agent", write_policy="ask")
+                               mode="agent", permission="manual")
         events = []
         async for ev in agent.run_agent(conv, req, run):
             events.append(ev)

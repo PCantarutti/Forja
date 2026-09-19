@@ -92,7 +92,7 @@ def test_retry_and_shell_always_asks(monkeypatch):
 
     calls = {"n": 0}
 
-    async def fake_stream(provider, model, messages, tools, num_ctx):
+    async def fake_stream(provider, model, messages, tools, num_ctx, effort=None):
         calls["n"] += 1
         if calls["n"] == 1:  # conexão cai antes do 1º token
             raise llm.LLMError("Conexão interrompida.")
@@ -117,7 +117,7 @@ def test_retry_and_shell_always_asks(monkeypatch):
             s.commit()
             conv_id = c.id
         run = agent.Run(conv_id)
-        req = agent.RunRequest(content="liste", provider="lmstudio", model="m", mode="agent", write_policy="auto")
+        req = agent.RunRequest(content="liste", provider="lmstudio", model="m", mode="agent", permission="auto")
         types = []
         async for ev in agent.run_agent(conv_id, req, run):
             types.append(ev["type"])

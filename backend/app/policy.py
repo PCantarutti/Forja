@@ -1,20 +1,82 @@
-"""Regras de auto-aprovação (Configurações › Permissões).
+"""Permissões: modos de aprovação (como no Claude) + regras de auto-aprovação.
 
-Uma ferramenta que normalmente pede aprovação passa direto se casar com um glob:
-- `auto_approve_tools`: nome da ferramenta, ex. `mcp__memoria__*`, `write_file`
-- `auto_approve_commands`: comando do run_command, ex. `pytest*`, `git status`, `ls *`
+Modos (escolhidos no campo de mensagem, `Shift+Tab` alterna):
 
-O glob é comparado com o comando inteiro já sem espaços nas pontas. A regra que casou fica
-gravada no resultado da ferramenta e aparece na UI, para nunca haver aprovação invisível.
+- `manual`   — pergunta antes de qualquer alteração.
+- `edits`    — aceita edições de arquivo; o resto (shell, navegador, MCP) pergunta.
+- `auto`     — o Forja decide: edições e comandos reconhecidamente seguros passam, o resto pergunta.
+- `plan`     — só leitura. O agente investiga e propõe um plano; nada é alterado.
+- `bypass`   — aceita tudo, inclusive shell e JavaScript na página. Use com cuidado.
+
+As regras de `Configurações › Permissões` (globs) continuam valendo em todos os modos menos `plan`,
+e a razão pela qual algo foi liberado sempre aparece no bloco da ferramenta: nada é aprovado em
+silêncio.
 """
 from __future__ import annotations
 
+import re
+import shlex
 from fnmatch import fnmatch
 
 from . import config
 
+MODES = ("auto", "manual", "edits", "plan", "bypass")
+FILE_EDITS = {"write_file", "edit_file"}
+# Ações de baixo risco no modo Automático: mexem na pasta de trabalho ou na página, não no sistema.
+AUTO_TOOLS = FILE_EDITS | {"browser_click", "browser_type", "browser_upload"}
+
+# Comandos de leitura/teste que o modo Automático libera (primeira palavra, ou duas para subcomandos).
+SAFE_COMMANDS = {
+    "ls", "cat", "head", "tail", "wc", "pwd", "echo", "grep", "rg", "find", "tree", "file", "stat",
+    "which", "whoami", "date", "env", "printenv", "du", "df", "diff", "sort", "uniq", "sed", "awk",
+    "pytest", "ruff", "eslint", "tsc", "mypy", "black", "jq",
+}
+SAFE_SUBCOMMANDS = {
+    "git": {"status", "diff", "log", "show", "branch", "remote", "blame", "ls-files", "rev-parse"},
+    "npm": {"test", "run", "ls", "list", "view", "outdated"},
+    "pnpm": {"test", "run", "list", "outdated"},
+    "yarn": {"test", "run", "list"},
+    "pip": {"list", "show", "freeze", "check"},
+    "uv": {"run", "pip", "tree"},
+    "docker": {"ps", "images", "logs", "compose"},
+    "python": set(), "python3": set(), "node": set(),  # tratados abaixo (só -m pytest / --version etc.)
+}
+SAFE_PYTHON_ARGS = {"-m", "--version", "-V", "-c"}
+DANGEROUS = re.compile(r"(^|\s)(rm|rmdir|mv|dd|mkfs|chmod|chown|sudo|su|kill|pkill|shutdown|reboot|"
+                       r"curl|wget|nc|ssh|scp|apt|apt-get|yum|brew|systemctl)(\s|$)")
+REDIRECT = re.compile(r"[>]|(^|\s)tee(\s|$)")
+SPLIT = re.compile(r"&&|\|\||;|\|")
+
+
+def safe_command(command: str) -> bool:
+    """True se TODOS os trechos do comando forem leitura/teste conhecidos."""
+    command = (command or "").strip()
+    if not command or REDIRECT.search(command) or DANGEROUS.search(command) or "$(" in command or "`" in command:
+        return False
+    for part in SPLIT.split(command):
+        try:
+            words = shlex.split(part)
+        except ValueError:
+            return False
+        if not words:
+            return False
+        base = words[0].rsplit("/", 1)[-1]
+        if base in SAFE_COMMANDS:
+            continue
+        if base in ("python", "python3", "node"):
+            if len(words) > 1 and words[1] in SAFE_PYTHON_ARGS and (len(words) < 3 or words[2] in
+                                                                    ("pytest", "unittest", "pip", "json.tool")):
+                continue
+            return False
+        subs = SAFE_SUBCOMMANDS.get(base)
+        if subs and len(words) > 1 and words[1] in subs:
+            continue
+        return False
+    return True
+
 
 def auto_rule(name: str, args: dict) -> str | None:
+    """Regra de Configurações › Permissões que libera esta chamada (ou None)."""
     for pattern in config.AUTO_APPROVE_TOOLS:
         if fnmatch(name, pattern):
             return f"ferramenta {pattern}"
@@ -24,6 +86,30 @@ def auto_rule(name: str, args: dict) -> str | None:
             if fnmatch(command, pattern):
                 return f"comando {pattern}"
     return None
+
+
+def decide(tool, args: dict, mode: str) -> tuple[bool, str | None]:
+    """(precisa de aprovação?, motivo da liberação) para uma ferramenta que altera algo."""
+    if not tool.mutating:
+        return False, None
+    if mode == "plan":  # nem deveria chegar aqui: no modo Plano essas ferramentas não são enviadas
+        return True, None
+    if mode == "bypass":
+        return False, "modo Ignorar permissões"
+    rule = auto_rule(tool.name, args)
+    if rule:
+        return False, rule
+    if tool.always_ask:  # shell e browser_eval só passam por regra explícita ou bypass
+        return True, None
+    if mode == "manual":
+        return True, None
+    if mode == "edits":
+        return tool.name not in FILE_EDITS, ("modo Aceitar edições" if tool.name in FILE_EDITS else None)
+    if mode == "auto":
+        if tool.name in AUTO_TOOLS:
+            return False, "modo Automático: alteração na pasta de trabalho"
+        return True, None
+    return True, None
 
 
 def suggest(name: str, args: dict) -> str:

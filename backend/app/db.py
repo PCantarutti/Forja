@@ -19,6 +19,7 @@ class Conversation(Base):
     __tablename__ = "conversations"
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(200), default="Nova conversa")
+    kind: Mapped[str] = mapped_column(String(10), default="agent")  # chat | agent (seções separadas)
     workspace: Mapped[str | None] = mapped_column(String(1000), nullable=True)  # pasta do Windows; None = padrão
     created_at: Mapped[datetime] = mapped_column(default=_now)
     updated_at: Mapped[datetime] = mapped_column(default=_now)
@@ -91,6 +92,14 @@ def _migrate() -> None:
         cols = {row[1] for row in c.exec_driver_sql("PRAGMA table_info(conversations)")}
         if "workspace" not in cols:
             c.exec_driver_sql("ALTER TABLE conversations ADD COLUMN workspace VARCHAR(1000)")
+        if "kind" not in cols:
+            # Conversas antigas: quem usou ferramenta era Agente; o resto vira Chat.
+            c.exec_driver_sql("ALTER TABLE conversations ADD COLUMN kind VARCHAR(10) DEFAULT 'agent'")
+            c.exec_driver_sql("""
+                UPDATE conversations SET kind = 'chat'
+                WHERE id NOT IN (SELECT DISTINCT conversation_id FROM messages WHERE role = 'tool')
+                  AND id IN (SELECT DISTINCT conversation_id FROM messages
+                             WHERE role = 'assistant' AND json_extract(meta, '$.via') = 'none')""")
 
 
 _migrate()

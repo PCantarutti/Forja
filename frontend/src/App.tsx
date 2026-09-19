@@ -9,11 +9,22 @@ import FolderPicker, { folderName } from "./components/FolderPicker";
 import ModelPicker from "./components/ModelPicker";
 import { LogoMark } from "./components/Logo";
 import {
+  EffortMenu,
+  ModeWarning,
+  nextPermission,
+  PermissionMenu,
+  SectionTabs,
+  type Effort,
+  type Permission,
+  type Section,
+} from "./components/Controls";
+import {
   Attachments,
   CopyButton,
   EventNotice,
   Markdown,
   setFileConv,
+  PlanCard,
   StatsRow,
   SubagentSteps,
   Thinking,
@@ -42,7 +53,7 @@ type Live = {
 };
 
 function loadSettings(): Settings {
-  const def: Settings = { provider: "ollama", model: "", mode: "agent", writePolicy: "ask" };
+  const def: Settings = { provider: "ollama", model: "", permission: "manual", effort: "medio" };
   try {
     return { ...def, ...JSON.parse(localStorage.getItem("forja.settings") ?? "{}") };
   } catch {
@@ -94,6 +105,9 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [catalogKey, setCatalogKey] = useState(0); // força o seletor de modelo a recarregar
   const [showFolder, setShowFolder] = useState(false);
+  // Chat e Agente são seções separadas (como no Claude): cada uma lista só as suas conversas.
+  const [section, setSection] = useState<Section>(() => (localStorage.getItem("forja.section") as Section) || "agent");
+  const [sidebarHidden, setSidebarHidden] = useState(() => localStorage.getItem("forja.sidebar") === "hidden");
   const [nativeError, setNativeError] = useState("");
   const [picking, setPicking] = useState(false); // diálogo nativo aberto no sistema
   // Pasta escolhida antes de a conversa existir (tela inicial); vira a pasta da conversa no 1º envio.
@@ -129,6 +143,15 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("forja.settings", JSON.stringify(settings));
   }, [settings]);
+
+  useEffect(() => {
+    localStorage.setItem("forja.section", section);
+    refreshConversations(section);
+  }, [section]);
+
+  useEffect(() => {
+    localStorage.setItem("forja.sidebar", sidebarHidden ? "hidden" : "visible");
+  }, [sidebarHidden]);
 
   useEffect(() => {
     if (pendingWs) localStorage.setItem("forja.workspace", pendingWs);
@@ -198,8 +221,8 @@ export default function App() {
     bottom.current?.scrollIntoView({ block: "end" });
   }, [messages, draft, approvals]);
 
-  function refreshConversations() {
-    api.get<Conversation[]>("/conversations").then(setConversations).catch((e) => setError(e.message));
+  function refreshConversations(kind: Section = section) {
+    api.get<Conversation[]>(`/conversations?kind=${kind}`).then(setConversations).catch((e) => setError(e.message));
   }
 
   function loadCheckpoints(id: number | null) {
@@ -265,6 +288,8 @@ export default function App() {
     const live = await api.get<Live>(`/conversations/${id}/live`);
     setMessages(live.messages);
     loadCheckpoints(id);
+    const kind = (await api.get<{ kind?: string }>(`/conversations/${id}`).catch(() => null))?.kind;
+    if (kind && kind !== section) setSection(kind as Section);
     const run = live.run;
     if (run) {
       runId.current = run.run_id;
@@ -374,6 +399,9 @@ export default function App() {
       case "approval_request":
         setApprovals((a) => ({ ...a, [ev.call.id]: { preview: ev.preview, suggest: ev.suggest, tool: ev.call.name } }));
         break;
+      case "plan_request":
+        setApprovals((a) => ({ ...a, [ev.call.id]: { preview: null, tool: "exit_plan_mode", plan: ev.plan } }));
+        break;
       case "context":
         setCtx(ev);
         break;
@@ -383,7 +411,7 @@ export default function App() {
   /** Conversa atual; cria na hora (com a pasta escolhida) se ainda estiver na tela inicial. */
   async function ensureConversation(): Promise<number> {
     if (currentId !== null) return currentId;
-    const c = await api.post<Conversation>("/conversations", { workspace: pendingWs });
+    const c = await api.post<Conversation>("/conversations", { workspace: pendingWs, kind: section });
     setCurrentId(c.id);
     setMessages([]);
     refreshConversations();
@@ -493,8 +521,8 @@ export default function App() {
         content,
         provider: settings.provider,
         model: settings.model,
-        mode: settings.mode,
-        write_policy: settings.writePolicy,
+        permission: section === "agent" ? settings.permission : "manual",
+        effort: settings.effort,
       }),
     });
   }
@@ -523,8 +551,8 @@ export default function App() {
         content,
         provider: settings.provider,
         model: settings.model,
-        mode: settings.mode,
-        write_policy: settings.writePolicy,
+        permission: section === "agent" ? settings.permission : "manual",
+        effort: settings.effort,
         attachments: files,
       }),
     });
@@ -546,6 +574,15 @@ export default function App() {
     }
     setApprovals((a) => ({ ...a, [callId]: { ...a[callId], sent: true } })); // evita clique duplo
     await api.post(`/runs/${runId.current}/approve`, { call_id: callId, approved }).catch((e) => setError(e.message));
+  }
+
+  /** Decisão sobre um plano: aprovar (com o modo de execução) ou pedir mudanças. */
+  async function decidePlan(callId: string, approved: boolean, mode?: string, feedback?: string) {
+    if (!runId.current) return;
+    setApprovals((a) => ({ ...a, [callId]: { ...a[callId], sent: true } }));
+    await api
+      .post(`/runs/${runId.current}/approve`, { call_id: callId, approved, mode, feedback })
+      .catch((e) => setError(e.message));
   }
 
   const results = useMemo(() => {
@@ -595,6 +632,12 @@ export default function App() {
     return { used, max, out: lastTurn?.tokens ?? null, avg };
   }, [messages, turns, ctx]);
 
+  function changeSection(next: Section) {
+    if (next === section) return;
+    newConversation();
+    setSection(next);
+  }
+
   const conv = conversations.find((c) => c.id === currentId);
   const wsLabel = (conv ? conv.workspace : pendingWs) ?? config.default_workspace ?? "pasta padrão";
 
@@ -613,7 +656,11 @@ export default function App() {
 
   return (
     <div className="flex h-full">
+      {!sidebarHidden && (
       <Sidebar
+        section={section}
+        onSection={changeSection}
+        onHide={() => setSidebarHidden(true)}
         conversations={conversations}
         current={currentId}
         onSelect={openConversation}
@@ -621,16 +668,26 @@ export default function App() {
         onDelete={deleteConversation}
         onSettings={() => setShowSettings(true)}
       />
+      )}
       {showSettings && (
         <SettingsDialog onClose={() => setShowSettings(false)} tools={allTools} mcp={mcp} onChanged={refreshTools} />
       )}
 
       <main className="flex min-w-0 flex-1 flex-col bg-bg">
         <header className="flex min-w-0 items-center gap-2 px-4 py-2.5">
+          {sidebarHidden && (
+            <SectionTabs
+              value={section}
+              onChange={changeSection}
+              sidebarHidden={sidebarHidden}
+              onToggleSidebar={() => setSidebarHidden(false)}
+            />
+          )}
           <Laptop className="size-4 shrink-0 text-muted" />
           <span className="truncate text-sm font-medium text-fg" title={conv?.title}>
             {conv?.title ?? "Nova conversa"}
           </span>
+          {section === "agent" && (
           <button
             onClick={chooseFolder}
             disabled={running || picking}
@@ -642,6 +699,7 @@ export default function App() {
             </span>
             <ChevronDown className="size-3 shrink-0" />
           </button>
+          )}
           {picking && <span className="text-xs text-muted">Escolha a pasta na janela do sistema (pode estar atrás do navegador).</span>}
         </header>
         {showFolder && (
@@ -669,12 +727,12 @@ export default function App() {
                 <div className="text-3xl font-semibold">Olá!</div>
                 <div className="text-3xl text-faint">Como posso ajudar hoje?</div>
                 <div className="mt-4 text-sm text-muted">
-                  {settings.mode === "agent" ? (
+                  {section === "agent" ? (
                     <>
-                      Modo Agente: lê e escreve em <span className="font-mono text-fg">{wsLabel}</span>
+                      Agente: lê e escreve em <span className="font-mono text-fg">{wsLabel}</span>
                     </>
                   ) : (
-                    "Modo Chat: sem ferramentas."
+                    "Chat: conversa sem ferramentas e sem acesso a arquivos."
                   )}
                 </div>
               </div>
@@ -738,7 +796,15 @@ export default function App() {
                 <div key={m.id} className="my-4">
                   <Thinking text={m.thinking} />
                   {m.content && <Markdown text={m.content} />}
-                  {m.tool_calls?.map((c, k) => (
+                  {m.tool_calls?.map((c, k) =>
+                    c.name === "exit_plan_mode" ? (
+                      <PlanCard
+                        key={c.id}
+                        plan={(approvals[c.id]?.plan ?? results.get(c.id)?.meta?.plan ?? c.arguments.plan ?? "") as string}
+                        done={results.get(c.id)}
+                        onDecide={(ok, mode, feedback) => decidePlan(c.id, ok, mode, feedback)}
+                      />
+                    ) : (
                     <ToolBlock
                       key={c.id}
                       call={c}
@@ -765,7 +831,8 @@ export default function App() {
                         />
                       )}
                     </ToolBlock>
-                  ))}
+                    ),
+                  )}
                   {showTurn && (
                     <div className="mt-4 space-y-1.5">
                       {turn.stats && <StatsRow s={turn.stats} />}
@@ -826,6 +893,7 @@ export default function App() {
                 {summary.avg != null && <span>Média: {summary.avg.toFixed(1)} t/s</span>}
               </div>
             )}
+            {section === "agent" && <ModeWarning permission={settings.permission} />}
             {error && <div className="mb-2 text-sm text-red-300">{error}</div>}
 
             <div className="rounded-3xl border border-line bg-surface px-4 pt-3 pb-2.5 focus-within:border-[#454545]">
@@ -843,9 +911,13 @@ export default function App() {
                     e.preventDefault();
                     send();
                   }
+                  if (e.key === "Tab" && e.shiftKey && section === "agent") {
+                    e.preventDefault();
+                    update({ permission: nextPermission(settings.permission) });
+                  }
                 }}
                 rows={Math.min(8, Math.max(2, input.split("\n").length))}
-                placeholder={settings.mode === "agent" ? "Peça algo ao agente..." : "Digite uma mensagem..."}
+                placeholder={section === "agent" ? "Peça algo ao agente..." : "Digite uma mensagem..."}
                 className="w-full resize-none bg-transparent text-[15px] text-fg placeholder:text-faint focus:outline-none"
               />
               <div className="mt-1 flex items-center gap-2">
@@ -864,31 +936,10 @@ export default function App() {
                     }}
                   />
                 </label>
-                <div className="flex rounded-full border border-line p-0.5 text-xs" role="radiogroup" aria-label="Modo">
-                  {(["chat", "agent"] as const).map((m) => (
-                    <button
-                      key={m}
-                      role="radio"
-                      aria-checked={settings.mode === m}
-                      onClick={() => update({ mode: m })}
-                      className={`rounded-full px-3 py-1 ${settings.mode === m ? "bg-fg font-medium text-black" : "text-muted hover:text-fg"}`}
-                    >
-                      {m === "chat" ? "Chat" : "Agente"}
-                    </button>
-                  ))}
-                </div>
-                {settings.mode === "agent" && (
-                  <select
-                    value={settings.writePolicy}
-                    onChange={(e) => update({ writePolicy: e.target.value as Settings["writePolicy"] })}
-                    className={pill}
-                    title="Permissão de escrita"
-                  >
-                    <option value="ask" className="bg-surface">Escrita: perguntar</option>
-                    <option value="auto" className="bg-surface">Escrita: automática</option>
-                  </select>
+                {section === "agent" && (
+                  <PermissionMenu value={settings.permission} onChange={(permission) => update({ permission })} />
                 )}
-
+                <EffortMenu value={settings.effort} onChange={(effort) => update({ effort })} />
                 <ModelPicker
                   provider={settings.provider}
                   model={settings.model}
@@ -927,6 +978,7 @@ export default function App() {
         ) : (
           <InfoPanel
             settings={settings}
+            section={section}
             toolMode={toolMode}
             onToolMode={changeToolMode}
             vision={vision}

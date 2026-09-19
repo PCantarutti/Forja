@@ -16,9 +16,31 @@ from typing import AsyncIterator
 from . import checkpoints, compact, config, db, llm, memory, policy, uploads, workspace
 from . import browser, shell, subagents, web  # noqa: F401  (registram run_command, web_*, browser_*, delegate_task)
 from .parsing import LoopDetector, detect_promise, parse_text_tool_calls, split_think
-from .tools import ToolError, active, blocked, execute, get_tool, preview_tool, resolve_path, vision_caps
+from .tools import Tool, ToolError, active, blocked, execute, get_tool, preview_tool, resolve_path, vision_caps
 
 MAX_NUDGES = 2
+# Esforço: multiplicador do limite de passos + instrução de profundidade no prompt.
+EFFORT = {
+    "baixo": (0.4, "Esforço baixo: vá direto ao ponto, use o mínimo de passos e não explore além do pedido."),
+    "medio": (1.0, ""),
+    "alto": (1.6, "Esforço alto: confira o que fez (leia de volta, rode testes quando fizer sentido) antes de concluir."),
+    "maximo": (3.0, "Esforço máximo: investigue a fundo, considere alternativas, teste e revise antes de concluir."),
+}
+MODE_LABEL = {"auto": "Automático", "manual": "Manual", "edits": "Aceitar edições",
+              "plan": "Plano", "bypass": "Ignorar permissões"}
+
+# Ferramenta só do modo Plano: não fica no REGISTRY (não aparece nos outros modos nem nas Configurações).
+EXIT_PLAN = Tool(
+    "exit_plan_mode",
+    "Apresenta o plano ao usuário e pede autorização para executar. Só chame quando terminar de investigar. "
+    "O plano deve estar em markdown: o que será feito, em quais arquivos, e riscos.",
+    {"type": "object", "properties": {"plan": {"type": "string", "description": "Plano em markdown"}},
+     "required": ["plan"]},
+    lambda *_: "", mutating=False)
+
+
+def effort_iterations(effort: str) -> int:
+    return max(3, round(config.MAX_ITERATIONS * EFFORT.get(effort, EFFORT["medio"])[0]))
 MAX_RETRIES = 1
 RETRY_DELAY = 2.0
 KEEP_FINISHED_RUN = 120  # segundos que uma execução terminada continua consultável
@@ -31,8 +53,9 @@ class RunRequest:
     content: str | None  # None = continuar de onde parou (regenerar / mensagem editada)
     provider: str
     model: str
-    mode: str = "agent"          # chat | agent
-    write_policy: str = "ask"    # ask | auto
+    mode: str = "agent"              # chat | agent (vem do tipo da conversa)
+    permission: str = "manual"       # auto | manual | edits | plan | bypass
+    effort: str = "medio"            # baixo | medio | alto | maximo
     attachments: list | None = None
 
 
@@ -48,6 +71,7 @@ class Run:
         self.id = uuid.uuid4().hex
         self.conv_id = conv_id
         self.turn_id = 0  # id da mensagem do usuário deste turno (checkpoints)
+        self.permission = "manual"  # pode mudar no meio (aprovação do plano)
         self.cancel = asyncio.Event()
         self.pending: dict[str, asyncio.Future] = {}
         self.events: list[dict] = []
@@ -112,10 +136,11 @@ class Run:
 
         self._task = asyncio.create_task(main())
 
-    def resolve(self, call_id: str, approved: bool) -> bool:
+    def resolve(self, call_id: str, decision) -> bool:
+        """decision: bool (aprovação de ferramenta) ou dict (plano: aprovado, modo, feedback)."""
         fut = self.pending.get(call_id)
         if fut and not fut.done():
-            fut.set_result(approved)
+            fut.set_result(decision)
             return True
         return False
 
@@ -145,12 +170,13 @@ Ferramentas (JSON Schema):
 """
 
 
-def system_prompt(via: str, caps: set[str] | None = None, exclude: set[str] | None = None) -> str:
+def system_prompt(via: str, caps: set[str] | None = None, exclude: set[str] | None = None,
+                  permission: str = "manual", effort: str = "medio") -> str:
     if via == "none":
         return _extra("Você é o Forja, um assistente de programação. Você está no modo Chat: NÃO tem ferramentas "
                       "e não acessa arquivos. Se o usuário pedir para criar ou editar arquivos, peça para ele "
                       "trocar para o modo Agente. Responda no idioma do usuário.")
-    tools = [t for t in active(caps) if t.name not in (exclude or set())]
+    tools = available_tools(caps, permission, exclude)
     names = [t.name for t in tools]
     # Regras só das ferramentas ligadas: citar uma desativada confunde o modelo.
     rules = ['- Execute, não descreva. Para mexer em arquivos, CHAME a ferramenta na mesma resposta. Nunca diga "vou criar/editar" sem fazer a chamada.']
@@ -188,7 +214,16 @@ def system_prompt(via: str, caps: set[str] | None = None, exclude: set[str] | No
                      "Use level='rapido' para tarefas simples e mecânicas (buscar, resumir, listar, editar algo óbvio) "
                      "e level='capaz' para raciocínio difícil (depurar, projetar, código complexo). Descreva a tarefa "
                      "por completo: o subagente não vê esta conversa.")
-    rules.append("- Ao terminar, responda com um resumo curto do que foi feito.")
+    if permission == "plan":
+        rules = ["- MODO PLANO: você NÃO pode alterar nada (sem escrever arquivos, sem comandos, sem agir na página).",
+                 "- Investigue com as ferramentas de leitura o quanto precisar.",
+                 "- Quando souber o que fazer, chame exit_plan_mode com o plano em markdown e PARE. "
+                 "O usuário aprova (e escolhe o modo de execução) ou pede mudanças."]
+    else:
+        rules.append("- Ao terminar, responda com um resumo curto do que foi feito.")
+    dica = EFFORT.get(effort, EFFORT["medio"])[1]
+    if dica:
+        rules.append(f"- {dica}")
     host = workspace.to_host(workspace.root())
     where = f"{host} (no container: {workspace.root()})" if host else str(workspace.root())
     header = [f"Você é o Forja, um agente de programação. Pasta de trabalho: {where}. Use caminhos relativos a ela.",
@@ -198,6 +233,15 @@ def system_prompt(via: str, caps: set[str] | None = None, exclude: set[str] | No
         prompt += "\n" + TEXT_FORMAT + json.dumps(
             [t.openai_schema()["function"] for t in tools], ensure_ascii=False)
     return _extra(prompt)
+
+
+def available_tools(caps: set[str] | None, permission: str, exclude: set[str] | None = None) -> list[Tool]:
+    """Ferramentas desta requisição. No modo Plano: só leitura + exit_plan_mode."""
+    exclude = exclude or set()
+    tools = [t for t in active(caps) if t.name not in exclude]
+    if permission == "plan":
+        return [t for t in tools if not t.mutating] + [EXIT_PLAN]
+    return tools
 
 
 def _extra(prompt: str) -> str:
@@ -235,9 +279,10 @@ def _join_user(a, b):
     return parts(a) + parts(b)
 
 
-def build_history(msgs: list[db.Message], via: str, caps: set[str] | None = None) -> list[dict]:
+def build_history(msgs: list[db.Message], via: str, caps: set[str] | None = None,
+                  permission: str = "manual", effort: str = "medio") -> list[dict]:
     native = via == "native"
-    out: list[dict] = [{"role": "system", "content": system_prompt(via, caps)}]
+    out: list[dict] = [{"role": "system", "content": system_prompt(via, caps, permission=permission, effort=effort)}]
     summary = compact.last_summary(msgs)
     if summary:
         out.append({"role": "user", "content": f"[Resumo automático da conversa anterior]\n{summary[0]}"})
@@ -403,6 +448,8 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
         run.turn_id = users[-1]
 
     agent = req.mode == "agent"
+    run.permission = req.permission if agent else "manual"
+    max_iterations = effort_iterations(req.effort)
     setting = db.get_model_setting(req.model)
     tool_mode = setting["tool_mode"] if agent else "none"
     via = "none" if not agent else ("prompt" if tool_mode == "text" else "native")
@@ -416,26 +463,33 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
     loop = LoopDetector()
     nudges = iterations = retries = 0
 
+    def current_tools() -> list[Tool]:
+        return available_tools(caps, run.permission) if agent else []
+
     def tools_sent() -> dict:
         # Fonte da verdade do painel lateral: exatamente o que vai nesta requisição.
         return {"type": "tools_sent", "mode": req.mode, "provider": req.provider, "model": req.model,
                 "tool_mode": tool_mode, "via": via, "num_ctx": ctx_max,
+                "permission": run.permission, "permission_label": MODE_LABEL.get(run.permission, run.permission),
+                "effort": req.effort, "max_iterations": max_iterations,
                 "capabilities": sorted(caps), "vision_source": vision_source,
                 "capabilities_detected": sorted(detected) if detected is not None else None,
                 "blocked": blocked(caps) if agent else [],
-                "tools": [{"name": t.name, "mutating": t.mutating} for t in active(caps)] if agent else []}
+                "tools": [{"name": t.name, "mutating": t.mutating} for t in current_tools()]}
 
     yield tools_sent()
 
     while not run.cancel.is_set():
-        if iterations >= config.MAX_ITERATIONS:
-            yield _event(conv_id, "warning", f"Limite de {config.MAX_ITERATIONS} iterações atingido. O agente parou.")
+        if iterations >= max_iterations:
+            yield _event(conv_id, "warning", f"Limite de {max_iterations} iterações (esforço {req.effort}) "
+                                             "atingido. O agente parou.")
             break
         iterations += 1
 
         msgs = _load(conv_id)
-        messages = build_history(msgs, via, caps)
-        tools = [t.openai_schema() for t in active(caps)] if via == "native" else None
+        mode_at_start = run.permission
+        messages = build_history(msgs, via, caps, run.permission, req.effort)
+        tools = [t.openai_schema() for t in current_tools()] if via == "native" else None
         if ctx_max and _estimate(messages, tools) > config.COMPACT_AT * ctx_max:
             async for ev in _compact(conv_id, msgs, req, ctx_max):
                 yield ev
@@ -447,7 +501,8 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
         t0 = time.monotonic()
         t_first = None
         try:
-            async for kind, val in llm.chat_stream(req.provider, req.model, messages, tools, config.NUM_CTX):
+            async for kind, val in llm.chat_stream(req.provider, req.model, messages, tools, config.NUM_CTX,
+                                                   req.effort):
                 if run.cancel.is_set():
                     break
                 if kind != "done" and t_first is None:
@@ -492,7 +547,7 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
         reasoning = (reasoning + "\n" + think).strip()
         calls = done["tool_calls"]
         if agent and not calls and tool_mode != "native":
-            parsed, visible = parse_text_tool_calls(content, [t.name for t in active(caps)])
+            parsed, visible = parse_text_tool_calls(content, [t.name for t in current_tools()])
             calls = [{"id": "call_" + uuid.uuid4().hex[:12], **c} for c in parsed]
 
         msg = _save(conv_id, role="assistant", content=visible, thinking=reasoning,
@@ -526,6 +581,9 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
                 continue
             async for ev in _execute(conv_id, call, req, run, caps):
                 yield ev
+        if run.permission != mode_at_start:  # plano aprovado: o conjunto de ferramentas muda
+            yield _event(conv_id, "info", f"Plano aprovado. Modo de permissão: {MODE_LABEL[run.permission]}.")
+            yield tools_sent()
         if stop:
             break
 
@@ -562,6 +620,10 @@ async def _run_call(conv_id: int, call: dict, req: RunRequest, run: Run, caps: s
     if "__raw__" in args:
         result("erro", f"Argumentos não são JSON válido: {args['__raw__'][:200]}")
         return
+    if name == "exit_plan_mode":
+        async for ev in _plan(call, run, out, meta):
+            yield ev
+        return
     if name == "delegate_task":
         if parent:
             result("erro", "Um subagente não pode delegar tarefas.")
@@ -577,15 +639,19 @@ async def _run_call(conv_id: int, call: dict, req: RunRequest, run: Run, caps: s
         result("erro", str(e))
         return
 
-    rule = policy.auto_rule(name, args)
+    if run.permission == "plan" and tool.mutating:
+        result("erro", "Modo Plano: nada pode ser alterado. Termine de planejar e chame exit_plan_mode.")
+        return
+    needs_approval, rule = policy.decide(tool, args, run.permission)
     if rule:
-        meta["auto_rule"] = rule  # regra que dispensou a aprovação (aparece na UI)
-    if tool.mutating and not rule and (req.write_policy != "auto" or tool.always_ask):
+        meta["auto_rule"] = rule  # por que passou sem perguntar (sempre visível na UI)
+    if needs_approval:
         fut = asyncio.get_running_loop().create_future()
         run.pending[call["id"]] = fut
         yield {"type": "approval_request", "call": call, "preview": meta["preview"],
                "suggest": policy.suggest(name, args), **tag}
-        approved = await fut
+        decision = await fut
+        approved = decision.get("approved") if isinstance(decision, dict) else bool(decision)
         run.pending.pop(call["id"], None)
         if run.cancel.is_set():
             result("cancelada", "Não executada: geração interrompida pelo usuário.")
@@ -618,3 +684,36 @@ async def _run_call(conv_id: int, call: dict, req: RunRequest, run: Run, caps: s
         result("erro", str(e))
     except Exception as e:  # nunca derrubar o loop
         result("erro", f"Erro inesperado: {e.__class__.__name__}: {e}")
+
+
+async def _plan(call: dict, run: Run, out: dict, meta: dict) -> AsyncIterator[dict]:
+    """Modo Plano: mostra o plano e espera o usuário aprovar (escolhendo o modo) ou pedir mudanças."""
+    plan = str(call["arguments"].get("plan") or "").strip()
+    meta["plan"] = plan
+    if not plan:
+        out.update(status="erro", text="Envie o plano em 'plan'.", meta=meta)
+        return
+    fut = asyncio.get_running_loop().create_future()
+    run.pending[call["id"]] = fut
+    yield {"type": "plan_request", "call": call, "plan": plan}
+    decision = await fut
+    run.pending.pop(call["id"], None)
+    decision = decision if isinstance(decision, dict) else {"approved": bool(decision)}
+    if run.cancel.is_set():
+        out.update(status="cancelada", text="Não executado: geração interrompida.", meta=meta)
+        return
+    if not decision.get("approved"):
+        feedback = (decision.get("feedback") or "").strip()
+        meta["approved"] = False
+        out.update(status="rejeitada", meta=meta,
+                   text=("O usuário quer ajustes no plano: " + feedback if feedback else
+                         "O usuário não aprovou o plano. Pergunte o que ele quer diferente.") +
+                        " Continue no modo Plano: não altere nada.")
+        return
+    mode = decision.get("mode") if decision.get("mode") in policy.MODES and decision.get("mode") != "plan" else "edits"
+    run.permission = mode
+    meta["approved"] = True
+    meta["approved_mode"] = mode
+    out.update(status="ok", meta=meta,
+               text=f"Plano aprovado pelo usuário. Modo de permissão agora: {MODE_LABEL[mode]}. "
+                    "Execute o plano agora, passo a passo, usando as ferramentas.")

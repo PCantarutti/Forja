@@ -11,6 +11,7 @@ Mensagens de entrada/saída ficam sempre no formato OpenAI.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import AsyncIterator
 
@@ -85,11 +86,36 @@ def _raise_for(provider: str, status: int, body: bytes) -> None:
     raise LLMError(f"{provider} respondeu HTTP {status}: {text}", status)
 
 
+# Esforço -> raciocínio do modelo. Só mandamos quando o modelo entende, senão o servidor recusa.
+EFFORT_LEVEL = {"baixo": "low", "medio": "medium", "alto": "high", "maximo": "high"}
+REASONING_MODELS = re.compile(r"gpt-oss|gpt-5|^o[1-4](-|$)|deepseek-r|grok|magistral", re.I)
+
+
+async def _reasoning(provider: str, model: str, effort: str | None, body: dict, messages: list[dict]) -> None:
+    """Acrescenta o controle de raciocínio conforme o provider e o modelo."""
+    level = EFFORT_LEVEL.get(effort or "")
+    if not level:
+        return
+    kind = spec(provider)["type"]
+    if kind == "ollama":
+        caps = await capabilities(provider, model) or set()
+        if "thinking" in caps:  # Ollama recusa `think` em modelo sem raciocínio
+            body["think"] = level if REASONING_MODELS.search(model) else (effort != "baixo")
+    elif REASONING_MODELS.search(model):
+        body["reasoning_effort"] = level
+    elif effort == "baixo" and re.search(r"qwen", model, re.I) and messages and messages[0]["role"] == "system":
+        # Qwen: interruptor por texto, do próprio template
+        messages[0] = {**messages[0], "content": messages[0]["content"] + "\n/no_think"}
+
+
 async def chat_stream(provider: str, model: str, messages: list[dict], tools: list[dict] | None,
-                      num_ctx: int) -> AsyncIterator[tuple[str, object]]:
+                      num_ctx: int, effort: str | None = None) -> AsyncIterator[tuple[str, object]]:
     impl = _ollama_stream if spec(provider)["type"] == "ollama" else _openai_stream
+    messages = list(messages)
+    extra: dict = {}
+    await _reasoning(provider, model, effort, extra, messages)
     try:
-        async for ev in impl(provider, model, messages, tools, num_ctx):
+        async for ev in impl(provider, model, messages, tools, num_ctx, extra):
             yield ev
     except httpx.HTTPError as e:
         raise _conn_error(provider, e) from e
@@ -97,9 +123,9 @@ async def chat_stream(provider: str, model: str, messages: list[dict], tools: li
 
 # ------------------------------------------------------------------ OpenAI-compatível
 
-async def _openai_stream(provider, model, messages, tools, num_ctx):
+async def _openai_stream(provider, model, messages, tools, num_ctx, extra: dict | None = None):
     body: dict = {"model": model, "messages": messages, "stream": True,
-                  "stream_options": {"include_usage": True}}
+                  "stream_options": {"include_usage": True}, **(extra or {})}
     if tools:
         body["tools"] = tools
     calls: dict[int, dict] = {}
@@ -182,10 +208,10 @@ def _to_ollama(messages: list[dict]) -> list[dict]:
     return out
 
 
-async def _ollama_stream(provider, model, messages, tools, num_ctx):
+async def _ollama_stream(provider, model, messages, tools, num_ctx, extra: dict | None = None):
     host = base_url(provider).removesuffix("/v1")
     body: dict = {"model": model, "messages": _to_ollama(messages), "stream": True,
-                  "options": {"num_ctx": num_ctx}}
+                  "options": {"num_ctx": num_ctx}, **(extra or {})}
     if tools:
         body["tools"] = tools
     calls, prompt_tokens, completion_tokens = [], None, None
