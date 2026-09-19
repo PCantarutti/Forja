@@ -41,14 +41,40 @@ def register(tool: Tool) -> Tool:
     return tool
 
 
-def run_tool(name: str, args: dict, root: Path | None = None) -> str:
+def get_tool(name: str) -> Tool:
     tool = REGISTRY.get(name)
     if not tool:
         raise ToolError(f"Ferramenta desconhecida: '{name}'. Disponíveis: {', '.join(REGISTRY)}")
+    return tool
+
+
+def coerce_args(tool: Tool, args: dict) -> dict:
+    """Converte strings vindas do fallback XML ("true", "10") para o tipo do schema."""
+    props = tool.parameters.get("properties", {})
+    out = dict(args)
+    for k, v in args.items():
+        t = props.get(k, {}).get("type")
+        if isinstance(v, str) and t == "boolean":
+            out[k] = v.strip().lower() in ("true", "1", "yes", "sim")
+        elif isinstance(v, str) and t == "integer" and v.strip().lstrip("-").isdigit():
+            out[k] = int(v)
+    return out
+
+
+def _call(name: str, fn_attr: str, args: dict, root: Path | None):
+    tool = get_tool(name)
     try:
-        return tool.handler(root or config.WORKSPACE_ROOT, args)
+        return getattr(tool, fn_attr)(root or config.WORKSPACE_ROOT, coerce_args(tool, args))
     except (KeyError, TypeError, ValueError) as e:  # argumento faltando/errado
         raise ToolError(f"Argumentos inválidos para {name}: faltando ou incorreto {e}") from e
+
+
+def run_tool(name: str, args: dict, root: Path | None = None) -> str:
+    return _call(name, "handler", args, root)
+
+
+def preview_tool(name: str, args: dict, root: Path | None = None) -> dict | None:
+    return _call(name, "preview", args, root) if get_tool(name).preview else None
 
 
 # ---------------------------------------------------------------- confinamento
