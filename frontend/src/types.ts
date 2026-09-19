@@ -19,7 +19,7 @@ export type Message = {
   meta: Record<string, any> | null;
 };
 
-export type Conversation = { id: number; title: string; updated_at: string };
+export type Conversation = { id: number; title: string; updated_at: string; workspace?: string | null; workspace_label?: string };
 
 export type ToolsSent = {
   mode: "chat" | "agent";

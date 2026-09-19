@@ -70,7 +70,7 @@ class Run:
             self.draft = None
         elif t == "approval_request":
             self.approvals[ev["call"]["id"]] = {"call": ev["call"], "preview": ev["preview"],
-                                                "suggest": ev.get("suggest")}
+                                                "suggest": ev.get("suggest"), "parent": ev.get("parent")}
         elif t == "tool_result":
             self.approvals.pop(ev["message"]["tool_call_id"], None)
         elif t == "tools_sent":

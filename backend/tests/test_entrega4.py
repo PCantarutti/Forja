@@ -43,6 +43,11 @@ def test_roundtrip_host_container(clean):
     assert workspace.to_host(p) == "C:/Users/pedro/app"
 
 
+def test_default_folder_shows_windows_path(monkeypatch):
+    monkeypatch.setattr(config, "WORKSPACE_HOST", "C:/Users/pedro/Dev/forja-workspace")
+    assert workspace.to_host(config.WORKSPACE_ROOT / "a" / "b.txt") == "C:/Users/pedro/Dev/forja-workspace/a/b.txt"
+
+
 def test_unmounted_drive_is_explained():
     with pytest.raises(workspace.WorkspaceError, match="D: não está montado"):
         workspace.to_container("D:/dados")

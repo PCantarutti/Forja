@@ -27,6 +27,9 @@ export type AppSettings = {
   auto_approve_commands: string[];
   project_memory: boolean;
   project_memory_file: string;
+  enabled_models: Record<string, string[] | undefined>;
+  subagents: Record<"rapido" | "capaz", { provider: string; model: string }>;
+  subagent_max_iterations: number;
   browser_idle_minutes: number;
   browser_scale: number;
   browser_stream: "png" | "jpeg";
@@ -43,7 +46,7 @@ type Memory = {
   raw?: string;
 };
 
-const TABS = ["Geral", "Provedores", "Ferramentas", "Permissões", "MCP", "Memória"] as const;
+const TABS = ["Geral", "Provedores", "Subagentes", "Ferramentas", "Permissões", "MCP", "Memória"] as const;
 type Tab = (typeof TABS)[number];
 
 const input = "w-full rounded-lg border border-line bg-raised px-3 py-1.5 text-sm text-fg focus:border-[#555] focus:outline-none";
@@ -200,6 +203,8 @@ export default function Settings(props: {
               </div>
             ) : tab === "Provedores" ? (
               <Providers s={s} set={set} />
+            ) : tab === "Subagentes" ? (
+              <Subagents s={s} set={set} />
             ) : tab === "Ferramentas" ? (
               <Tools tools={props.tools} disabled={s.disabled_tools} onToggle={(d) => save({ disabled_tools: d })} />
             ) : tab === "Permissões" ? (
@@ -280,7 +285,11 @@ function Providers({ s, set }: { s: AppSettings; set: <K extends keyof AppSettin
               </button>
             )}
           </div>
-          <TestProvider id={p.id} />
+          <ProviderModels
+            id={p.id}
+            chosen={s.enabled_models[p.id]}
+            onChange={(list) => set("enabled_models", { ...s.enabled_models, [p.id]: list })}
+          />
         </div>
       ))}
       <div className="flex flex-wrap gap-2">
@@ -320,31 +329,158 @@ function Providers({ s, set }: { s: AppSettings; set: <K extends keyof AppSettin
       </div>
       <p className="text-xs text-muted">
         <strong className="text-fg">Ollama Cloud:</strong> depois de adicionar, cole a chave criada em ollama.com →
-        Settings → Keys e clique em Salvar. Os modelos da nuvem aparecem no seletor do topo.
+        Settings → Keys e clique em Salvar. Depois liste os modelos e marque os que quer no seletor do chat.
       </p>
     </div>
   );
 }
 
-function TestProvider({ id }: { id: string }) {
-  const [out, setOut] = useState("");
+/** Lista todos os modelos do provedor e deixa marcar quais aparecem no seletor do chat. */
+function ProviderModels({ id, chosen, onChange }: {
+  id: string;
+  chosen: string[] | undefined; // undefined = todos
+  onChange: (list: string[] | undefined) => void;
+}) {
+  const [all, setAll] = useState<string[] | null>(null);
+  const [error, setError] = useState("");
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+
+  const load = async () => {
+    setError("");
+    setOpen(true);
+    try {
+      setAll((await api.get<{ models: string[] }>(`/models?provider=${encodeURIComponent(id)}&all=1`)).models);
+    } catch (e: any) {
+      setAll(null);
+      setError(e.message);
+    }
+  };
+
+  const isOn = (m: string) => !chosen || chosen.includes(m);
+  const toggle = (m: string) => {
+    const base = chosen ?? all ?? [];
+    const next = isOn(m) ? base.filter((x) => x !== m) : [...base, m];
+    onChange(all && next.length === all.length ? undefined : next);
+  };
+  const visible = (all ?? []).filter((m) => m.toLowerCase().includes(q.toLowerCase()));
+
   return (
-    <div className="flex items-center gap-2">
-      <button
-        className={btn}
-        onClick={async () => {
-          setOut("testando…");
-          try {
-            const r = await api.get<{ models: string[] }>(`/models?provider=${encodeURIComponent(id)}`);
-            setOut(`${r.models.length} modelos: ${r.models.slice(0, 3).join(", ")}${r.models.length > 3 ? "…" : ""}`);
-          } catch (e: any) {
-            setOut(e.message);
-          }
-        }}
-      >
-        Testar conexão
-      </button>
-      <span className="truncate text-xs text-muted">{out}</span>
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <button className={btn} onClick={() => (open ? setOpen(false) : load())}>
+          {open ? "Esconder modelos" : "Modelos no seletor…"}
+        </button>
+        <span className="text-xs text-muted">
+          {chosen ? `${chosen.length} escolhido(s)` : "todos aparecem no seletor"}
+          {all && ` · ${all.length} disponíveis`}
+        </span>
+      </div>
+      {error && <p className="text-xs text-red-300">{error}</p>}
+      {open && all && (
+        <div className="rounded-xl border border-line bg-bg p-2">
+          <div className="mb-2 flex items-center gap-2">
+            <input className={input} placeholder="Filtrar" value={q} onChange={(e) => setQ(e.target.value)} />
+            <button className={btn} onClick={() => onChange(undefined)}>
+              Todos
+            </button>
+            <button className={btn} onClick={() => onChange([])}>
+              Nenhum
+            </button>
+          </div>
+          <ul className="max-h-64 space-y-0.5 overflow-y-auto">
+            {visible.map((m) => (
+              <li key={m}>
+                <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 font-mono text-[13px] text-fg hover:bg-surface">
+                  <input type="checkbox" checked={isOn(m)} onChange={() => toggle(m)} />
+                  <span className="truncate">{m}</span>
+                </label>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 px-1 text-xs text-muted">Clique em Salvar no topo para aplicar.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ subagentes
+
+const SLOTS = [
+  { key: "rapido", title: "Rápido", hint: "Modelo menor e rápido para tarefas simples: buscar, listar, resumir, edições óbvias." },
+  { key: "capaz", title: "Capaz", hint: "Modelo maior e mais lento para raciocínio difícil: depurar, projetar, código complexo." },
+] as const;
+
+function SlotModels({ provider, value, onChange }: { provider: string; value: string; onChange: (m: string) => void }) {
+  const [models, setModels] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    setError("");
+    if (!provider) return setModels([]);
+    api
+      .get<{ models: string[] }>(`/models?provider=${encodeURIComponent(provider)}&all=1`)
+      .then((r) => setModels(r.models))
+      .catch((e) => {
+        setModels([]);
+        setError(e.message);
+      });
+  }, [provider]);
+  return (
+    <>
+      <select className={`${input} font-mono`} value={value} disabled={!provider} onChange={(e) => onChange(e.target.value)}>
+        <option value="">(nenhum)</option>
+        {value && !models.includes(value) && <option value={value}>{value}</option>}
+        {models.map((m) => (
+          <option key={m} value={m}>
+            {m}
+          </option>
+        ))}
+      </select>
+      {error && <p className="text-xs text-red-300">{error}</p>}
+    </>
+  );
+}
+
+function Subagents({ s, set }: { s: AppSettings; set: <K extends keyof AppSettings>(k: K, v: AppSettings[K]) => void }) {
+  const change = (slot: "rapido" | "capaz", patch: Partial<{ provider: string; model: string }>) =>
+    set("subagents", { ...s.subagents, [slot]: { ...s.subagents[slot], ...patch } });
+  return (
+    <div className="max-w-2xl space-y-5">
+      <p className="text-sm text-muted">
+        O agente principal pode delegar uma subtarefa com <span className="font-mono">delegate_task</span> e escolhe o nível
+        pela dificuldade. O subagente usa as mesmas ferramentas, aprovações e pasta de trabalho; só o relatório final dele
+        volta para a conversa, e os passos aparecem dentro do bloco da delegação. Sem nenhum slot configurado, a ferramenta
+        não é oferecida ao modelo.
+      </p>
+      {SLOTS.map((slot) => (
+        <section key={slot.key} className="space-y-2 rounded-2xl border border-line bg-surface p-4">
+          <h3 className="text-sm text-fg">{slot.title}</h3>
+          <p className="text-xs text-muted">{slot.hint}</p>
+          <div className="grid grid-cols-[10rem_1fr] gap-2">
+            <select
+              className={input}
+              value={s.subagents[slot.key].provider}
+              onChange={(e) => change(slot.key, { provider: e.target.value, model: "" })}
+            >
+              <option value="">(desligado)</option>
+              {s.providers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            <SlotModels
+              provider={s.subagents[slot.key].provider}
+              value={s.subagents[slot.key].model}
+              onChange={(m) => change(slot.key, { model: m })}
+            />
+          </div>
+        </section>
+      ))}
+      <Field label="Máximo de passos por subagente" hint="Evita que um subagente fique rodando sem fim.">
+        <Num value={s.subagent_max_iterations} onChange={(v) => set("subagent_max_iterations", v)} />
+      </Field>
     </div>
   );
 }

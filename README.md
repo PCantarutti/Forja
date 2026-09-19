@@ -13,6 +13,9 @@ Ambiente de desenvolvimento pessoal com agente de IA **local**. Uma interface we
 - Tokens, tempo e tokens/s de cada resposta
 - Tela de Configurações: provedores e chaves de API (inclui Ollama Cloud), liga/desliga de ferramentas, permissões, MCP e memória da IA
 - Memória do projeto em `FORJA.md`, anexos de arquivos e imagens, editar mensagem e regenerar resposta
+- **Pasta de trabalho por conversa**, escolhida em qualquer lugar do disco (como no Claude Desktop)
+- **Checkpoints**: desfazer as alterações de arquivo de um turno
+- **Subagentes**: o agente delega subtarefas para um modelo *Rápido* ou *Capaz*, conforme a dificuldade
 
 ## Requisitos
 
@@ -72,8 +75,34 @@ Um Chromium (Playwright, `chromium-headless-shell`) roda dentro do container do 
 
 - **Anexos**: clipe no campo de mensagem ou arraste arquivos para o chat. Eles são salvos em `.forja/uploads/` **dentro da pasta de trabalho**, então o agente abre com `read_file`/`run_command` como qualquer arquivo. **Imagens** vão para o modelo como visão (formato OpenAI `image_url`; no Ollama, campo `images`) — funciona com modelos de visão, como o Qwen3.6. Imagem maior que 8 MB não é enviada como imagem.
 - **Editar**: passe o mouse na sua mensagem → lápis. Ao reenviar, tudo o que veio depois dela é apagado e a resposta é refeita.
-- **Regenerar**: botão ⟳ embaixo da última resposta. Apaga a resposta (incluindo as chamadas de ferramenta dela) e gera outra para a mesma mensagem, com o modelo selecionado agora. Arquivos que o agente já tinha alterado **não** voltam ao estado anterior.
-- **Trocar de modelo no meio**: o seletor do topo vale para a próxima mensagem. O painel *Modelos nesta conversa* soma tokens e t/s por modelo.
+- **Regenerar**: botão ⟳ embaixo da última resposta. Apaga a resposta (incluindo as chamadas de ferramenta dela) e gera outra para a mesma mensagem, com o modelo selecionado agora.
+- **Editar/regenerar e arquivos**: se o agente alterou arquivos nos turnos que vão ser apagados, o Forja pergunta se também desfaz essas alterações (veja *Checkpoints*).
+- **Modelo**: o seletor fica no campo de mensagem (provedor à esquerda, modelos à direita, com busca) e vale para a próxima mensagem. O painel *Modelos nesta conversa* soma tokens e t/s por modelo.
+
+## Pasta de trabalho por conversa
+
+Como no Claude Desktop, cada conversa tem a sua pasta. Ela aparece no chip ao lado do título, no topo; clique para trocar. O seletor mostra os discos montados, as pastas usadas recentemente e a pasta padrão (`WORKSPACE_PATH`), e aceita um caminho digitado (`C:/Users/voce/Projetos/app`). Na tela inicial, a pasta escolhida vale para a próxima conversa criada. Trocar a pasta de uma conversa existente vale a partir da próxima mensagem.
+
+**Como funciona**: o disco `C:` é montado no container em `/host/c` (`HOST_DRIVE_C`/`HOST_MOUNTS`). As ferramentas de arquivo (`read_file`, `write_file`, `edit_file`, `list_dir`), os anexos, o `FORJA.md` e o cwd do `run_command` usam a pasta da conversa, e caminhos fora dela são bloqueados.
+
+**Segurança (igual ao Claude Desktop)**: o `run_command` roda bash no container e **enxerga o disco montado inteiro**. A proteção é a aprovação: ele sempre pede confirmação, exceto nos comandos que você liberou em *Permissões*. Evite regras largas (`*`) e leia o comando antes de aprovar.
+
+**Outro disco** (ex.: `D:`): em `docker-compose.yml`, acrescente o volume `- D:/:/host/d` no backend e defina `HOST_MOUNTS=C=/host/c,D=/host/d` no `.env`. Para **não** expor o disco inteiro, troque `HOST_DRIVE_C=C:/` por uma pasta (ex.: `C:/Users/pedro`). Aí o seletor só enxerga o que está dentro dela, mas os caminhos continuam começando em `C:/`.
+
+## Checkpoints (desfazer alterações)
+
+Antes da **primeira** alteração do agente em cada arquivo, dentro de um turno, o Forja guarda como o arquivo estava, ou registra que ele não existia. Isso vale para `write_file` e `edit_file`, inclusive quando quem altera é um subagente. Embaixo da resposta aparece **desfazer N arquivos**: o botão volta os arquivos ao estado de antes daquele turno, desfazendo também os turnos seguintes (dos mais novos para os mais antigos), para não deixar estados misturados.
+
+Mudanças feitas por **`run_command`**, servidores MCP ou pelo navegador **não** são rastreadas. Arquivos maiores que `MAX_FILE_BYTES` também não. Para esses casos, use git na sua pasta.
+
+## Subagentes
+
+Em **Configurações › Subagentes**, escolha provedor e modelo para dois níveis:
+
+- **Rápido**: modelo menor, para tarefas simples e mecânicas (buscar, listar, resumir, edições óbvias).
+- **Capaz**: modelo maior e mais lento, para raciocínio difícil (depurar, projetar, código complexo).
+
+Com pelo menos um nível configurado, o agente principal ganha a ferramenta `delegate_task(task, level)` e decide sozinho quando delegar e para qual nível. Se o nível pedido não estiver configurado, usa o outro e avisa. O subagente usa as mesmas ferramentas, aprovações, permissões e pasta de trabalho, mas não pode delegar de novo. Os passos dele aparecem **dentro do bloco da delegação**, inclusive os cards de aprovação, com modelo, tokens e tempo. Só o relatório final volta para a conversa, o que economiza o contexto do agente principal. O limite de passos por subagente fica na mesma tela (padrão 15).
 
 ## Memória do projeto (`FORJA.md`)
 
@@ -144,7 +173,9 @@ Antes de cada chamada, o Forja estima o tamanho do prompt. Se passar de `COMPACT
 
 | Variável | Padrão | Para que serve |
 |---|---|---|
-| `WORKSPACE_PATH` | `C:/Users/pedro/Dev/forja-workspace` | Pasta do Windows montada em `/workspace`. O agente só enxerga essa pasta. |
+| `WORKSPACE_PATH` | `C:/Users/pedro/Dev/forja-workspace` | Pasta de trabalho **padrão** (conversas sem pasta escolhida) |
+| `HOST_DRIVE_C` | `C:/` | O que do Windows aparece como disco `C:` no seletor de pasta (pode ser uma subpasta) |
+| `HOST_MOUNTS` | `C=/host/c` | Discos montados no container; para `D:`, some `D=/host/d` e o volume no compose |
 | `FORJA_PORT` | `3000` | Porta da interface no host |
 | `OLLAMA_URL` | `http://host.docker.internal:11434/v1` | Endpoint do Ollama |
 | `LMSTUDIO_URL` | `http://host.docker.internal:1234/v1` | Endpoint do LM Studio |
@@ -161,7 +192,9 @@ Antes de cada chamada, o Forja estima o tamanho do prompt. Se passar de `COMPACT
 
 **Ollama**: o Forja usa a API nativa `/api/chat` para enviar `options.num_ctx`. A camada `/v1` do Ollama ignora esse parâmetro, e é por isso que outros clientes ficam presos nos 4k de contexto. A lista de modelos vem de `/v1/models`.
 
-**Ollama Cloud**: em Configurações › Provedores, clique em **+ Ollama Cloud**, cole a chave criada em [ollama.com](https://ollama.com) → Settings → Keys e salve. Ele usa a mesma API nativa do Ollama local (`https://ollama.com/api/chat`), com a chave no cabeçalho `Authorization`. Os modelos da nuvem aparecem no seletor do topo. As mensagens saem do seu PC: não use para código que não pode ir para terceiros.
+**Ollama Cloud**: em Configurações › Provedores, clique em **+ Ollama Cloud**, cole a chave criada em [ollama.com](https://ollama.com) → Settings → Keys e salve. Ele usa a mesma API nativa do Ollama local (`https://ollama.com/api/chat`), com a chave no cabeçalho `Authorization`.
+
+**Quais modelos aparecem no seletor**: em cada provedor, **Modelos no seletor…** lista todos os modelos disponíveis. Marque os que quer ver no chat e clique em Salvar. Sem nenhuma marcação, todos aparecem. Útil para o Ollama Cloud e o OpenRouter, que têm dezenas de modelos. As mensagens saem do seu PC: não use para código que não pode ir para terceiros.
 
 **LM Studio**: aba *Developer* → *Start Server* (porta 1234) e ative **Serve on Local Network**. A janela de contexto é a que você escolhe ao carregar o modelo no LM Studio. O painel lateral mostra o valor carregado.
 
@@ -175,9 +208,9 @@ No painel lateral, em **Tool calling deste modelo**:
 - `native`: só tool calling nativo.
 - `text`: não envia `tools`. O schema vai no system prompt e o modelo responde com `<tool_call>{...}</tool_call>`. Use com modelos sem suporte nativo.
 
-## Trocando a pasta de trabalho
+## Pasta padrão
 
-Mude `WORKSPACE_PATH` no `.env` (use `/` ou `\\`) e rode `docker compose up -d`. Se a pasta não existir, o Docker Desktop a cria. Qualquer caminho fora dela (`..`, absolutos ou symlinks que apontem para fora) é bloqueado e o modelo recebe um erro.
+A pasta de cada conversa é escolhida na tela (veja *Pasta de trabalho por conversa*). `WORKSPACE_PATH` no `.env` define a pasta **padrão**, usada por conversas sem pasta escolhida. Depois de mudar, rode `docker compose up -d`. Se a pasta não existir, o Docker Desktop a cria.
 
 ## Troubleshooting
 
@@ -242,6 +275,9 @@ backend/app/
   agent.py       loop do agente, execução em background (Run), aprovações
   settings.py    configurações editáveis na UI (banco + aplicação em runtime)
   policy.py      regras de auto-aprovação (Permissões)
+  workspace.py   pasta de trabalho por conversa (caminhos Windows <-> container, seletor)
+  checkpoints.py desfazer alterações de arquivo por turno
+  subagents.py   delegate_task e o loop do subagente
   uploads.py     anexos do chat (arquivos e imagens para visão)
   memory.py      leitura/limpeza da memória (via servidor MCP de grafo)
   main.py        rotas FastAPI

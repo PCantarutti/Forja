@@ -5,11 +5,25 @@ import BrowserPanel from "./components/BrowserPanel";
 import InfoPanel, { type McpStatus, type ToolInfo } from "./components/InfoPanel";
 import RightPanel, { type RightTab } from "./components/RightPanel";
 import SettingsDialog from "./components/Settings";
-import { Attachments, CopyButton, EventNotice, Markdown, StatsRow, Thinking, ToolBlock, type TurnStats } from "./components/MessageView";
-import { ArrowUp, ChevronDown, Cube, Edit, Paperclip, Refresh, Square } from "./components/icons";
+import FolderPicker, { folderName } from "./components/FolderPicker";
+import ModelPicker from "./components/ModelPicker";
+import {
+  Attachments,
+  CopyButton,
+  EventNotice,
+  Markdown,
+  setFileConv,
+  StatsRow,
+  SubagentSteps,
+  Thinking,
+  ToolBlock,
+  type TurnStats,
+} from "./components/MessageView";
+import { ArrowUp, ChevronDown, Edit, Laptop, Paperclip, Refresh, Square, Undo } from "./components/icons";
 import type { Approval, Attachment, BrowserState, Conversation, Message, Settings, Stats, ToolsSent } from "./types";
 
-type Config = { providers: { id: string; name: string }[]; num_ctx: number };
+type Config = { providers: { id: string; name: string }[]; num_ctx: number; default_workspace?: string };
+type SubState = { status: string; steps: { call: any; result?: Message }[] };
 type Live = {
   messages: Message[];
   run: {
@@ -17,7 +31,7 @@ type Live = {
     cursor: number;
     draft: { content: string; thinking: string } | null;
     sent: ToolsSent | null;
-    approvals: { call: { id: string; name: string }; preview: any; suggest?: string }[];
+    approvals: { call: { id: string; name: string; arguments?: any }; preview: any; suggest?: string; parent?: string }[];
   } | null;
 };
 
@@ -72,8 +86,12 @@ export default function App() {
   const [allTools, setAllTools] = useState<ToolInfo[]>([]);
   const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [settings, setSettings] = useState<Settings>(loadSettings);
-  const [models, setModels] = useState<string[]>([]);
-  const [modelsError, setModelsError] = useState("");
+  const [catalogKey, setCatalogKey] = useState(0); // força o seletor de modelo a recarregar
+  const [showFolder, setShowFolder] = useState(false);
+  // Pasta escolhida antes de a conversa existir (tela inicial); vira a pasta da conversa no 1º envio.
+  const [pendingWs, setPendingWs] = useState<string | null>(() => localStorage.getItem("forja.workspace"));
+  const [subSteps, setSubSteps] = useState<Record<string, SubState>>({});
+  const [checkpoints, setCheckpoints] = useState<Record<string, string[]>>({});
   const [toolMode, setToolMode] = useState("auto");
   const [vision, setVision] = useState("auto");
   const [right, setRight] = useState<RightState>(RIGHT_DEFAULT);
@@ -103,6 +121,14 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("forja.settings", JSON.stringify(settings));
   }, [settings]);
+
+  useEffect(() => {
+    if (pendingWs) localStorage.setItem("forja.workspace", pendingWs);
+    else localStorage.removeItem("forja.workspace");
+  }, [pendingWs]);
+
+  // Miniaturas/anexos são servidos da pasta da conversa aberta.
+  useEffect(() => setFileConv(currentId), [currentId]);
 
   // Ao trocar de conversa, restaura o estado da coluna direita dela. Rascunho (sem conversa) = recolhida.
   // Conversa recém-criada a partir do rascunho herda o estado atual (ex.: agente abriu o navegador no 1º turno).
@@ -150,20 +176,6 @@ export default function App() {
   }, [currentId]);
 
   useEffect(() => {
-    setModelsError("");
-    api
-      .get<{ models: string[] }>(`/models?provider=${settings.provider}`)
-      .then(({ models }) => {
-        setModels(models);
-        if (!models.includes(settings.model)) update({ model: models[0] ?? "" });
-      })
-      .catch((e) => {
-        setModels([]);
-        setModelsError(e.message);
-      });
-  }, [settings.provider]);
-
-  useEffect(() => {
     if (!settings.model) return;
     api
       .get<{ tool_mode: string; vision: string }>(`/model-settings?model=${encodeURIComponent(settings.model)}`)
@@ -182,7 +194,13 @@ export default function App() {
     api.get<Conversation[]>("/conversations").then(setConversations).catch((e) => setError(e.message));
   }
 
+  function loadCheckpoints(id: number | null) {
+    if (id === null) return setCheckpoints({});
+    api.get<Record<string, string[]>>(`/conversations/${id}/checkpoints`).then(setCheckpoints).catch(() => {});
+  }
+
   function refreshTools() {
+    setCatalogKey((k) => k + 1);
     api.get<Config>("/config").then(setConfig).catch(() => {});
     api.get<ToolInfo[]>("/tools").then(setAllTools).catch(() => {});
     api.get<McpStatus>("/mcp").then(setMcp).catch(() => {});
@@ -202,6 +220,7 @@ export default function App() {
     setDraft(null);
     setStatus(null);
     setApprovals({});
+    setSubSteps({});
     runId.current = null;
   }
 
@@ -223,6 +242,7 @@ export default function App() {
         setRunning(false);
         resetLive();
         refreshConversations();
+        loadCheckpoints(convId);
       }
     }
   }
@@ -236,12 +256,19 @@ export default function App() {
     setCurrentId(id);
     const live = await api.get<Live>(`/conversations/${id}/live`);
     setMessages(live.messages);
+    loadCheckpoints(id);
     const run = live.run;
     if (run) {
       runId.current = run.run_id;
       setDraft(run.draft);
       setSent(run.sent);
       setApprovals(Object.fromEntries(run.approvals.map((a) => [a.call.id, { preview: a.preview, suggest: a.suggest, tool: a.call.name }])));
+      // Aprovação pedida por um subagente: recria o passo dentro do bloco da delegação.
+      const subs: Record<string, SubState> = {};
+      for (const a of run.approvals.filter((a) => a.parent)) {
+        (subs[a.parent!] ??= { status: "aguardando aprovação", steps: [] }).steps.push({ call: a.call });
+      }
+      setSubSteps(subs);
       follow(id, `/runs/${run.run_id}/stream?cursor=${run.cursor}`);
     }
   }
@@ -253,6 +280,7 @@ export default function App() {
     setCurrentId(null);
     setMessages([]);
     setCtx(null);
+    setCheckpoints({});
   }
 
   async function deleteConversation(id: number) {
@@ -272,6 +300,29 @@ export default function App() {
   }
 
   function onEvent(ev: any) {
+    if (ev.parent) {
+      // Passo de subagente: fica dentro do bloco do delegate_task, não na lista de mensagens.
+      const pid: string = ev.parent;
+      setSubSteps((all) => {
+        const cur = all[pid] ?? { status: "", steps: [] };
+        if (ev.type === "tool_call") return { ...all, [pid]: { ...cur, steps: [...cur.steps, { call: ev.call }] } };
+        if (ev.type === "tool_result")
+          return {
+            ...all,
+            [pid]: { ...cur, steps: cur.steps.map((st) => (st.call.id === ev.message.tool_call_id ? { ...st, result: ev.message } : st)) },
+          };
+        return all;
+      });
+      if (ev.type === "tool_result") setApprovals(({ [ev.message.tool_call_id]: _, ...rest }) => rest);
+      if (ev.type === "sub_status") setSubSteps((all) => ({ ...all, [pid]: { steps: all[pid]?.steps ?? [], status: ev.text } }));
+      if (ev.type === "approval_request")
+        setApprovals((a) => ({ ...a, [ev.call.id]: { preview: ev.preview, suggest: ev.suggest, tool: ev.call.name } }));
+      if (ev.type === "tool_call" && typeof ev.call?.name === "string" && ev.call.name.startsWith("browser_")) {
+        setBrowserOpen(true);
+        setRight({ tab: "browser", collapsed: false });
+      }
+      return;
+    }
     switch (ev.type) {
       case "run_started":
         runId.current = ev.run_id;
@@ -290,6 +341,8 @@ export default function App() {
         setStatus(ev.text);
         break;
       case "message":
+        refreshConversations(); // título da conversa nova já existe no servidor
+      // fallthrough
       case "event":
       case "tool_result":
         setStatus(null);
@@ -319,11 +372,50 @@ export default function App() {
     }
   }
 
+  /** Conversa atual; cria na hora (com a pasta escolhida) se ainda estiver na tela inicial. */
+  async function ensureConversation(): Promise<number> {
+    if (currentId !== null) return currentId;
+    const c = await api.post<Conversation>("/conversations", { workspace: pendingWs });
+    setCurrentId(c.id);
+    setMessages([]);
+    refreshConversations();
+    return c.id;
+  }
+
+  async function pickFolder(path: string | null) {
+    setShowFolder(false);
+    setError("");
+    if (currentId === null) return setPendingWs(path);
+    try {
+      await api.put(`/conversations/${currentId}/workspace`, { workspace: path });
+      refreshConversations();
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+
+  async function undoTurn(turnId: number, files: string[]) {
+    if (currentId === null) return;
+    const lista = files.map((f) => "• " + f).join("\n");
+    if (!confirm(`Desfazer as alterações feitas pelo agente a partir desta mensagem?\n\n${lista}\n\nMudanças feitas por comandos (run_command) não são desfeitas.`)) return;
+    try {
+      await api.post(`/conversations/${currentId}/checkpoints/restore`, { turn_id: turnId });
+    } catch (e: any) {
+      setError(e.message);
+    }
+    loadCheckpoints(currentId);
+  }
+
   async function addFiles(files: FileList | File[]) {
     setUploading(true);
+    const conv = await ensureConversation().catch((e) => {
+      setError(e.message);
+      return null;
+    });
     for (const f of Array.from(files)) {
+      if (conv === null) break;
       try {
-        const att = await uploadFile(f);
+        const att = await uploadFile(f, conv);
         setAttachments((list) => [...list, att]);
       } catch (e: any) {
         setError(`${f.name}: ${e.message}`);
@@ -336,11 +428,24 @@ export default function App() {
   async function rewindAndRun(messageId: number, keep: boolean, content: string | null) {
     if (currentId === null || running) return;
     setError("");
+    // Turnos que vão sumir e alteraram arquivos: pergunta se desfaz os arquivos também.
+    const changed = Object.entries(checkpoints)
+      .filter(([turn]) => Number(turn) >= messageId)
+      .flatMap(([, files]) => files);
+    const restore_files =
+      changed.length > 0 &&
+      confirm(
+        `O agente alterou ${changed.length} arquivo(s) a partir desta mensagem:\n\n${[...new Set(changed)]
+          .map((f) => "• " + f)
+          .join("\n")}\n\nOK = desfazer essas alterações também · Cancelar = manter os arquivos como estão`,
+      );
     try {
       const r = await api.post<{ messages: Message[] }>(`/conversations/${currentId}/rewind`, {
         message_id: messageId,
         keep,
+        restore_files,
       });
+      loadCheckpoints(currentId);
       setMessages(r.messages);
     } catch (e: any) {
       setError(e.message);
@@ -369,11 +474,12 @@ export default function App() {
     setInput("");
     const files = attachments;
     setAttachments([]);
-    let id = currentId;
-    if (id === null) {
-      id = (await api.post<Conversation>("/conversations")).id;
-      setCurrentId(id);
-      setMessages([]);
+    let id: number;
+    try {
+      id = await ensureConversation();
+    } catch (e: any) {
+      setError(e.message);
+      return;
     }
     await follow(id, `/conversations/${id}/run`, {
       method: "POST",
@@ -415,18 +521,22 @@ export default function App() {
   // Estatísticas por turno (todas as iterações do agente até a próxima mensagem do usuário),
   // exibidas embaixo da última resposta do turno.
   const turns = useMemo(() => {
-    const out = new Map<number, { stats: TurnStats | null; text: string }>();
+    const out = new Map<number, { stats: TurnStats | null; text: string; userId: number | null }>();
     let acc: Stats[] = [];
     let text: string[] = [];
     let last = -1;
+    let userId: number | null = null;
     const flush = () => {
-      if (last >= 0) out.set(last, { stats: acc.length ? aggregate(acc) : null, text: text.join("\n\n") });
+      if (last >= 0) out.set(last, { stats: acc.length ? aggregate(acc) : null, text: text.join("\n\n"), userId });
       acc = [];
       text = [];
       last = -1;
     };
     messages.forEach((m, i) => {
-      if (m.role === "user") flush();
+      if (m.role === "user") {
+        flush();
+        userId = m.id;
+      }
       else if (m.role === "assistant") {
         last = i;
         if (m.meta?.stats) acc.push(m.meta.stats);
@@ -448,6 +558,9 @@ export default function App() {
     const max = ctx?.max ?? lastStats?.ctx_max ?? null;
     return { used, max, out: lastTurn?.tokens ?? null, avg };
   }, [messages, turns, ctx]);
+
+  const conv = conversations.find((c) => c.id === currentId);
+  const wsLabel = (conv ? conv.workspace : pendingWs) ?? config.default_workspace ?? "pasta padrão";
 
   // O turno atual ainda está rodando: não mostra estatísticas dele até terminar.
   const lastUserIndex = messages.map((m) => m.role).lastIndexOf("user");
@@ -477,43 +590,23 @@ export default function App() {
       )}
 
       <main className="flex min-w-0 flex-1 flex-col bg-bg">
-        <header className="flex items-center gap-1 px-4 py-2.5">
-          <label className="relative flex items-center text-muted">
-            <select
-              value={settings.provider}
-              onChange={(e) => update({ provider: e.target.value })}
-              className="appearance-none bg-transparent py-1 pr-6 pl-2 text-sm hover:text-fg focus:outline-none"
-            >
-              {config.providers.map((p) => (
-                <option key={p.id} value={p.id} className="bg-surface">
-                  {p.name}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-1 size-3.5" />
-          </label>
-          <span className="text-faint">/</span>
-          <label className="relative flex items-center">
-            <select
-              value={settings.model}
-              onChange={(e) => update({ model: e.target.value })}
-              className="max-w-80 appearance-none truncate bg-transparent py-1 pr-7 pl-2 text-[17px] font-medium text-fg focus:outline-none"
-            >
-              {!models.length && <option value="">(sem modelos)</option>}
-              {models.map((m) => (
-                <option key={m} className="bg-surface text-sm">
-                  {m}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-1.5 size-4 text-muted" />
-          </label>
+        <header className="flex min-w-0 items-center gap-2 px-4 py-2.5">
+          <Laptop className="size-4 shrink-0 text-muted" />
+          <span className="truncate text-sm font-medium text-fg" title={conv?.title}>
+            {conv?.title ?? "Nova conversa"}
+          </span>
+          <button
+            onClick={() => setShowFolder(true)}
+            disabled={running}
+            title={`Pasta de trabalho: ${wsLabel}\nClique para trocar`}
+            className="inline-flex max-w-56 shrink-0 items-center gap-1 rounded-md bg-raised px-2 py-0.5 text-xs text-muted hover:text-fg disabled:opacity-50"
+          >
+            <span className="truncate">{folderName(conv ? conv.workspace ?? config.default_workspace : pendingWs ?? config.default_workspace)}</span>
+            <ChevronDown className="size-3 shrink-0" />
+          </button>
         </header>
-
-        {modelsError && (
-          <div className="mx-4 rounded-xl border border-red-500/30 bg-surface px-4 py-2 text-sm text-red-200">
-            Não consegui listar modelos: {modelsError}
-          </div>
+        {showFolder && (
+          <FolderPicker current={conv ? conv.workspace ?? null : pendingWs} onPick={pickFolder} onClose={() => setShowFolder(false)} />
         )}
 
         <div
@@ -531,7 +624,13 @@ export default function App() {
                 <div className="text-3xl font-semibold">Olá!</div>
                 <div className="text-3xl text-faint">Como posso ajudar hoje?</div>
                 <div className="mt-4 text-sm text-muted">
-                  Modo {settings.mode === "agent" ? "Agente: lê e escreve em /workspace" : "Chat: sem ferramentas"}.
+                  {settings.mode === "agent" ? (
+                    <>
+                      Modo Agente: lê e escreve em <span className="font-mono text-fg">{wsLabel}</span>
+                    </>
+                  ) : (
+                    "Modo Chat: sem ferramentas."
+                  )}
                 </div>
               </div>
             )}
@@ -603,13 +702,41 @@ export default function App() {
                       running={running}
                       queued={m.tool_calls!.slice(0, k).some((p) => !results.has(p.id))}
                       onDecide={(ok, always) => decide(c.id, ok, always)}
-                    />
+                    >
+                      {c.name === "delegate_task" && (
+                        <SubagentSteps
+                          info={results.get(c.id)?.meta?.sub}
+                          status={subSteps[c.id]?.status}
+                          steps={
+                            subSteps[c.id]?.steps ??
+                            (results.get(c.id)?.meta?.sub?.steps ?? []).map((st: any) => ({
+                              call: { id: st.id, name: st.name, arguments: st.arguments },
+                              result: { ...st, content: st.result, tool_call_id: st.id } as Message,
+                            }))
+                          }
+                          approvals={approvals}
+                          running={running}
+                          onDecide={decide}
+                        />
+                      )}
+                    </ToolBlock>
                   ))}
                   {showTurn && (
                     <div className="mt-4 space-y-1.5">
                       {turn.stats && <StatsRow s={turn.stats} />}
-                      <div className="flex">
+                      <div className="flex items-center">
                         <CopyButton text={turn.text} />
+                        {turn.userId !== null && checkpoints[String(turn.userId)] && (
+                          <button
+                            title={"Arquivos alterados neste turno:\n" + checkpoints[String(turn.userId)].join("\n")}
+                            disabled={running}
+                            onClick={() => undoTurn(turn.userId!, checkpoints[String(turn.userId)])}
+                            className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-faint hover:bg-raised hover:text-fg disabled:opacity-30"
+                          >
+                            <Undo className="size-3.5" /> desfazer {checkpoints[String(turn.userId)].length} arquivo
+                            {checkpoints[String(turn.userId)].length > 1 ? "s" : ""}
+                          </button>
+                        )}
                         {i > lastUserIndex && lastUserIndex >= 0 && (
                           <button
                             title="Gerar outra resposta"
@@ -717,9 +844,12 @@ export default function App() {
                   </select>
                 )}
 
-                <span className="ml-auto hidden max-w-60 items-center gap-1.5 truncate rounded-lg bg-raised px-2.5 py-1 text-xs text-muted sm:inline-flex">
-                  <Cube className="size-3.5 shrink-0" /> <span className="truncate">{settings.model || "sem modelo"}</span>
-                </span>
+                <ModelPicker
+                  provider={settings.provider}
+                  model={settings.model}
+                  refreshKey={catalogKey}
+                  onChange={(provider, model) => update({ provider, model })}
+                />
                 {running ? (
                   <button onClick={stop} title="Parar" className="grid size-9 place-items-center rounded-full bg-raised text-fg hover:bg-[#3a3a3a]">
                     <Square />

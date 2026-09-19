@@ -68,7 +68,14 @@ def to_container(host_path: str) -> Path:
 
 
 def to_host(path: Path) -> str | None:
-    """Caminho do container -> Windows (None se não estiver sob um disco montado)."""
+    """Caminho do container -> Windows (None se não estiver sob um disco montado nem na pasta padrão)."""
+    if config.WORKSPACE_HOST:
+        try:
+            rel = Path(path).relative_to(config.WORKSPACE_ROOT).as_posix()
+            host = normalize(config.WORKSPACE_HOST)
+            return host if rel == "." else f"{host.rstrip('/')}/{rel}"
+        except (ValueError, WorkspaceError):
+            pass
     for letter, base in mounts().items():
         try:
             rel = Path(path).relative_to(base)
@@ -115,7 +122,7 @@ def list_dirs(host_path: str) -> dict:
         with os.scandir(p) as it:
             for e in it:
                 try:
-                    if e.is_dir() and e.name not in HIDDEN and not e.name.startswith("."):
+                    if e.is_dir() and e.name not in HIDDEN and not e.name.startswith((".", "$")):
                         dirs.append(e.name)
                 except OSError:
                     continue

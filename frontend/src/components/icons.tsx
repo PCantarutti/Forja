@@ -37,4 +37,8 @@ export const Info = base(<><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 
 export const PanelRight = base(<><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></>);
 export const ArrowLeft = base(<path d="M19 12H5m6-6-6 6 6 6" />);
 export const ArrowRight = base(<path d="M5 12h14m-6-6 6 6-6 6" />);
+export const Folder = base(<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />);
+export const Laptop = base(<><rect x="4" y="5" width="16" height="11" rx="1.5" /><path d="M2 19h20" /></>);
+export const Undo = base(<><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></>);
+export const Split = base(<><circle cx="6" cy="6" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6 8v2a4 4 0 0 0 4 4h0a2 2 0 0 1 2 2v1M18 8v2a4 4 0 0 1-4 4" /></>);
 export const Wrench = base(<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z" />);

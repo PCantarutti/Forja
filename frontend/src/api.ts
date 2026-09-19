@@ -19,10 +19,10 @@ export const api = {
 };
 
 /** Upload de anexo (multipart). O arquivo vai parar dentro da pasta de trabalho. */
-export async function uploadFile(file: File) {
+export async function uploadFile(file: File, conv: number | null = null) {
   const form = new FormData();
   form.append("file", file);
-  const r = await fetch("/api/uploads", { method: "POST", body: form });
+  const r = await fetch(`/api/uploads?conv=${conv ?? 0}`, { method: "POST", body: form });
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `HTTP ${r.status}`);
   return r.json();
 }

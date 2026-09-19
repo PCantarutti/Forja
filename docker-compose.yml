@@ -7,6 +7,9 @@ services:
     init: true  # colhe zumbis do Chromium e dos dev servers (setsid nohup) reparentados ao PID 1
     environment:
       WORKSPACE_ROOT: /workspace
+      WORKSPACE_HOST: ${WORKSPACE_PATH}
+      # Discos do Windows visíveis no seletor de pasta. Para outro disco, some aqui e em volumes (ex.: D=/host/d).
+      HOST_MOUNTS: ${HOST_MOUNTS:-C=/host/c}
       DB_PATH: /data/forja.db
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434/v1}
       LMSTUDIO_URL: ${LMSTUDIO_URL:-http://host.docker.internal:1234/v1}
@@ -20,6 +23,9 @@ services:
     volumes:
       - forja-data:/data
       - ${WORKSPACE_PATH:?defina WORKSPACE_PATH no .env}:/workspace
+      # Como no Claude Desktop: qualquer pasta pode virar pasta de trabalho. As ferramentas de arquivo
+      # ficam presas à pasta escolhida; o shell (sempre com aprovação) enxerga o disco inteiro.
+      - ${HOST_DRIVE_C:-C:/}:/host/c
       - ./config:/config
     extra_hosts:
       - "host.docker.internal:host-gateway"

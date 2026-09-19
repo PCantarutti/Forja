@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import type { Approval, Attachment, Message, Preview, ToolCall } from "../types";
-import { Brain, Check, Chevron, Clock, Copy, Cube, Gauge, Shield, Tokens, X } from "./icons";
+import { Brain, Check, Chevron, Split, Clock, Copy, Cube, Gauge, Shield, Tokens, X } from "./icons";
 
 export function Markdown({ text }: { text: string }) {
   return (
@@ -38,7 +38,12 @@ export function Thinking({ text, live }: { text: string; live?: boolean }) {
   );
 }
 
-export const fileUrl = (a: Attachment) => `/api/files?path=${encodeURIComponent(a.path)}`;
+// Anexos e screenshots ficam na pasta de trabalho DA CONVERSA; o App avisa qual está aberta.
+let fileConv = "0";
+export const setFileConv = (conv: number | null) => {
+  fileConv = conv === null ? "0" : String(conv);
+};
+export const fileUrl = (a: Attachment) => `/api/files?path=${encodeURIComponent(a.path)}&conv=${fileConv}`;
 
 /** Imagem em tela cheia; clique (ou Esc) fecha. */
 export function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
@@ -219,6 +224,7 @@ export function ToolBlock(props: {
   running: boolean;
   queued?: boolean; // uma chamada anterior da mesma resposta ainda não terminou
   onDecide: (approved: boolean, alwaysAllow?: boolean) => void;
+  children?: React.ReactNode; // passos de um subagente (delegate_task)
 }) {
   const { call, result, approval, running, queued } = props;
   const waiting = approval !== undefined && !result;
@@ -227,7 +233,9 @@ export function ToolBlock(props: {
   const [label, cls] = STATUS[status];
   const preview: Preview | undefined = approval?.preview ?? result?.meta?.preview ?? undefined;
   const a = call.arguments;
-  const hint = [a.path, a.command, a.query, a.url, a.selector, a.script].find((v) => typeof v === "string") as string | undefined;
+  const hint = (call.name === "delegate_task"
+    ? `${a.level ?? ""} · ${a.task ?? ""}`
+    : [a.path, a.command, a.query, a.url, a.selector, a.script].find((v) => typeof v === "string")) as string | undefined;
   const verb =
     {
       edit_file: "editar",
@@ -249,6 +257,7 @@ export function ToolBlock(props: {
       </button>
 
       {result?.meta?.attachments && <ToolImages list={result.meta.attachments} />}
+      {props.children && <div className="border-t border-line px-3 py-2">{props.children}</div>}
 
       {waiting && !approval?.sent && (
         <div className="space-y-3 border-t border-line p-4">
@@ -337,6 +346,48 @@ export function EventNotice({ m }: { m: Message }) {
   return (
     <div className={`my-3 rounded-2xl border bg-surface px-4 py-2.5 text-sm ${EVENT_STYLE[kind] ?? EVENT_STYLE.info}`}>
       <span className="font-medium">{title}:</span> {m.content}
+    </div>
+  );
+}
+
+
+type SubStep = { call: ToolCall; result?: Message };
+
+/** Passos de um subagente, desenhados dentro do bloco do delegate_task (aprovações inclusas). */
+export function SubagentSteps(props: {
+  info?: { level: string; model: string; tokens?: number; seconds?: number; fallback?: string };
+  status?: string;
+  steps: SubStep[];
+  approvals: Record<string, Approval>;
+  running: boolean;
+  onDecide: (callId: string, approved: boolean, alwaysAllow?: boolean) => void;
+}) {
+  const { info } = props;
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center gap-x-3 text-xs text-muted">
+        <span className="inline-flex items-center gap-1.5">
+          <Split className="size-3.5" /> subagente{info ? ` ${info.level === "capaz" ? "Capaz" : "Rápido"} · ${info.model}` : ""}
+        </span>
+        {info?.tokens != null && info.seconds != null && (
+          <span className="text-faint">
+            {info.tokens.toLocaleString("pt-BR")} tokens · {info.seconds}s · {props.steps.length} passos
+          </span>
+        )}
+        {props.status && <span className="animate-pulse text-sky-300">{props.status}</span>}
+      </div>
+      {info?.fallback && <div className="text-xs text-amber-200">{info.fallback}</div>}
+      {props.steps.map((st, k) => (
+        <ToolBlock
+          key={st.call.id}
+          call={st.call}
+          result={st.result}
+          approval={props.approvals[st.call.id]}
+          running={props.running}
+          queued={props.steps.slice(0, k).some((p) => !p.result)}
+          onDecide={(ok, always) => props.onDecide(st.call.id, ok, always)}
+        />
+      ))}
     </div>
   );
 }
