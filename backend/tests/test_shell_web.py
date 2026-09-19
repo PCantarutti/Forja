@@ -43,7 +43,8 @@ def test_shell_cwd_confined(tmp_path):
 def test_shell_preview(tmp_path):
     (tmp_path / "sub").mkdir()
     pv = preview_tool("run_command", {"command": "pytest -q", "cwd": "sub"}, tmp_path)
-    assert pv == {"kind": "command", "path": "/workspace/sub", "text": "pytest -q"}
+    # fora de um disco montado, mostra o caminho do container
+    assert pv["kind"] == "command" and pv["text"] == "pytest -q" and pv["path"].replace("\\", "/").endswith("/sub")
 
 
 # ------------------------------------------------ web

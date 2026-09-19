@@ -63,7 +63,7 @@ class Server:
             raise ValueError("defina 'command' (stdio) ou 'url' (HTTP)")
         return stdio_client(StdioServerParameters(
             command=self.spec["command"], args=self.spec.get("args", []),
-            env=self.spec.get("env"), cwd=str(config.WORKSPACE_ROOT)))
+            env=self.spec.get("env"), cwd=str(config.WORKSPACE_ROOT)))  # global: MCP não é por conversa
 
     async def _run(self) -> None:
         source = f"mcp:{self.name}"

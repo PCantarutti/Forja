@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from . import config, db, llm, mcp_client, memory, settings, uploads
+from . import checkpoints, config, db, llm, mcp_client, memory, settings, subagents, uploads, workspace
 from .agent import RUNS, Run, RunRequest, active_run
 from .browser import MANAGER
 from .tools import REGISTRY, ToolError
@@ -32,7 +32,46 @@ app = FastAPI(title="Forja", lifespan=lifespan)
 @app.get("/api/config")
 def get_config():
     return {"providers": [{"id": p["id"], "name": p["name"]} for p in config.PROVIDERS.values()],
-            "num_ctx": config.NUM_CTX, "max_iterations": config.MAX_ITERATIONS, "workspace": "/workspace"}
+            "num_ctx": config.NUM_CTX, "max_iterations": config.MAX_ITERATIONS,
+            "default_workspace": workspace.label(None), "drives": [d["name"] for d in workspace.roots()],
+            "subagents": {k: v for k, v in subagents.configured().items()}}
+
+
+# ------------------------------------------------------------------ pastas de trabalho
+
+@app.get("/api/fs/roots")
+def fs_roots():
+    """Discos montados + pastas usadas recentemente (para o seletor de pasta)."""
+    with db.session() as s:
+        rows = s.execute(select(db.Conversation.workspace, db.Conversation.updated_at)
+                         .where(db.Conversation.workspace.is_not(None))
+                         .order_by(db.Conversation.updated_at.desc())).all()
+    recent: list[str] = []
+    for ws, _ in rows:
+        if ws not in recent:
+            recent.append(ws)
+    return {"drives": workspace.roots(), "recent": recent[:8], "default": workspace.label(None)}
+
+
+@app.get("/api/fs/list")
+def fs_list(path: str):
+    try:
+        return workspace.list_dirs(path)
+    except workspace.WorkspaceError as e:
+        raise HTTPException(400, str(e))
+
+
+def _conv_root(conv_id: int | str | None):
+    """Pasta (no container) da conversa; 0/None = pasta padrão."""
+    if not conv_id or str(conv_id) == "0":
+        return workspace.default_root()
+    with db.session() as s:
+        c = s.get(db.Conversation, int(conv_id))
+        folder = c.workspace if c else None
+    try:
+        return workspace.resolve(folder)
+    except workspace.WorkspaceError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/tools")
@@ -119,11 +158,31 @@ async def reload_mcp():
 
 
 @app.get("/api/models")
-async def get_models(provider: str):
+async def get_models(provider: str, all: bool = False):
+    """Modelos do provedor. Sem `all`, só os marcados em Configurações › Provedores (se houver seleção)."""
     try:
-        return {"models": await llm.list_models(provider)}
+        models = await llm.list_models(provider)
     except llm.LLMError as e:
         raise HTTPException(502, str(e))
+    chosen = config.ENABLED_MODELS.get(provider)
+    if all or not chosen:
+        return {"models": models, "filtered": False, "total": len(models)}
+    return {"models": [m for m in models if m in chosen], "filtered": True, "total": len(models)}
+
+
+@app.get("/api/catalog")
+async def catalog():
+    """Provedores com os modelos habilitados de cada um (para o seletor do campo de mensagem)."""
+    import asyncio
+
+    async def one(p):
+        try:
+            data = await get_models(p["id"])
+            return {"id": p["id"], "name": p["name"], "type": p["type"], "models": data["models"], "error": ""}
+        except HTTPException as e:
+            return {"id": p["id"], "name": p["name"], "type": p["type"], "models": [], "error": e.detail}
+
+    return await asyncio.gather(*(one(p) for p in config.PROVIDERS.values()))
 
 
 class ModelSettingBody(BaseModel):
@@ -255,8 +314,9 @@ async def browser_upload(conv: str = "0", file: UploadFile | None = File(None)):
         if file is None:
             await s.upload([])
         else:
-            att = uploads.save(file.filename or "arquivo", await file.read(), file.content_type)
-            await s.upload([str(config.WORKSPACE_ROOT / att["path"])])
+            root = _conv_root(conv)
+            att = uploads.save(file.filename or "arquivo", await file.read(), file.content_type, root)
+            await s.upload([str(root / att["path"])])
     except (ToolError, ValueError, OSError) as e:
         raise HTTPException(400, str(e))
     return await s.state_with_title()
@@ -271,7 +331,8 @@ async def browser_close(conv: str = "0"):
 # ------------------------------------------------------------------ conversas
 
 def _conv_dict(c: db.Conversation) -> dict:
-    return {"id": c.id, "title": c.title, "updated_at": c.updated_at.isoformat()}
+    return {"id": c.id, "title": c.title, "updated_at": c.updated_at.isoformat(),
+            "workspace": c.workspace, "workspace_label": workspace.label(c.workspace)}
 
 
 @app.get("/api/conversations")
@@ -282,9 +343,16 @@ def list_conversations():
 
 
 @app.post("/api/conversations")
-def create_conversation():
+def create_conversation(body: dict | None = None):
+    folder = (body or {}).get("workspace") or None
+    if folder:
+        try:
+            workspace.resolve(folder)
+            folder = workspace.normalize(folder)
+        except workspace.WorkspaceError as e:
+            raise HTTPException(400, str(e))
     with db.session() as s:
-        c = db.Conversation()
+        c = db.Conversation(workspace=folder)
         s.add(c)
         s.commit()
         return _conv_dict(c)
@@ -302,6 +370,38 @@ def get_conversation(conv_id: int):
     with db.session() as s:
         c = _get_conv(s, conv_id)
         return {**_conv_dict(c), "messages": [m.to_dict() for m in c.messages]}
+
+
+@app.put("/api/conversations/{conv_id}/workspace")
+def set_workspace(conv_id: int, body: dict):
+    """Troca a pasta de trabalho da conversa (vale a partir da próxima mensagem)."""
+    folder = body.get("workspace") or None
+    if active_run(conv_id):
+        raise HTTPException(409, "Espere a execução atual terminar")
+    if folder:
+        try:
+            workspace.resolve(folder)
+            folder = workspace.normalize(folder)
+        except workspace.WorkspaceError as e:
+            raise HTTPException(400, str(e))
+    with db.session() as s:
+        c = _get_conv(s, conv_id)
+        c.workspace = folder
+        s.commit()
+        return _conv_dict(c)
+
+
+@app.get("/api/conversations/{conv_id}/checkpoints")
+def list_checkpoints(conv_id: int):
+    return {str(k): v for k, v in checkpoints.summary(conv_id).items()}
+
+
+@app.post("/api/conversations/{conv_id}/checkpoints/restore")
+def restore_checkpoints(conv_id: int, body: dict):
+    """Desfaz as alterações de arquivo do turno indicado e dos seguintes."""
+    if active_run(conv_id):
+        raise HTTPException(409, "Espere a execução atual terminar")
+    return {"restored": checkpoints.restore_from(conv_id, int(body["turn_id"]))}
 
 
 @app.delete("/api/conversations/{conv_id}")
@@ -325,11 +425,11 @@ class RunBody(BaseModel):
 
 
 @app.get("/api/files")
-def get_file(path: str):
+def get_file(path: str, conv: str = "0"):
     """Serve um arquivo da pasta de trabalho (miniatura de anexo). Confinado como as ferramentas."""
     from .tools import ToolError, resolve_path
     try:
-        p = resolve_path(config.WORKSPACE_ROOT, path)
+        p = resolve_path(_conv_root(conv), path)
     except ToolError as e:
         raise HTTPException(400, str(e))
     if not p.is_file():
@@ -338,10 +438,10 @@ def get_file(path: str):
 
 
 @app.post("/api/uploads")
-async def upload(file: UploadFile = File(...)):
-    """Salva o anexo dentro da pasta de trabalho para o agente conseguir abrir."""
+async def upload(file: UploadFile = File(...), conv: str = "0"):
+    """Salva o anexo dentro da pasta de trabalho da conversa para o agente conseguir abrir."""
     try:
-        return uploads.save(file.filename or "arquivo", await file.read(), file.content_type)
+        return uploads.save(file.filename or "arquivo", await file.read(), file.content_type, _conv_root(conv))
     except (ValueError, OSError) as e:
         raise HTTPException(400, str(e))
 
@@ -377,6 +477,10 @@ def rewind(conv_id: int, body: dict):
     keep = bool(body.get("keep"))  # True = mantém a própria mensagem (regenerar)
     if active_run(conv_id):
         raise HTTPException(409, "Espere a execução atual terminar")
+    # Arquivos: desfazer as alterações dos turnos apagados, ou esquecer os checkpoints deles.
+    restored = checkpoints.restore_from(conv_id, message_id) if body.get("restore_files") else []
+    if not body.get("restore_files"):
+        checkpoints.forget_from(conv_id, message_id)
     with db.session() as s:
         c = _get_conv(s, conv_id)
         removed = [m for m in c.messages if (m.id > message_id if keep else m.id >= message_id)]
@@ -384,7 +488,7 @@ def rewind(conv_id: int, body: dict):
             s.delete(m)
         s.commit()
         c = _get_conv(s, conv_id)
-        return {"messages": [m.to_dict() for m in c.messages], "removed": len(removed)}
+        return {"messages": [m.to_dict() for m in c.messages], "removed": len(removed), "restored": restored}
 
 
 @app.get("/api/conversations/{conv_id}/live")

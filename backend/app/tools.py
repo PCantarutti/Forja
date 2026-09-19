@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import config
+from . import config, workspace
 
 
 class ToolError(Exception):
@@ -32,6 +32,7 @@ class Tool:
     always_ask: bool = False  # pede aprovação mesmo com escrita "automática" (ex.: shell)
     source: str = "builtin"   # builtin | mcp:<servidor>
     requires: frozenset[str] = frozenset()  # capacidades do modelo exigidas, ex.: {"vision"}
+    available: Callable[[], bool] | None = None  # some da lista quando False (ex.: delegate_task sem subagente)
 
     def openai_schema(self) -> dict:
         return {"type": "function", "function": {
@@ -52,7 +53,8 @@ def active(caps: set[str] | None = None) -> list[Tool]:
     `caps=None` ignora capacidades (listagens da UI). As desligadas/bloqueadas não vão para o modelo.
     """
     return [t for t in REGISTRY.values()
-            if t.name not in config.DISABLED_TOOLS and (caps is None or t.requires <= caps)]
+            if t.name not in config.DISABLED_TOOLS and (caps is None or t.requires <= caps)
+            and (t.available is None or t.available())]
 
 
 def blocked(caps: set[str]) -> list[dict]:
@@ -100,7 +102,7 @@ def coerce_args(tool: Tool, args: dict) -> dict:
 def _call(name: str, fn_attr: str, args: dict, root: Path | None):
     tool = get_tool(name)
     try:
-        return getattr(tool, fn_attr)(root or config.WORKSPACE_ROOT, coerce_args(tool, args))
+        return getattr(tool, fn_attr)(root or workspace.root(), coerce_args(tool, args))
     except (KeyError, TypeError, ValueError) as e:  # argumento faltando/errado
         raise ToolError(f"Argumentos inválidos para {name}: faltando ou incorreto {e}") from e
 
@@ -115,7 +117,7 @@ async def execute(name: str, args: dict, root: Path | None = None) -> str:
     if not inspect.iscoroutinefunction(tool.handler):
         return await asyncio.to_thread(run_tool, name, args, root)
     try:
-        return await tool.handler(root or config.WORKSPACE_ROOT, coerce_args(tool, args))
+        return await tool.handler(root or workspace.root(), coerce_args(tool, args))
     except (KeyError, TypeError, ValueError) as e:
         raise ToolError(f"Argumentos inválidos para {name}: faltando ou incorreto {e}") from e
 
@@ -135,14 +137,19 @@ def resolve_path(root: Path, path: str | None) -> Path:
     """Resolve `path` dentro de `root`. Bloqueia `..`, absolutos fora da raiz e symlinks que escapem."""
     root_r = root.resolve()
     raw = (path or ".").strip() or "."
-    # Modelos costumam mandar "/workspace/x"; trate como relativo à raiz.
+    # Modelos costumam mandar "/workspace/x" ou "C:/.../x"; trate como relativo/absoluto na raiz.
     if raw == "/workspace" or raw.startswith("/workspace/"):
         raw = raw[len("/workspace"):].lstrip("/") or "."
+    elif workspace.DRIVE_RE.match(raw):
+        try:
+            raw = str(workspace.to_container(raw))
+        except workspace.WorkspaceError as e:
+            raise ToolError(str(e)) from None
     target = (root_r / raw).resolve()  # resolve() segue symlinks
     if not target.is_relative_to(root_r):
         raise ToolError(
             f"Acesso negado: '{path}' está fora da pasta de trabalho. "
-            "Use caminhos relativos a /workspace.")
+            "Use caminhos relativos à pasta de trabalho.")
     return target
 
 

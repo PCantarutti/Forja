@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from . import config
+from . import config, workspace
 from .tools import REGISTRY, ToolError, execute, run_tool
 
 
@@ -64,7 +64,7 @@ MAX_PROJECT_MEMORY = 8000
 
 
 def project_path():
-    return config.WORKSPACE_ROOT / config.PROJECT_MEMORY_FILE
+    return workspace.root() / config.PROJECT_MEMORY_FILE
 
 
 def project_text() -> str:

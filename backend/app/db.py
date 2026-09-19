@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import JSON, ForeignKey, String, Text, create_engine
+from sqlalchemy import JSON, ForeignKey, LargeBinary, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
 from . import config
@@ -19,6 +19,7 @@ class Conversation(Base):
     __tablename__ = "conversations"
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(200), default="Nova conversa")
+    workspace: Mapped[str | None] = mapped_column(String(1000), nullable=True)  # pasta do Windows; None = padrão
     created_at: Mapped[datetime] = mapped_column(default=_now)
     updated_at: Mapped[datetime] = mapped_column(default=_now)
     messages: Mapped[list["Message"]] = relationship(
@@ -53,6 +54,22 @@ class ModelSetting(Base):
     vision: Mapped[str] = mapped_column(String(5), default="auto")  # auto (detectar) | yes | no
 
 
+class Checkpoint(Base):
+    """Conteúdo de um arquivo ANTES da primeira alteração feita pelo agente num turno.
+
+    turn_id = id da mensagem do usuário que abriu o turno. Restaurar = voltar cada arquivo ao
+    estado anterior (ou apagar, se ele não existia). Mudanças feitas via run_command não entram.
+    """
+    __tablename__ = "checkpoints"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
+    turn_id: Mapped[int] = mapped_column(index=True)
+    path: Mapped[str] = mapped_column(String(2000))  # caminho absoluto no container
+    existed: Mapped[bool] = mapped_column(default=True)
+    content: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=_now)
+
+
 class AppSetting(Base):
     """Configurações editadas na UI. Só existem aqui as chaves que o usuário mudou."""
     __tablename__ = "app_settings"
@@ -71,6 +88,9 @@ def _migrate() -> None:
         cols = {row[1] for row in c.exec_driver_sql("PRAGMA table_info(model_settings)")}
         if "vision" not in cols:
             c.exec_driver_sql("ALTER TABLE model_settings ADD COLUMN vision VARCHAR(5) DEFAULT 'auto'")
+        cols = {row[1] for row in c.exec_driver_sql("PRAGMA table_info(conversations)")}
+        if "workspace" not in cols:
+            c.exec_driver_sql("ALTER TABLE conversations ADD COLUMN workspace VARCHAR(1000)")
 
 
 _migrate()

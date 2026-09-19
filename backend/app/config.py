@@ -7,7 +7,9 @@ módulo deve ler `config.X` na hora de usar, nunca copiar o valor no import.
 import os
 from pathlib import Path
 
-WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", "/workspace"))
+WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", "/workspace"))  # pasta padrão (conversa sem pasta escolhida)
+WORKSPACE_HOST = os.getenv("WORKSPACE_HOST", "")  # o mesmo caminho visto no Windows, só para exibir
+HOST_MOUNTS = os.getenv("HOST_MOUNTS", "")          # discos do Windows no container: "C=/host/c,D=/host/d"
 DB_PATH = os.getenv("DB_PATH", "/data/forja.db")
 MCP_CONFIG = Path(os.getenv("MCP_CONFIG", "/config/mcp.json"))
 
@@ -37,3 +39,6 @@ AUTO_APPROVE_TOOLS: list[str] = []     # globs de nomes de ferramenta que dispen
 AUTO_APPROVE_COMMANDS: list[str] = []  # globs de comandos do run_command que dispensam aprovação
 PROJECT_MEMORY = True                  # ler/oferecer o arquivo de memória do projeto
 PROJECT_MEMORY_FILE = "FORJA.md"
+ENABLED_MODELS: dict[str, list[str]] = {}  # provedor -> modelos visíveis nos chats (ausente = todos)
+SUBAGENTS: dict[str, dict] = {}            # "rapido"/"capaz" -> {"provider", "model"}
+SUBAGENT_MAX_ITERATIONS = 15

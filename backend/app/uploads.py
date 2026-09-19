@@ -12,7 +12,7 @@ import re
 import time
 from pathlib import Path
 
-from . import config
+from . import config, workspace
 
 UPLOAD_DIR = ".forja/uploads"
 MAX_IMAGE_BYTES = 8_000_000  # imagem maior que isso não vira data URL (estoura o contexto)
@@ -32,12 +32,12 @@ def safe_name(name: str) -> str:
     return name[:80]
 
 
-def save(name: str, data: bytes, mime: str | None = None) -> dict:
+def save(name: str, data: bytes, mime: str | None = None, root: Path | None = None) -> dict:
     if len(data) > config.MAX_FILE_BYTES:
         raise ValueError(f"Arquivo maior que o limite ({config.MAX_FILE_BYTES} bytes). "
                          "Aumente em Configurações › Geral se precisar.")
     mime = mime or mimetypes.guess_type(name)[0] or "application/octet-stream"
-    folder = config.WORKSPACE_ROOT / UPLOAD_DIR
+    folder = (root or workspace.root()) / UPLOAD_DIR
     folder.mkdir(parents=True, exist_ok=True)
     filename = f"{time.strftime('%Y%m%d-%H%M%S')}-{safe_name(name)}"
     (folder / filename).write_bytes(data)
@@ -46,7 +46,7 @@ def save(name: str, data: bytes, mime: str | None = None) -> dict:
 
 
 def data_url(attachment: dict) -> str | None:
-    p = config.WORKSPACE_ROOT / attachment["path"]
+    p = workspace.root() / attachment["path"]
     try:
         raw = p.read_bytes()
     except OSError:

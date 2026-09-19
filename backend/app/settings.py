@@ -30,6 +30,9 @@ ENV_DEFAULTS: dict[str, Any] = {
     "browser_idle_minutes": config.BROWSER_IDLE_MINUTES,
     "browser_scale": config.BROWSER_SCALE,
     "browser_stream": config.BROWSER_STREAM,
+    "enabled_models": {},
+    "subagents": {"rapido": {"provider": "", "model": ""}, "capaz": {"provider": "", "model": ""}},
+    "subagent_max_iterations": 15,
 }
 
 LISTS = ("disabled_tools", "auto_approve_tools", "auto_approve_commands")
@@ -42,6 +45,7 @@ NUMBERS = {  # chave: (tipo, mínimo, máximo)
     "compact_at": (float, 0.3, 0.95),
     "browser_idle_minutes": (int, 0, 1_440),
     "browser_scale": (int, 1, 3),
+    "subagent_max_iterations": (int, 1, 100),
 }
 TYPES = ("ollama", "lmstudio", "openai")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
@@ -74,6 +78,9 @@ def apply(values: dict | None = None) -> dict:
     config.AUTO_APPROVE_COMMANDS = list(values["auto_approve_commands"])
     config.PROJECT_MEMORY = bool(values["project_memory"])
     config.PROJECT_MEMORY_FILE = values["project_memory_file"]
+    config.ENABLED_MODELS = dict(values["enabled_models"])
+    config.SUBAGENTS = dict(values["subagents"])
+    config.SUBAGENT_MAX_ITERATIONS = int(values["subagent_max_iterations"])
     config.BROWSER_IDLE_MINUTES = int(values["browser_idle_minutes"])
     config.BROWSER_SCALE = int(values["browser_scale"])
     config.BROWSER_STREAM = values["browser_stream"]
@@ -138,6 +145,22 @@ def validate(patch: dict, current: dict) -> dict:
             if not isinstance(raw, list):
                 raise SettingsError(f"'{key}' precisa ser uma lista.")
             values[key] = sorted({str(x).strip() for x in raw if str(x).strip()})
+        elif key == "enabled_models":
+            if not isinstance(raw, dict):
+                raise SettingsError("'enabled_models' precisa ser um objeto {provedor: [modelos]}.")
+            # null = "todos" para aquele provedor (remove a restrição)
+            values[key] = {str(k): sorted({str(m) for m in v}) for k, v in raw.items() if v is not None}
+        elif key == "subagents":
+            if not isinstance(raw, dict):
+                raise SettingsError("'subagents' precisa ser um objeto.")
+            out = {}
+            for slot in ("rapido", "capaz"):
+                spec = raw.get(slot) or {}
+                provider, model = str(spec.get("provider") or ""), str(spec.get("model") or "")
+                if provider and provider not in {p["id"] for p in values["providers"]}:
+                    raise SettingsError(f"Subagente '{slot}': provedor '{provider}' não existe.")
+                out[slot] = {"provider": provider, "model": model}
+            values[key] = out
         elif key == "project_memory":
             values[key] = bool(raw)
         elif key == "project_memory_file":

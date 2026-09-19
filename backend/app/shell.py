@@ -1,7 +1,8 @@
 """Ferramenta run_command: executa comando no container, com cwd na pasta de trabalho.
 
-Roda DENTRO do container do backend (não no Windows): só enxerga /workspace e o que a
-imagem tem instalado (python, git, node). Sempre pede aprovação (always_ask).
+Roda DENTRO do container do backend (não no Windows), com cwd na pasta de trabalho da conversa.
+Como no Claude Desktop, a proteção é a aprovação (always_ask), não um sandbox: o bash enxerga os
+discos montados em /host. Tem python, git, node e uv.
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import signal
 import subprocess
 from pathlib import Path
 
-from . import config
+from . import config, workspace
 from .tools import Tool, ToolError, register, resolve_path
 
 MAX_OUTPUT = 20_000
@@ -46,9 +47,7 @@ def run_command(root: Path, args: dict) -> str:
 
 def command_preview(root: Path, args: dict) -> dict:
     cwd = resolve_path(root, args.get("cwd"))
-    rel = cwd.relative_to(root.resolve()).as_posix()
-    return {"kind": "command", "path": "/workspace" + ("" if rel == "." else "/" + rel),
-            "text": args["command"]}
+    return {"kind": "command", "path": workspace.to_host(cwd) or str(cwd), "text": args["command"]}
 
 
 register(Tool(
