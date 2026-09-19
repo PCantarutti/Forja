@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import type { Approval, Message, Preview, ToolCall } from "../types";
-import { Brain, Check, Chevron, Clock, Copy, Cube, Gauge, Tokens } from "./icons";
+import type { Approval, Attachment, Message, Preview, ToolCall } from "../types";
+import { Brain, Check, Chevron, Clock, Copy, Cube, Gauge, Shield, Tokens, X } from "./icons";
 
 export function Markdown({ text }: { text: string }) {
   return (
@@ -34,6 +34,81 @@ export function Thinking({ text, live }: { text: string; live?: boolean }) {
           {text}
         </div>
       )}
+    </div>
+  );
+}
+
+export const fileUrl = (a: Attachment) => `/api/files?path=${encodeURIComponent(a.path)}`;
+
+/** Imagem em tela cheia; clique (ou Esc) fecha. */
+export function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div onClick={onClose} className="fixed inset-0 z-50 grid cursor-zoom-out place-items-center bg-black/85 p-4">
+      <img src={src} alt="" className="max-h-full max-w-full rounded-lg shadow-2xl" />
+    </div>
+  );
+}
+
+/** Screenshot devolvido por uma ferramenta: grande no chat, clique abre em tela cheia. */
+export function ToolImages({ list }: { list: Attachment[] }) {
+  const [zoom, setZoom] = useState<string | null>(null);
+  const images = list.filter((a) => a.kind === "image");
+  if (!images.length) return null;
+  return (
+    <div className="space-y-2 border-t border-line p-3">
+      {images.map((a) => (
+        <img
+          key={a.path}
+          src={fileUrl(a)}
+          alt={a.name}
+          title="Clique para ampliar"
+          onClick={() => setZoom(fileUrl(a))}
+          className="block w-full cursor-zoom-in rounded-xl border border-line bg-black"
+        />
+      ))}
+      {zoom && <Lightbox src={zoom} onClose={() => setZoom(null)} />}
+    </div>
+  );
+}
+
+/** Anexos de uma mensagem: miniatura para imagem (clique amplia), chip para o resto. */
+export function Attachments({ list, onRemove }: { list: Attachment[]; onRemove?: (a: Attachment) => void }) {
+  const [zoom, setZoom] = useState<string | null>(null);
+  if (!list.length) return null;
+  return (
+    <div className="mt-2 flex flex-wrap justify-end gap-2">
+      {zoom && <Lightbox src={zoom} onClose={() => setZoom(null)} />}
+      {list.map((a) => (
+        <div key={a.path} className="relative">
+          {a.kind === "image" ? (
+            <img
+              src={fileUrl(a)}
+              alt={a.name}
+              onClick={() => setZoom(fileUrl(a))}
+              className="max-h-40 cursor-zoom-in rounded-xl border border-line object-cover"
+            />
+          ) : (
+            <span className="inline-flex max-w-60 items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs text-muted">
+              <span className="truncate">{a.name}</span>
+              <span className="text-faint">{Math.round(a.size / 1024)} KB</span>
+            </span>
+          )}
+          {onRemove && (
+            <button
+              onClick={() => onRemove(a)}
+              title="Remover"
+              className="absolute -top-1.5 -right-1.5 grid size-5 place-items-center rounded-full bg-raised text-faint hover:text-fg"
+            >
+              <X className="size-3" />
+            </button>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -143,7 +218,7 @@ export function ToolBlock(props: {
   approval?: Approval;
   running: boolean;
   queued?: boolean; // uma chamada anterior da mesma resposta ainda não terminou
-  onDecide: (approved: boolean) => void;
+  onDecide: (approved: boolean, alwaysAllow?: boolean) => void;
 }) {
   const { call, result, approval, running, queued } = props;
   const waiting = approval !== undefined && !result;
@@ -152,9 +227,17 @@ export function ToolBlock(props: {
   const [label, cls] = STATUS[status];
   const preview: Preview | undefined = approval?.preview ?? result?.meta?.preview ?? undefined;
   const a = call.arguments;
-  const hint = [a.path, a.command, a.query, a.url].find((v) => typeof v === "string") as string | undefined;
+  const hint = [a.path, a.command, a.query, a.url, a.selector, a.script].find((v) => typeof v === "string") as string | undefined;
   const verb =
-    { edit_file: "editar", write_file: "escrever", run_command: "executar um comando em" }[call.name] ?? `usar ${call.name}`;
+    {
+      edit_file: "editar",
+      write_file: "escrever",
+      run_command: "executar um comando em",
+      browser_click: "clicar em",
+      browser_type: "digitar em",
+      browser_eval: "executar JavaScript em",
+    }[call.name] ?? `usar ${call.name}`;
+  const target = preview?.path ?? (call.name.startsWith("browser_") ? hint : "");
 
   return (
     <div className={`my-2 overflow-hidden rounded-2xl border ${waiting ? "border-amber-500/50" : "border-line"} bg-surface`}>
@@ -165,10 +248,12 @@ export function ToolBlock(props: {
         <Chevron className="size-4 shrink-0 text-faint" />
       </button>
 
+      {result?.meta?.attachments && <ToolImages list={result.meta.attachments} />}
+
       {waiting && !approval?.sent && (
         <div className="space-y-3 border-t border-line p-4">
           <div className="text-sm text-fg">
-            O agente quer {verb} <span className="font-mono">{preview?.path ?? ""}</span>
+            O agente quer {verb} <span className="font-mono">{target}</span>
           </div>
           {preview ? (
             <DiffView preview={preview} />
@@ -177,13 +262,23 @@ export function ToolBlock(props: {
               {JSON.stringify(call.arguments, null, 2)}
             </pre>
           )}
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <button
               onClick={() => props.onDecide(true)}
               className="rounded-full bg-fg px-4 py-1.5 text-sm font-medium text-black hover:bg-white"
             >
               Aprovar
             </button>
+            {approval?.suggest && (
+              <button
+                onClick={() => props.onDecide(true, true)}
+                title={`Cria a regra "${approval.suggest}" em Configurações › Permissões`}
+                className="inline-flex items-center gap-1.5 rounded-full border border-line px-4 py-1.5 text-sm text-fg hover:bg-raised"
+              >
+                <Shield className="size-3.5" /> Sempre permitir{" "}
+                <span className="font-mono text-xs text-muted">{approval.suggest}</span>
+              </button>
+            )}
             <button
               onClick={() => props.onDecide(false)}
               className="rounded-full border border-line px-4 py-1.5 text-sm text-fg hover:bg-raised"
@@ -201,6 +296,9 @@ export function ToolBlock(props: {
             {JSON.stringify(call.arguments, null, 2)}
           </pre>
           {preview && !waiting && <DiffView preview={preview} />}
+          {result?.meta?.auto_rule && (
+            <div className="text-amber-200">Aprovada automaticamente pela regra: {result.meta.auto_rule}</div>
+          )}
           {result && (
             <>
               <div className="text-faint">Resultado</div>

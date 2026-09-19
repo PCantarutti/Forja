@@ -50,6 +50,7 @@ class ModelSetting(Base):
     __tablename__ = "model_settings"
     model: Mapped[str] = mapped_column(String(300), primary_key=True)
     tool_mode: Mapped[str] = mapped_column(String(10), default="auto")  # native | text | auto
+    vision: Mapped[str] = mapped_column(String(5), default="auto")  # auto (detectar) | yes | no
 
 
 class AppSetting(Base):
@@ -64,11 +65,26 @@ engine = create_engine(f"sqlite:///{config.DB_PATH}", connect_args={"check_same_
 Base.metadata.create_all(engine)
 
 
+def _migrate() -> None:
+    """create_all não adiciona colunas em tabelas existentes; bancos antigos ganham `vision` aqui."""
+    with engine.begin() as c:
+        cols = {row[1] for row in c.exec_driver_sql("PRAGMA table_info(model_settings)")}
+        if "vision" not in cols:
+            c.exec_driver_sql("ALTER TABLE model_settings ADD COLUMN vision VARCHAR(5) DEFAULT 'auto'")
+
+
+_migrate()
+
+
 def session() -> Session:
     return Session(engine, expire_on_commit=False)
 
 
-def get_tool_mode(model: str) -> str:
+def get_model_setting(model: str) -> dict:
     with session() as s:
         ms = s.get(ModelSetting, model)
-        return ms.tool_mode if ms else "auto"
+        return {"tool_mode": ms.tool_mode if ms else "auto", "vision": (ms.vision if ms else None) or "auto"}
+
+
+def get_tool_mode(model: str) -> str:
+    return get_model_setting(model)["tool_mode"]

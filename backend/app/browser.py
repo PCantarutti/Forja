@@ -1,0 +1,698 @@
+"""Navegador integrado: Chromium (Playwright) controlado pelo agente e espelhado ao vivo na UI.
+
+Um processo Chromium compartilhado (`Manager`) e uma **sessão por conversa** (`Session` = um contexto
+com suas abas). Trocar de conversa na UI troca a sessão mostrada; a chave "0" é o rascunho da tela
+inicial. A sessão vive até fechar, apagar a conversa ou ficar ociosa (`BROWSER_IDLE_MINUTES`).
+
+Espelho: screencast CDP da aba ativa (PNG sem perda ou JPEG, `BROWSER_STREAM`) renderizado em
+`BROWSER_SCALE`x, em SSE. O usuário interage pelo espelho (`input`/`navigate`/abas/upload) sem
+aprovação: é o próprio usuário agindo. Ferramentas do modelo:
+
+- browser_navigate, browser_read, browser_console, browser_tabs, browser_screenshot: leitura
+- browser_click, browser_type, browser_upload: `mutating` (seguem a política de escrita)
+- browser_eval: `mutating` + `always_ask` (JS arbitrário, como o run_command)
+
+`browser_screenshot` sempre existe (o print é para o usuário ver no chat); a imagem só entra no contexto
+do modelo se ele tiver a capacidade `vision` (decidido em agent._execute / build_history).
+Refs `eN` (ou `f1eN` em frames) vêm do `aria_snapshot(mode="ai")` e resolvem via `aria-ref=`.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import contextvars
+import json
+import re
+import time
+from collections import deque
+from pathlib import Path
+from typing import AsyncIterator
+from urllib.parse import urlparse
+
+from . import config, uploads
+from .tools import Tool, ToolError, register, resolve_path
+from .web import UNTRUSTED
+
+VIEWPORT = {"width": 1280, "height": 800}  # inicial; o painel da UI manda o tamanho real (set_viewport)
+MIN_VIEWPORT, MAX_VIEWPORT = (320, 240), (3840, 2400)
+NAV_TIMEOUT = 15_000
+ACT_TIMEOUT = 5_000
+JPEG_QUALITY = 75  # screenshot que vai ao modelo
+MAX_TABS = 8
+SCRATCH = "0"  # sessão do painel quando nenhuma conversa está aberta
+REF_RE = re.compile(r"^(?:ref=)?((?:f\d+)?e\d+)$")  # e12 na página principal; f1e12 dentro de frame
+ERROR_PREFIXES = ("pageerror", "console.error", "requestfailed")
+
+# Conversa dona das chamadas de ferramenta em andamento (agent.run_agent define no início do run).
+CURRENT_KEY: contextvars.ContextVar[str] = contextvars.ContextVar("forja_browser_key", default=SCRATCH)
+
+
+def _err(e: Exception) -> str:
+    first = (str(e).splitlines() or [""])[0]
+    return f"{e.__class__.__name__}: {first[:200]}"
+
+
+class Session:
+    """Contexto de uma conversa: abas, console, espelho e estado de interação."""
+
+    def __init__(self, key: str, manager: "Manager"):
+        self.key, self._m = key, manager
+        self._ctx = None
+        self.pages: list = []
+        self.active = None
+        self._cdp = None       # screencast da aba ativa
+        self._cast_mime = "image/png"
+        self._lock = asyncio.Lock()
+        self.viewport = dict(VIEWPORT)  # segue o tamanho do painel na UI
+        self.logs: deque[str] = deque(maxlen=200)
+        # Espelhamento: último frame + versão; assinantes esperam a versão mudar (lento pula frames).
+        self.latest: dict | None = None
+        self.last_event: dict | None = None
+        self.version = 0
+        self.subs = 0
+        self._cond = asyncio.Condition()
+        self.last_used = time.monotonic()
+        self.file_chooser = None  # a página pediu um arquivo; a UI oferece o upload
+
+    def touch(self) -> None:
+        self.last_used = time.monotonic()
+
+    # ------------------------------------------------------------ ciclo de vida
+
+    @property
+    def open(self) -> bool:
+        return self.active is not None and not self.active.is_closed()
+
+    async def ensure(self):
+        """Garante contexto e uma aba ativa; devolve a page ativa."""
+        self.touch()
+        async with self._lock:
+            if self.open:
+                return self.active
+            browser = await self._m.browser()
+            for attempt in (1, 2):
+                try:
+                    if self._ctx is None:
+                        self._ctx = await browser.new_context(viewport=dict(self.viewport), accept_downloads=False)
+                        self._ctx.on("page", lambda p: asyncio.ensure_future(self._adopt(p)))  # popups viram abas
+                    page = await self._ctx.new_page()
+                    break
+                except Exception as e:  # contexto morto (Chromium caiu): recria uma vez
+                    self._ctx, self.pages, self.active = None, [], None
+                    if attempt == 2:
+                        raise ToolError(f"Não consegui abrir o navegador: {_err(e)}") from e
+                    browser = await self._m.browser()
+            await self._adopt(page)
+            return page
+
+    async def _adopt(self, page) -> None:
+        """Registra uma aba (criada por nós ou popup) e a torna ativa."""
+        if page in self.pages or page.is_closed():
+            return
+        if len(self.pages) >= MAX_TABS:
+            self._log(page, f"popup fechado: limite de {MAX_TABS} abas")
+            await page.close()
+            return
+        self.pages.append(page)
+        page.on("console", lambda m: self._log(page, f"console.{m.type}: {m.text}"))
+        page.on("pageerror", lambda e: self._log(page, f"pageerror: {e}"))
+        page.on("requestfailed", lambda r: self._log(page, f"requestfailed: {r.method} {r.url} ({r.failure})"))
+        page.on("dialog", lambda d: asyncio.ensure_future(d.dismiss()))  # senão click trava em alert()
+        page.on("filechooser", lambda fc: asyncio.ensure_future(self._on_filechooser(fc)))
+        page.on("framenavigated", lambda f: f == page.main_frame and asyncio.ensure_future(self._publish_state()))
+        page.on("close", lambda _: asyncio.ensure_future(self._on_page_close(page)))
+        await self._activate(page)
+
+    def _tab_index(self, page) -> int:
+        return self.pages.index(page) + 1 if page in self.pages else 0
+
+    def _log(self, page, line: str) -> None:
+        self.logs.append(f"[aba {self._tab_index(page)}] {line}"[:500])
+
+    async def _activate(self, page) -> None:
+        if page is self.active or page.is_closed():
+            return
+        await self._stop_cast()
+        self.active = page
+        self.latest = None
+        try:
+            await page.bring_to_front()  # só a aba visível gera frames do screencast
+        except Exception:
+            pass
+        if self.subs:
+            await self._start_cast()
+        await self._publish_state()
+
+    async def _on_page_close(self, page) -> None:
+        was_active = page is self.active
+        if page in self.pages:
+            self.pages.remove(page)
+        if was_active:
+            self.active, self._cdp, self.latest = None, None, None
+            if self.pages:
+                await self._activate(self.pages[-1])
+                return
+        await self._publish_state()
+
+    async def close(self) -> None:
+        """Fecha a sessão (botão da UI, conversa apagada ou ociosidade). O próximo uso abre outra."""
+        await self._stop_cast()
+        ctx, self._ctx = self._ctx, None
+        self.pages, self.active, self.latest, self.file_chooser = [], None, None, None
+        if ctx:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+        await self._publish_state()
+
+    # ------------------------------------------------------------ abas
+
+    async def tabs(self) -> list[dict]:
+        out = []
+        for i, p in enumerate(self.pages, 1):
+            try:
+                title = await p.title()
+            except Exception:
+                title = ""
+            out.append({"index": i, "url": p.url, "title": title, "active": p is self.active})
+        return out
+
+    def _page_at(self, index) -> object:
+        try:
+            i = int(index)
+            if i < 1:
+                raise ValueError
+            return self.pages[i - 1]
+        except (TypeError, ValueError, IndexError):
+            raise ToolError(f"Aba {index} não existe. Abas abertas: 1 a {len(self.pages)}.") from None
+
+    async def new_tab(self, url: str = "") -> None:
+        if not self.open:
+            page = await self.ensure()  # sessão fechada: a primeira aba já é a nova
+        else:
+            if len(self.pages) >= MAX_TABS:
+                raise ToolError(f"Máximo de {MAX_TABS} abas abertas. Feche uma com browser_tabs close.")
+            self.touch()
+            page = await self._ctx.new_page()
+            await self._adopt(page)
+        if url:
+            await self._goto(page, url)
+
+    async def switch_tab(self, index) -> None:
+        self.touch()
+        await self._activate(self._page_at(index))
+
+    async def close_tab(self, index) -> None:
+        self.touch()
+        page = self._page_at(index)
+        # Contabilidade antes do close(): o evento "close" chega depois e só publica o estado.
+        self.pages.remove(page)
+        if page is self.active:
+            self.active, self._cdp, self.latest = None, None, None
+            if self.pages:
+                await self._activate(self.pages[-1])
+        try:
+            await page.close()
+        except Exception:
+            pass
+        if not self.pages:
+            await self._publish_state()
+
+    async def _goto(self, page, url: str) -> None:
+        try:
+            await page.goto(check_url(url), wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+        except ToolError:
+            raise
+        except Exception as e:
+            raise ToolError(f"Falha ao abrir {url}: {_err(e)}. O servidor está de pé nessa porta?") from e
+
+    # ------------------------------------------------------------ espelhamento
+
+    def state(self) -> dict:
+        return {"type": "state", "key": self.key, "open": self.open, "url": self.active.url if self.open else "",
+                "title": "", "width": self.viewport["width"], "height": self.viewport["height"],
+                "scale": self._m.scale or int(config.BROWSER_SCALE), "tabs": [],
+                "file_chooser": self.file_chooser is not None}
+
+    async def state_with_title(self) -> dict:
+        st = self.state()
+        if self.open:
+            try:
+                st["title"] = await self.active.title()
+            except Exception:
+                pass
+            st["tabs"] = await self.tabs()
+        return st
+
+    async def _publish_state(self) -> None:
+        await self._publish(await self.state_with_title())
+
+    async def _publish(self, ev: dict) -> None:
+        async with self._cond:
+            if ev["type"] == "frame":
+                self.latest = ev
+            self.last_event = ev
+            self.version += 1
+            self._cond.notify_all()
+
+    async def _start_cast(self) -> None:
+        if self._cdp or not self.open:
+            return
+        self._cdp = cdp = await self._ctx.new_cdp_session(self.active)
+        cdp.on("Page.screencastFrame", lambda ev: asyncio.ensure_future(self._on_frame(cdp, ev)))
+        scale = self._m.scale or 1
+        params: dict = {"maxWidth": self.viewport["width"] * scale, "maxHeight": self.viewport["height"] * scale}
+        if config.BROWSER_STREAM == "jpeg":
+            params.update(format="jpeg", quality=90)
+            self._cast_mime = "image/jpeg"
+        else:
+            params["format"] = "png"
+            self._cast_mime = "image/png"
+        await cdp.send("Page.startScreencast", params)
+
+    async def _stop_cast(self) -> None:
+        cdp, self._cdp = self._cdp, None
+        if cdp:
+            try:
+                await cdp.send("Page.stopScreencast")
+                await cdp.detach()
+            except Exception:
+                pass
+
+    async def _on_frame(self, cdp, ev: dict) -> None:
+        try:  # ack antes de tudo, senão o Chrome para depois de 2-3 frames
+            await cdp.send("Page.screencastFrameAck", {"sessionId": ev["sessionId"]})
+        except Exception:
+            return
+        await self._publish({"type": "frame", "mime": self._cast_mime, "data": ev["data"],
+                             "url": self.active.url if self.open else ""})
+
+    async def frames(self) -> AsyncIterator[dict]:
+        """Eventos para um assinante SSE: estado atual, último frame e depois cada novidade."""
+        self.subs += 1
+        try:
+            if self.subs == 1:
+                await self._start_cast()
+            yield await self.state_with_title()
+            seen = self.version
+            if self.latest:
+                yield self.latest
+            elif self.open:  # sem frame ainda (página parada): uma foto para não ficar em branco
+                try:
+                    png = await self.active.screenshot(type="png")
+                    yield {"type": "frame", "mime": "image/png", "data": base64.b64encode(png).decode(),
+                           "url": self.active.url}
+                except Exception:
+                    pass
+            while True:
+                async with self._cond:
+                    await self._cond.wait_for(lambda: self.version != seen)
+                    seen, ev = self.version, self.last_event
+                self.touch()
+                yield ev
+        finally:
+            self.subs -= 1
+            if self.subs == 0:
+                await self._stop_cast()
+
+    # ------------------------------------------------------------ interação do usuário
+
+    async def navigate(self, url: str = "", action: str = "") -> None:
+        page = await self.ensure()
+        try:
+            if action == "back":
+                await page.go_back(wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+            elif action == "forward":
+                await page.go_forward(wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+            elif action == "reload":
+                await page.reload(wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+            else:
+                await self._goto(page, url)
+        except ToolError:
+            raise
+        except Exception as e:
+            raise ToolError(_err(e)) from e
+
+    async def input(self, b: dict) -> None:
+        """Evento de mouse/teclado vindo do espelho, já em coordenadas de CSS do viewport."""
+        page = await self.ensure()
+        t, x, y = b["type"], float(b.get("x") or 0), float(b.get("y") or 0)
+        try:
+            if t == "click":
+                await page.mouse.click(x, y, button=b.get("button") or "left")
+            elif t == "dblclick":
+                await page.mouse.dblclick(x, y)
+            elif t == "move":
+                await page.mouse.move(x, y)
+            elif t == "wheel":
+                await page.mouse.move(x, y)
+                await page.mouse.wheel(float(b.get("delta_x") or 0), float(b.get("delta_y") or 0))
+            elif t == "key":
+                await page.keyboard.press(str(b.get("key") or ""))
+            elif t == "text":
+                await page.keyboard.type(str(b.get("text") or ""))
+            else:
+                raise ToolError(f"Tipo de input desconhecido: {t}")
+        except ToolError:
+            raise
+        except Exception as e:
+            raise ToolError(_err(e)) from e
+
+    async def set_viewport(self, width: int, height: int) -> None:
+        """Painel da UI redimensionou: as abas passam a ter exatamente esse tamanho (px de CSS)."""
+        w = max(MIN_VIEWPORT[0], min(MAX_VIEWPORT[0], int(width)))
+        h = max(MIN_VIEWPORT[1], min(MAX_VIEWPORT[1], int(height)))
+        if (w, h) == (self.viewport["width"], self.viewport["height"]):
+            return
+        self.viewport = {"width": w, "height": h}
+        self.touch()
+        if self.open:
+            for p in list(self.pages):
+                try:
+                    await p.set_viewport_size(self.viewport)
+                except Exception:
+                    pass
+            if self._cdp:  # screencast novo com o maxWidth/maxHeight do tamanho novo
+                await self._stop_cast()
+                await self._start_cast()
+        await self._publish_state()
+
+    async def _on_filechooser(self, fc) -> None:
+        self.file_chooser = fc
+        await self._publish_state()
+
+    async def upload(self, paths: list[str]) -> None:
+        """Responde ao seletor de arquivo que a página abriu (lista vazia = cancelar)."""
+        fc, self.file_chooser = self.file_chooser, None
+        if fc is None:
+            raise ToolError("Nenhuma página está pedindo arquivo agora.")
+        try:
+            await fc.set_files(paths)
+        except Exception as e:
+            raise ToolError(_err(e)) from e
+        await self._publish_state()
+
+
+class Manager:
+    """Um Chromium para todas as conversas; uma Session por conversa; varredura de ociosas."""
+
+    def __init__(self):
+        self._pw = self._browser = None
+        self.scale: int | None = None  # escala com que o Chromium foi lançado
+        self.sessions: dict[str, Session] = {}
+        self._lock = asyncio.Lock()
+        self._sweeper: asyncio.Task | None = None
+
+    async def browser(self):
+        async with self._lock:
+            if self._browser and self._browser.is_connected():
+                return self._browser
+            try:
+                from playwright.async_api import async_playwright
+            except ImportError:  # imagem antiga sem playwright
+                raise ToolError("Navegador indisponível: Playwright não está instalado no backend. "
+                                "Rode `docker compose up -d --build`.") from None
+            if self._pw is None:
+                self._pw = await async_playwright().start()
+            # Render em N x: o screencast sai com viewport*N pixels e a UI mostra no tamanho de CSS (nítido).
+            self.scale = max(1, min(3, int(config.BROWSER_SCALE)))
+            self._browser = await self._pw.chromium.launch(
+                headless=True, args=["--disable-dev-shm-usage", f"--force-device-scale-factor={self.scale}"])
+            if self._sweeper is None:
+                self._sweeper = asyncio.create_task(self._sweep())
+            return self._browser
+
+    def session(self, key: str) -> Session:
+        key = str(key or SCRATCH)
+        if key not in self.sessions:
+            self.sessions[key] = Session(key, self)
+        return self.sessions[key]
+
+    async def close(self, key: str) -> None:
+        s = self.sessions.pop(str(key), None)
+        if s:
+            await s.close()
+
+    async def _sweep(self) -> None:
+        """A cada minuto: fecha sessões ociosas sem ninguém assistindo; relança o Chromium se a escala mudou."""
+        while True:
+            await asyncio.sleep(60)
+            try:
+                idle = int(config.BROWSER_IDLE_MINUTES) * 60
+                now = time.monotonic()
+                for s in list(self.sessions.values()):
+                    if idle > 0 and s.open and s.subs == 0 and now - s.last_used > idle:
+                        await s.close()
+                if (self._browser and not any(s.open for s in self.sessions.values())
+                        and self.scale != max(1, min(3, int(config.BROWSER_SCALE)))):
+                    await self._browser.close()
+                    self._browser = None
+            except Exception:
+                pass
+
+    async def shutdown(self) -> None:
+        if self._sweeper:
+            self._sweeper.cancel()
+            self._sweeper = None
+        for key in list(self.sessions):
+            await self.close(key)
+        if self._browser:
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+        if self._pw:
+            try:
+                await self._pw.stop()
+            except Exception:
+                pass
+            self._pw = None
+
+
+MANAGER = Manager()
+
+
+def current() -> Session:
+    """Sessão da conversa cujo agente está rodando (ou o rascunho)."""
+    return MANAGER.session(CURRENT_KEY.get())
+
+
+# ------------------------------------------------------------------ ferramentas do modelo
+
+def check_url(url: str) -> str:
+    """Só http(s) completo. file:/chrome:/javascript:/data: leriam o container ou rodariam JS local."""
+    url = (url or "").strip()
+    u = urlparse(url)
+    if u.scheme not in ("http", "https") or not u.netloc:
+        raise ToolError("Só URLs http(s) completas, ex.: http://localhost:5173/rota ou "
+                        "http://host.docker.internal:3000 (app rodando no Windows).")
+    return url
+
+
+def _locator(page, selector: str):
+    m = REF_RE.match(selector.strip())
+    return page.locator(f"aria-ref={m.group(1)}") if m else page.locator(selector.strip())
+
+
+def _act_err(selector: str, e: Exception) -> str:
+    if REF_RE.match(selector.strip()):
+        return (f"Ref '{selector}' não encontrado: a página mudou desde o último browser_read. "
+                "Chame browser_read de novo e use um ref atual.")
+    return f"Seletor '{selector}' falhou: {_err(e)}. Use um ref do browser_read (ex.: e12) ou text=/role=/CSS."
+
+
+async def _summary(page) -> str:
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    return f"URL: {page.url}\nTítulo: {title}"
+
+
+async def _settle(page) -> None:
+    try:  # se o clique navegou, espera o DOM novo; se não, volta na hora
+        await page.wait_for_load_state("domcontentloaded", timeout=3_000)
+    except Exception:
+        pass
+
+
+async def navigate(_root: Path, args: dict) -> str:
+    url = check_url(args["url"])
+    s = current()
+    page = await s.ensure()
+    before = len(s.logs)
+    await s._goto(page, url)
+    errs = [l for l in list(s.logs)[before:] if l.split("] ", 1)[-1].startswith(ERROR_PREFIXES)]
+    return f"{await _summary(page)}\nErros de console desde o load: {len(errs)}\nChame browser_read para ver a página."
+
+
+async def read(_root: Path, args: dict) -> str:
+    page = await current().ensure()
+    selector = (args.get("selector") or "").strip()
+    loc = _locator(page, selector) if selector else page.locator("body")
+    try:
+        snap = await loc.aria_snapshot(mode="ai", timeout=ACT_TIMEOUT)
+    except Exception as e:
+        raise ToolError(_act_err(selector, e) if selector else f"Falha ao ler a página: {_err(e)}") from e
+    max_chars = max(1_000, min(int(args.get("max_chars") or 15_000), 100_000))
+    more = (f"\n(truncado em {max_chars} de {len(snap)} caracteres; passe selector para focar numa região)"
+            if len(snap) > max_chars else "")
+    return f"{UNTRUSTED}{await _summary(page)}\n\n{snap[:max_chars]}{more}"
+
+
+async def click(_root: Path, args: dict) -> str:
+    page = await current().ensure()
+    selector = args["selector"]
+    try:
+        await _locator(page, selector).click(timeout=ACT_TIMEOUT)
+    except Exception as e:
+        raise ToolError(_act_err(selector, e)) from e
+    await _settle(page)
+    return await _summary(page)
+
+
+async def type_text(_root: Path, args: dict) -> str:
+    page = await current().ensure()
+    selector = args["selector"]
+    loc = _locator(page, selector)
+    try:
+        await loc.fill(str(args["text"]), timeout=ACT_TIMEOUT)
+        if args.get("submit"):
+            await loc.press("Enter", timeout=ACT_TIMEOUT)
+    except Exception as e:
+        raise ToolError(_act_err(selector, e)) from e
+    await _settle(page)
+    return await _summary(page)
+
+
+async def upload(root: Path, args: dict) -> str:
+    page = await current().ensure()
+    selector = args["selector"]
+    p = resolve_path(root, args["path"])
+    if not p.is_file():
+        raise ToolError(f"Arquivo não encontrado na pasta de trabalho: {args['path']}")
+    try:
+        await _locator(page, selector).set_input_files(str(p), timeout=ACT_TIMEOUT)
+    except Exception as e:
+        raise ToolError(_act_err(selector, e)) from e
+    return f"Arquivo {p.name} anexado em {selector}.\n{await _summary(page)}"
+
+
+async def console(_root: Path, args: dict) -> str:
+    s = current()
+    lines = list(s.logs)
+    if args.get("clear"):
+        s.logs.clear()
+    if not lines:
+        return "Console vazio: nenhuma mensagem, erro de página ou request falho desde a abertura da sessão."
+    return UNTRUSTED + "\n".join(lines[-100:])
+
+
+async def tabs(_root: Path, args: dict) -> str:
+    s = current()
+    action = (args.get("action") or "list").strip().lower()
+    if action == "new":
+        await s.new_tab(args.get("url") or "")
+    elif action == "switch":
+        await s.switch_tab(args.get("index"))
+    elif action == "close":
+        await s.close_tab(args.get("index"))
+    elif action != "list":
+        raise ToolError("action deve ser list, new, switch ou close.")
+    lst = await s.tabs()
+    if not lst:
+        return "Nenhuma aba aberta. Use browser_navigate ou browser_tabs new."
+    return "\n".join(f"{'*' if t['active'] else ' '} {t['index']}. {t['title'] or '(sem título)'} — {t['url']}"
+                     for t in lst) + "\n(* = aba ativa; as outras ferramentas agem na aba ativa)"
+
+
+async def evaluate(_root: Path, args: dict) -> str:
+    page = await current().ensure()
+    try:
+        result = await page.evaluate(str(args["script"]))
+    except Exception as e:
+        raise ToolError(f"Erro no JS: {_err(e)}") from e
+    text = json.dumps(result, ensure_ascii=False, default=str)
+    return UNTRUSTED + (text[:20_000] + ("\n(truncado)" if len(text) > 20_000 else ""))
+
+
+def eval_preview(_root: Path, args: dict) -> dict:
+    s = current()
+    return {"kind": "command", "path": s.active.url if s.open else "(navegador fechado)",
+            "text": str(args.get("script", ""))}
+
+
+async def screenshot(_root: Path, args: dict) -> dict:
+    s = current()
+    page = await s.ensure()
+    try:
+        # scale="css": 1 pixel por px de CSS, senão o render 2x dobra o tamanho da imagem (e os tokens).
+        jpg = await page.screenshot(type="jpeg", quality=JPEG_QUALITY, full_page=bool(args.get("full_page")),
+                                    scale="css", timeout=ACT_TIMEOUT)
+    except Exception as e:
+        raise ToolError(f"Falha no screenshot: {_err(e)}") from e
+    try:
+        att = uploads.save("browser.jpg", jpg, "image/jpeg")
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    size = "página inteira" if args.get("full_page") else f"{s.viewport['width']}x{s.viewport['height']}"
+    return {"text": f"{await _summary(page)}\nScreenshot anexado ({size}).", "attachments": [att]}
+
+
+def _obj(props: dict, required: list[str]) -> dict:
+    return {"type": "object", "properties": props, "required": required}
+
+
+SELECTOR = {"type": "string", "description": "Ref do browser_read (ex.: e12) ou seletor Playwright: "
+                                             "text=Salvar, role=button[name='Salvar'], CSS #id, input[name=email]"}
+
+register(Tool(
+    "browser_navigate",
+    "Abre uma URL na aba ativa do navegador integrado (o usuário vê ao vivo). Apps subidos por run_command "
+    "ficam em http://localhost:PORTA; apps rodando no Windows em http://host.docker.internal:PORTA.",
+    _obj({"url": {"type": "string", "description": "URL http(s) completa"}}, ["url"]), navigate))
+register(Tool(
+    "browser_read",
+    "Lê a aba ativa como árvore de acessibilidade (papel, nome e ref eN de cada elemento). "
+    "Use os refs em browser_click/browser_type.",
+    _obj({"max_chars": {"type": "integer", "description": "Limite (padrão 15000)"},
+          "selector": {"type": "string", "description": "Opcional: ref ou seletor para ler só uma região"}}, []),
+    read))
+register(Tool(
+    "browser_click", "Clica num elemento da aba ativa.",
+    _obj({"selector": SELECTOR}, ["selector"]), click, mutating=True))
+register(Tool(
+    "browser_type", "Preenche um campo (substitui o conteúdo) e opcionalmente aperta Enter.",
+    _obj({"selector": SELECTOR, "text": {"type": "string"},
+          "submit": {"type": "boolean", "description": "Apertar Enter depois. Padrão: false"}},
+         ["selector", "text"]),
+    type_text, mutating=True))
+register(Tool(
+    "browser_upload", "Anexa um arquivo da pasta de trabalho a um input[type=file] da aba ativa.",
+    _obj({"selector": SELECTOR, "path": {"type": "string", "description": "Arquivo relativo à pasta de trabalho"}},
+         ["selector", "path"]),
+    upload, mutating=True))
+register(Tool(
+    "browser_tabs",
+    "Lista, abre, troca ou fecha abas do navegador. As outras ferramentas agem sempre na aba ativa.",
+    _obj({"action": {"type": "string", "description": "list (padrão) | new | switch | close"},
+          "index": {"type": "integer", "description": "Número da aba (para switch/close)"},
+          "url": {"type": "string", "description": "URL inicial (para new, opcional)"}}, []),
+    tabs))
+register(Tool(
+    "browser_console", "Mensagens de console, erros de JS e requests falhos da sessão (todas as abas).",
+    _obj({"clear": {"type": "boolean", "description": "Limpar depois de ler. Padrão: false"}}, []), console))
+register(Tool(
+    "browser_eval",
+    "Executa JavaScript na aba ativa e devolve o resultado em JSON. Expressão (document.title) ou "
+    "função (() => {...}). Use para checar estado que o browser_read não mostra.",
+    _obj({"script": {"type": "string"}}, ["script"]),
+    evaluate, mutating=True, preview=eval_preview, always_ask=True))
+register(Tool(
+    "browser_screenshot",
+    "Tira um screenshot da aba ativa. Ele aparece no chat para o usuário; se você tiver visão, também "
+    "chega a você como imagem. Use quando o usuário pedir um print ou para validar layout.",
+    _obj({"full_page": {"type": "boolean", "description": "Página inteira em vez do viewport. Padrão: false"}}, []),
+    screenshot))

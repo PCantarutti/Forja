@@ -1,16 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, streamSSE } from "./api";
+import { api, streamSSE, uploadFile } from "./api";
 import Sidebar from "./components/Sidebar";
+import BrowserPanel from "./components/BrowserPanel";
 import InfoPanel, { type McpStatus, type ToolInfo } from "./components/InfoPanel";
+import RightPanel, { type RightTab } from "./components/RightPanel";
 import SettingsDialog from "./components/Settings";
-import { CopyButton, EventNotice, Markdown, StatsRow, Thinking, ToolBlock, type TurnStats } from "./components/MessageView";
-import { ArrowUp, ChevronDown, Cube, Square } from "./components/icons";
-import type { Approval, Conversation, Message, Settings, Stats, ToolsSent } from "./types";
+import { Attachments, CopyButton, EventNotice, Markdown, StatsRow, Thinking, ToolBlock, type TurnStats } from "./components/MessageView";
+import { ArrowUp, ChevronDown, Cube, Edit, Paperclip, Refresh, Square } from "./components/icons";
+import type { Approval, Attachment, BrowserState, Conversation, Message, Settings, Stats, ToolsSent } from "./types";
 
 type Config = { providers: { id: string; name: string }[]; num_ctx: number };
 type Live = {
   messages: Message[];
-  run: { run_id: string; cursor: number; draft: { content: string; thinking: string } | null; sent: ToolsSent | null; approvals: { call: { id: string }; preview: any }[] } | null;
+  run: {
+    run_id: string;
+    cursor: number;
+    draft: { content: string; thinking: string } | null;
+    sent: ToolsSent | null;
+    approvals: { call: { id: string; name: string }; preview: any; suggest?: string }[];
+  } | null;
 };
 
 function loadSettings(): Settings {
@@ -23,6 +31,26 @@ function loadSettings(): Settings {
 }
 
 const pill = "rounded-full border border-line bg-transparent px-3 py-1 text-xs text-muted hover:bg-raised";
+
+type RightState = { tab: RightTab; collapsed: boolean };
+
+/** Coluna direita: nova conversa sempre recolhida; cada conversa lembra se estava aberta e em qual aba. */
+const RIGHT_DEFAULT: RightState = { tab: "info", collapsed: true };
+const RIGHT_KEY = "forja.right.byConv";
+
+function loadRightMap(): Record<string, RightState> {
+  try {
+    return JSON.parse(localStorage.getItem(RIGHT_KEY) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveRight(convId: number, state: RightState) {
+  const map = loadRightMap();
+  map[String(convId)] = state;
+  localStorage.setItem(RIGHT_KEY, JSON.stringify(map));
+}
 
 function aggregate(list: Stats[]): TurnStats {
   const withTps = list.filter((s) => s.tps);
@@ -47,6 +75,10 @@ export default function App() {
   const [models, setModels] = useState<string[]>([]);
   const [modelsError, setModelsError] = useState("");
   const [toolMode, setToolMode] = useState("auto");
+  const [vision, setVision] = useState("auto");
+  const [right, setRight] = useState<RightState>(RIGHT_DEFAULT);
+  const prevConv = useRef<number | null | undefined>(undefined);
+  const [browserOpen, setBrowserOpen] = useState(false);
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentId, setCurrentId] = useState<number | null>(null);
@@ -59,6 +91,9 @@ export default function App() {
   const [ctx, setCtx] = useState<{ used: number; max: number | null; estimated: boolean } | null>(null);
   const [error, setError] = useState("");
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [editing, setEditing] = useState<{ id: number; text: string } | null>(null);
+  const [uploading, setUploading] = useState(false);
   const runId = useRef<string | null>(null);
   const streamCtl = useRef<AbortController | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
@@ -68,6 +103,30 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("forja.settings", JSON.stringify(settings));
   }, [settings]);
+
+  // Ao trocar de conversa, restaura o estado da coluna direita dela. Rascunho (sem conversa) = recolhida.
+  // Conversa recém-criada a partir do rascunho herda o estado atual (ex.: agente abriu o navegador no 1º turno).
+  useEffect(() => {
+    if (currentId === null) {
+      setRight(RIGHT_DEFAULT);
+    } else {
+      const saved = loadRightMap()[String(currentId)];
+      if (saved) setRight(saved);
+      else if (prevConv.current === null) saveRight(currentId, right);
+      else setRight(RIGHT_DEFAULT);
+    }
+    prevConv.current = currentId;
+  }, [currentId]);
+
+  useEffect(() => {
+    if (currentId !== null) saveRight(currentId, right);
+  }, [right, currentId]);
+
+  // Cada conversa tem a própria sessão de navegador; "0" é o rascunho da tela inicial.
+  const browserKey = currentId === null ? "0" : String(currentId);
+  useEffect(() => {
+    api.get<BrowserState>(`/browser?conv=${browserKey}`).then((s) => setBrowserOpen(s.open)).catch(() => setBrowserOpen(false));
+  }, [browserKey]);
 
   useEffect(() => {
     api.get<Config>("/config").then(setConfig).catch(() => {});
@@ -107,8 +166,11 @@ export default function App() {
   useEffect(() => {
     if (!settings.model) return;
     api
-      .get<{ tool_mode: string }>(`/model-settings?model=${encodeURIComponent(settings.model)}`)
-      .then((r) => setToolMode(r.tool_mode))
+      .get<{ tool_mode: string; vision: string }>(`/model-settings?model=${encodeURIComponent(settings.model)}`)
+      .then((r) => {
+        setToolMode(r.tool_mode);
+        setVision(r.vision ?? "auto");
+      })
       .catch(() => {});
   }, [settings.model]);
 
@@ -179,7 +241,7 @@ export default function App() {
       runId.current = run.run_id;
       setDraft(run.draft);
       setSent(run.sent);
-      setApprovals(Object.fromEntries(run.approvals.map((a) => [a.call.id, { preview: a.preview }])));
+      setApprovals(Object.fromEntries(run.approvals.map((a) => [a.call.id, { preview: a.preview, suggest: a.suggest, tool: a.call.name }])));
       follow(id, `/runs/${run.run_id}/stream?cursor=${run.cursor}`);
     }
   }
@@ -204,10 +266,22 @@ export default function App() {
     await api.put("/model-settings", { model: settings.model, tool_mode: m });
   }
 
+  async function changeVision(v: string) {
+    setVision(v);
+    await api.put("/model-settings", { model: settings.model, vision: v });
+  }
+
   function onEvent(ev: any) {
     switch (ev.type) {
       case "run_started":
         runId.current = ev.run_id;
+        break;
+      case "tool_call":
+        // O agente foi ao navegador: mostra a aba Navegador para o usuário acompanhar ao vivo.
+        if (typeof ev.call?.name === "string" && ev.call.name.startsWith("browser_")) {
+          setBrowserOpen(true);
+          setRight({ tab: "browser", collapsed: false });
+        }
         break;
       case "tools_sent":
         setSent(ev);
@@ -237,7 +311,7 @@ export default function App() {
         setMessages((ms) => [...ms, ev.message]);
         break;
       case "approval_request":
-        setApprovals((a) => ({ ...a, [ev.call.id]: { preview: ev.preview } }));
+        setApprovals((a) => ({ ...a, [ev.call.id]: { preview: ev.preview, suggest: ev.suggest, tool: ev.call.name } }));
         break;
       case "context":
         setCtx(ev);
@@ -245,15 +319,56 @@ export default function App() {
     }
   }
 
+  async function addFiles(files: FileList | File[]) {
+    setUploading(true);
+    for (const f of Array.from(files)) {
+      try {
+        const att = await uploadFile(f);
+        setAttachments((list) => [...list, att]);
+      } catch (e: any) {
+        setError(`${f.name}: ${e.message}`);
+      }
+    }
+    setUploading(false);
+  }
+
+  /** Reenvia a partir de uma mensagem: apaga o que vem depois e roda de novo. */
+  async function rewindAndRun(messageId: number, keep: boolean, content: string | null) {
+    if (currentId === null || running) return;
+    setError("");
+    try {
+      const r = await api.post<{ messages: Message[] }>(`/conversations/${currentId}/rewind`, {
+        message_id: messageId,
+        keep,
+      });
+      setMessages(r.messages);
+    } catch (e: any) {
+      setError(e.message);
+      return;
+    }
+    await follow(currentId, `/conversations/${currentId}/run`, {
+      method: "POST",
+      body: JSON.stringify({
+        content,
+        provider: settings.provider,
+        model: settings.model,
+        mode: settings.mode,
+        write_policy: settings.writePolicy,
+      }),
+    });
+  }
+
   async function send() {
     const content = input.trim();
-    if (!content || running) return;
+    if ((!content && !attachments.length) || running) return;
     if (!settings.model) {
       setError("Escolha um modelo primeiro.");
       return;
     }
     setError("");
     setInput("");
+    const files = attachments;
+    setAttachments([]);
     let id = currentId;
     if (id === null) {
       id = (await api.post<Conversation>("/conversations")).id;
@@ -268,6 +383,7 @@ export default function App() {
         model: settings.model,
         mode: settings.mode,
         write_policy: settings.writePolicy,
+        attachments: files,
       }),
     });
   }
@@ -276,8 +392,16 @@ export default function App() {
     if (runId.current) await api.post(`/runs/${runId.current}/stop`).catch(() => {});
   }
 
-  async function decide(callId: string, approved: boolean) {
+  async function decide(callId: string, approved: boolean, alwaysAllow?: boolean) {
     if (!runId.current) return;
+    const rule = approvals[callId]?.suggest;
+    if (alwaysAllow && rule) {
+      // Cria a regra em Configurações › Permissões antes de aprovar.
+      // Só o run_command tem regra por comando; as demais (inclusive browser_eval) são por nome de ferramenta.
+      const field = approvals[callId]?.tool === "run_command" ? "auto_approve_commands" : "auto_approve_tools";
+      const s = await api.get<any>("/settings");
+      await api.put("/settings", { [field]: [...s[field], rule] }).catch((e) => setError(e.message));
+    }
     setApprovals((a) => ({ ...a, [callId]: { ...a[callId], sent: true } })); // evita clique duplo
     await api.post(`/runs/${runId.current}/approve`, { call_id: callId, approved }).catch((e) => setError(e.message));
   }
@@ -327,6 +451,16 @@ export default function App() {
 
   // O turno atual ainda está rodando: não mostra estatísticas dele até terminar.
   const lastUserIndex = messages.map((m) => m.role).lastIndexOf("user");
+
+  // Uso por modelo (a conversa pode trocar de modelo no meio).
+  const usage = useMemo(() => {
+    const by = new Map<string, Stats[]>();
+    for (const m of messages) {
+      const st: Stats | undefined = m.role === "assistant" ? m.meta?.stats : undefined;
+      if (st) by.set(st.model, [...(by.get(st.model) ?? []), st]);
+    }
+    return [...by].map(([model, list]) => ({ ...aggregate(list), model }));
+  }, [messages]);
 
   return (
     <div className="flex h-full">
@@ -382,7 +516,14 @@ export default function App() {
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto">
+        <div
+          className="flex-1 overflow-y-auto"
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault();
+            if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+          }}
+        >
           <div className="mx-auto max-w-3xl px-5 py-6">
             {!messages.length && !draft && (
               <div className="mt-[22vh]">
@@ -399,10 +540,50 @@ export default function App() {
               if (m.role === "user")
                 return (
                   <div key={m.id} className="group my-6 flex flex-col items-end">
-                    <div className="max-w-[85%] rounded-3xl bg-raised px-5 py-2.5 whitespace-pre-wrap">{m.content}</div>
-                    <div className="mt-1 opacity-0 transition group-hover:opacity-100">
-                      <CopyButton text={m.content} />
-                    </div>
+                    {editing?.id === m.id ? (
+                      <div className="w-full rounded-3xl border border-line bg-surface p-3">
+                        <textarea
+                          autoFocus
+                          rows={Math.min(10, editing.text.split("\n").length + 1)}
+                          value={editing.text}
+                          onChange={(e) => setEditing({ id: m.id, text: e.target.value })}
+                          className="w-full resize-none bg-transparent text-[15px] text-fg focus:outline-none"
+                        />
+                        <div className="mt-2 flex justify-end gap-2">
+                          <button onClick={() => setEditing(null)} className="rounded-full border border-line px-4 py-1.5 text-sm text-fg hover:bg-raised">
+                            Cancelar
+                          </button>
+                          <button
+                            onClick={() => {
+                              const text = editing.text.trim();
+                              setEditing(null);
+                              if (text) rewindAndRun(m.id, false, text);
+                            }}
+                            className="rounded-full bg-fg px-4 py-1.5 text-sm font-medium text-black hover:bg-white"
+                          >
+                            Enviar de novo
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        {!!m.content && (
+                          <div className="max-w-[85%] rounded-3xl bg-raised px-5 py-2.5 whitespace-pre-wrap">{m.content}</div>
+                        )}
+                        <Attachments list={m.meta?.attachments ?? []} />
+                        <div className="mt-1 flex opacity-0 transition group-hover:opacity-100">
+                          <CopyButton text={m.content} />
+                          <button
+                            title="Editar e enviar de novo"
+                            disabled={running}
+                            onClick={() => setEditing({ id: m.id, text: m.content })}
+                            className="rounded-md p-1.5 text-faint hover:bg-raised hover:text-fg disabled:opacity-30"
+                          >
+                            <Edit />
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 );
               if (m.role === "event") return <EventNotice key={m.id} m={m} />;
@@ -421,13 +602,25 @@ export default function App() {
                       approval={approvals[c.id]}
                       running={running}
                       queued={m.tool_calls!.slice(0, k).some((p) => !results.has(p.id))}
-                      onDecide={(ok) => decide(c.id, ok)}
+                      onDecide={(ok, always) => decide(c.id, ok, always)}
                     />
                   ))}
                   {showTurn && (
                     <div className="mt-4 space-y-1.5">
                       {turn.stats && <StatsRow s={turn.stats} />}
-                      <CopyButton text={turn.text} />
+                      <div className="flex">
+                        <CopyButton text={turn.text} />
+                        {i > lastUserIndex && lastUserIndex >= 0 && (
+                          <button
+                            title="Gerar outra resposta"
+                            disabled={running}
+                            onClick={() => rewindAndRun(messages[lastUserIndex].id, true, null)}
+                            className="rounded-md p-1.5 text-faint hover:bg-raised hover:text-fg disabled:opacity-30"
+                          >
+                            <Refresh />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -464,6 +657,12 @@ export default function App() {
             {error && <div className="mb-2 text-sm text-red-300">{error}</div>}
 
             <div className="rounded-3xl border border-line bg-surface px-4 pt-3 pb-2.5 focus-within:border-[#454545]">
+              {(attachments.length > 0 || uploading) && (
+                <div className="mb-1 flex flex-wrap items-center gap-2">
+                  <Attachments list={attachments} onRemove={(a) => setAttachments((l) => l.filter((x) => x !== a))} />
+                  {uploading && <span className="text-xs text-muted">enviando…</span>}
+                </div>
+              )}
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -478,6 +677,21 @@ export default function App() {
                 className="w-full resize-none bg-transparent text-[15px] text-fg placeholder:text-faint focus:outline-none"
               />
               <div className="mt-1 flex items-center gap-2">
+                <label
+                  title="Anexar arquivos ou imagens"
+                  className="grid size-8 cursor-pointer place-items-center rounded-full border border-line text-muted hover:bg-raised hover:text-fg"
+                >
+                  <Paperclip className="size-4" />
+                  <input
+                    type="file"
+                    multiple
+                    hidden
+                    onChange={(e) => {
+                      if (e.target.files?.length) addFiles(e.target.files);
+                      e.target.value = "";
+                    }}
+                  />
+                </label>
                 <div className="flex rounded-full border border-line p-0.5 text-xs" role="radiogroup" aria-label="Modo">
                   {(["chat", "agent"] as const).map((m) => (
                     <button
@@ -513,7 +727,7 @@ export default function App() {
                 ) : (
                   <button
                     onClick={send}
-                    disabled={!input.trim()}
+                    disabled={!input.trim() && !attachments.length}
                     title="Enviar"
                     className="grid size-9 place-items-center rounded-full bg-fg text-black hover:bg-white disabled:bg-raised disabled:text-faint"
                   >
@@ -526,15 +740,30 @@ export default function App() {
         </div>
       </main>
 
-      <InfoPanel
-        settings={settings}
-        toolMode={toolMode}
-        onToolMode={changeToolMode}
-        allTools={allTools}
-        sent={sent}
-        mcp={mcp}
-        onReloadMcp={reloadMcp}
-      />
+      <RightPanel
+        tab={right.tab}
+        onTab={(tab) => setRight((r) => ({ ...r, tab }))}
+        collapsed={right.collapsed}
+        onCollapse={(collapsed) => setRight((r) => ({ ...r, collapsed }))}
+        browserOpen={browserOpen}
+      >
+        {right.tab === "browser" ? (
+          <BrowserPanel conv={browserKey} onState={(s) => setBrowserOpen(s.open)} />
+        ) : (
+          <InfoPanel
+            settings={settings}
+            toolMode={toolMode}
+            onToolMode={changeToolMode}
+            vision={vision}
+            onVision={changeVision}
+            allTools={allTools}
+            sent={sent}
+            mcp={mcp}
+            onReloadMcp={reloadMcp}
+            usage={usage}
+          />
+        )}
+      </RightPanel>
     </div>
   );
 }

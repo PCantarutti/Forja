@@ -26,11 +26,12 @@ class Tool:
     name: str
     description: str
     parameters: dict
-    handler: Callable[[Path, dict], str]  # pode ser async (ex.: MCP)
+    handler: Callable[[Path, dict], str]  # pode ser async (ex.: MCP); pode devolver {"text", "attachments"}
     mutating: bool = False
     preview: Callable[[Path, dict], dict] | None = None
     always_ask: bool = False  # pede aprovação mesmo com escrita "automática" (ex.: shell)
     source: str = "builtin"   # builtin | mcp:<servidor>
+    requires: frozenset[str] = frozenset()  # capacidades do modelo exigidas, ex.: {"vision"}
 
     def openai_schema(self) -> dict:
         return {"type": "function", "function": {
@@ -45,17 +46,41 @@ def register(tool: Tool) -> Tool:
     return tool
 
 
-def active() -> list[Tool]:
-    """Ferramentas ligadas nas Configurações (as desligadas não vão para o modelo)."""
-    return [t for t in REGISTRY.values() if t.name not in config.DISABLED_TOOLS]
+def active(caps: set[str] | None = None) -> list[Tool]:
+    """Ferramentas ligadas nas Configurações e, se `caps` for dado, que o modelo consegue usar.
+
+    `caps=None` ignora capacidades (listagens da UI). As desligadas/bloqueadas não vão para o modelo.
+    """
+    return [t for t in REGISTRY.values()
+            if t.name not in config.DISABLED_TOOLS and (caps is None or t.requires <= caps)]
 
 
-def get_tool(name: str) -> Tool:
+def blocked(caps: set[str]) -> list[dict]:
+    """Ferramentas ligadas mas bloqueadas pelo modelo atual (aparecem no painel como bloqueadas)."""
+    return [{"name": t.name, "missing": sorted(t.requires - caps)}
+            for t in REGISTRY.values() if t.name not in config.DISABLED_TOOLS and not t.requires <= caps]
+
+
+def vision_caps(detected: set[str] | None, override: str) -> set[str]:
+    """Capacidades efetivas: o que o provider informou (ou nada) ajustado pelo override do usuário."""
+    caps = set(detected or ())
+    if override == "yes":
+        caps.add("vision")
+    elif override == "no":
+        caps.discard("vision")
+    return caps
+
+
+def get_tool(name: str, caps: set[str] | None = None) -> Tool:
     if name in config.DISABLED_TOOLS:
         raise ToolError(f"A ferramenta '{name}' está desativada nas configurações do Forja.")
     tool = REGISTRY.get(name)
     if not tool:
         raise ToolError(f"Ferramenta desconhecida: '{name}'. Disponíveis: {', '.join(REGISTRY)}")
+    if caps is not None and not tool.requires <= caps:
+        faltam = ", ".join(sorted(tool.requires - caps))
+        raise ToolError(f"'{name}' exige {faltam} e o modelo atual não tem (ou marque 'Visão: sim' no painel). "
+                        "Valide pela estrutura da página: browser_read e browser_console.")
     return tool
 
 

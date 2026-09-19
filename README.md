@@ -2,7 +2,8 @@
 
 Ambiente de desenvolvimento pessoal com agente de IA **local**. Uma interface web de chat onde um modelo rodando no seu PC (Ollama ou LM Studio) lê e escreve arquivos numa pasta de trabalho, sempre com aprovação visível e sem ferramentas escondidas.
 
-- **Chat** (sem ferramentas) ou **Agente** (arquivos, shell, busca web e servidores MCP)
+- **Chat** (sem ferramentas) ou **Agente** (arquivos, shell, busca web, navegador e servidores MCP)
+- **Navegador integrado**: o agente abre rotas, clica, lê o DOM e tira screenshot; você assiste ao vivo na aba *Navegador* e pode interagir também
 - Tool calling nativo, com fallback para chamadas escritas em texto (`<tool_call>`, blocos ```json e XML)
 - Card de aprovação com diff antes de qualquer escrita
 - Painel lateral com as ferramentas **realmente enviadas** ao modelo em cada requisição
@@ -10,7 +11,8 @@ Ambiente de desenvolvimento pessoal com agente de IA **local**. Uma interface we
 - Execuções continuam no servidor: recarregar a página (F5) reconecta, inclusive com aprovação pendente
 - Compactação automática do contexto quando a conversa fica grande
 - Tokens, tempo e tokens/s de cada resposta
-- Tela de Configurações: provedores e chaves de API, liga/desliga de ferramentas, MCP e memória da IA
+- Tela de Configurações: provedores e chaves de API (inclui Ollama Cloud), liga/desliga de ferramentas, permissões, MCP e memória da IA
+- Memória do projeto em `FORJA.md`, anexos de arquivos e imagens, editar mensagem e regenerar resposta
 
 ## Requisitos
 
@@ -38,9 +40,55 @@ Para atualizar depois de mudar o código, rode `docker compose up -d --build` de
 | `run_command` | `bash` no container Linux, com cwd em `/workspace` (python, git, node, uv) | **sempre**, mesmo com escrita automática |
 | `web_search` | Busca via SearXNG local (sem chave, sem conta) | não |
 | `fetch_url` | Baixa uma página e devolve o texto. Bloqueia endereços da rede local. | não |
+| `browser_navigate`, `browser_read`, `browser_console` | Abre uma URL no navegador integrado, lê a página como árvore de acessibilidade (com refs `eN`) e o console | não |
+| `browser_click`, `browser_type`, `browser_upload` | Clica / preenche um campo / anexa arquivo da pasta de trabalho a um input[type=file] (por ref ou seletor) | conforme **Escrita** |
+| `browser_tabs` | Lista, abre, troca ou fecha abas da sessão | não |
+| `browser_eval` | Executa JavaScript na página | **sempre** |
+| `browser_screenshot` | Screenshot da página: aparece no chat para você; vai ao modelo como imagem **só se ele tiver visão** | não |
 | `mcp__<servidor>__<tool>` | Ferramentas dos servidores MCP configurados | sim, a menos que o servidor marque a ferramenta como somente leitura (`readOnlyHint`) |
 
 O `run_command` roda **dentro do container**, não no Windows. Ele só enxerga `/workspace`, tem timeout (padrão 60s, teto `SHELL_TIMEOUT_MAX`) e, ao estourar o tempo, mata o processo e todos os filhos.
+
+## Navegador integrado
+
+Um Chromium (Playwright, `chromium-headless-shell`) roda dentro do container do backend. O agente o controla pelas ferramentas `browser_*`; a aba **Navegador** da coluna direita mostra a tela ao vivo (screencast) e abre sozinha na primeira chamada. A coluna é redimensionável pela borda e recolhível; recolhida, a sessão continua viva no backend.
+
+- **Uma sessão por conversa**: cada chat tem o próprio navegador (com suas abas). Trocar de chat troca o que o painel mostra; a tela inicial usa um rascunho à parte. Apagar a conversa fecha a sessão.
+- **Abas**: a página que abre popup vira aba nova; você troca/fecha na faixa de abas e o agente usa `browser_tabs`. Limite de 8 por sessão. As outras ferramentas agem na aba ativa.
+- **Ociosidade**: sessão sem uso e sem ninguém assistindo fecha após *Navegador: fechar sessão ociosa* (Configurações › Geral, padrão 30 min; 0 = nunca).
+- **Upload**: se a página abrir um seletor de arquivo, aparece uma barra no painel para você escolher ou cancelar. O agente usa `browser_upload` com um arquivo da pasta de trabalho.
+
+- **Você também pode usar**: barra de URL, voltar/avançar/recarregar, clique, teclado, roda e colar direto no espelho. O agente vê o estado novo no próximo `browser_read`.
+- **Tamanho**: a página do Chromium tem sempre o tamanho da área visível da aba. Redimensione a coluna pela borda e o viewport acompanha, como numa janela de verdade.
+- **Qualidade**: o Chromium renderiza em 2x (*escala de renderização*, 1 a 3) e o espelho é PNG sem perda ou JPEG (*formato do espelho*), ambos em Configurações › Geral. Nítido em tela HiDPI, supersampling em tela comum.
+- **Screenshots** do agente aparecem grandes no chat, dentro do card da ferramenta; clique para ampliar (Esc fecha).
+- **Endereços**: um servidor subido por `run_command` fica em `http://localhost:PORTA` (mesmo container). Um app rodando no Windows fica em `http://host.docker.internal:PORTA`. Só `http(s)`; `file:` e afins são bloqueados.
+- **Servidor de desenvolvimento** sem travar o `run_command`: `setsid nohup npm run dev > /tmp/dev.log 2>&1 &` e depois `tail /tmp/dev.log`. O system prompt já ensina isso ao modelo.
+- **Visão**: `browser_screenshot` sempre funciona (o print aparece no chat para você), mas a imagem só entra no contexto do modelo se ele tiver visão; sem visão ele recebe um aviso e valida pelo `browser_read`. O Forja detecta no Ollama (`/api/show` → `capabilities`) e no LM Studio (`type: vlm`); para outros providers, ou para forçar, use **Visão do modelo** (auto/sim/não) no painel Info. A imagem entra no contexto como mensagem do usuário; só as 2 últimas ficam como imagem, as anteriores viram texto.
+- **Permissões**: `browser_click`/`browser_type` seguem a política de escrita (perguntar/automática) e aceitam regras em *Permissões* (ex.: `browser_*`). `browser_eval` sempre pergunta. Conteúdo lido da página chega ao modelo marcado como dado não confiável.
+- O perfil do navegador é limpo e some ao fechar a sessão. Não peça ao agente para entrar em contas pessoais.
+
+## Conversa: anexos, editar e regenerar
+
+- **Anexos**: clipe no campo de mensagem ou arraste arquivos para o chat. Eles são salvos em `.forja/uploads/` **dentro da pasta de trabalho**, então o agente abre com `read_file`/`run_command` como qualquer arquivo. **Imagens** vão para o modelo como visão (formato OpenAI `image_url`; no Ollama, campo `images`) — funciona com modelos de visão, como o Qwen3.6. Imagem maior que 8 MB não é enviada como imagem.
+- **Editar**: passe o mouse na sua mensagem → lápis. Ao reenviar, tudo o que veio depois dela é apagado e a resposta é refeita.
+- **Regenerar**: botão ⟳ embaixo da última resposta. Apaga a resposta (incluindo as chamadas de ferramenta dela) e gera outra para a mesma mensagem, com o modelo selecionado agora. Arquivos que o agente já tinha alterado **não** voltam ao estado anterior.
+- **Trocar de modelo no meio**: o seletor do topo vale para a próxima mensagem. O painel *Modelos nesta conversa* soma tokens e t/s por modelo.
+
+## Memória do projeto (`FORJA.md`)
+
+Um arquivo na raiz da pasta de trabalho que vai junto no system prompt de toda conversa (até 8.000 caracteres). O agente é instruído a atualizá-lo quando aprende algo duradouro do projeto — decisões, convenções, comandos — e você edita em **Configurações › Memória**, onde também dá para trocar o nome do arquivo ou parar de enviar ao modelo. Como é um arquivo comum, entra no git do seu projeto se você quiser.
+
+É diferente da memória MCP (grafo de conhecimento): o `FORJA.md` é por projeto e legível; o grafo é geral e consultado pelo modelo sob demanda.
+
+## Permissões (auto-aprovação)
+
+Em **Configurações › Permissões**, regras com `*` dispensam o card de aprovação:
+
+- **Comandos** (`run_command`): comparados com o comando inteiro. Ex.: `pytest*`, `git status`, `npm run build`.
+- **Ferramentas**: comparadas com o nome. Ex.: `write_file`, `browser_*`, `mcp__memoria__*`.
+
+O card de aprovação tem **Sempre permitir** com uma sugestão pronta (ex.: `ls*`, `git status*`, `browser_eval`): cria a regra e aprova na hora. Toda execução liberada por regra mostra, no bloco da ferramenta, qual regra liberou — não existe aprovação invisível. Evite regras largas como `*`.
 
 ## MCP
 
@@ -105,10 +153,15 @@ Antes de cada chamada, o Forja estima o tamanho do prompt. Se passar de `COMPACT
 | `MAX_FILE_BYTES` | `1000000` | Tamanho máximo de arquivo lido/escrito |
 | `SHELL_TIMEOUT_MAX` | `300` | Teto em segundos do `run_command` |
 | `COMPACT_AT` | `0.8` | Fração da janela que dispara a compactação |
+| `BROWSER_IDLE_MINUTES` | `30` | Fecha a sessão do navegador ociosa (0 = nunca) |
+| `BROWSER_SCALE` | `2` | Escala de renderização do Chromium (1 a 3) |
+| `BROWSER_STREAM` | `png` | Formato do espelho: `png` ou `jpeg` |
 
 ## Apontando para Ollama ou LM Studio
 
 **Ollama**: o Forja usa a API nativa `/api/chat` para enviar `options.num_ctx`. A camada `/v1` do Ollama ignora esse parâmetro, e é por isso que outros clientes ficam presos nos 4k de contexto. A lista de modelos vem de `/v1/models`.
+
+**Ollama Cloud**: em Configurações › Provedores, clique em **+ Ollama Cloud**, cole a chave criada em [ollama.com](https://ollama.com) → Settings → Keys e salve. Ele usa a mesma API nativa do Ollama local (`https://ollama.com/api/chat`), com a chave no cabeçalho `Authorization`. Os modelos da nuvem aparecem no seletor do topo. As mensagens saem do seu PC: não use para código que não pode ir para terceiros.
 
 **LM Studio**: aba *Developer* → *Start Server* (porta 1234) e ative **Serve on Local Network**. A janela de contexto é a que você escolhe ao carregar o modelo no LM Studio. O painel lateral mostra o valor carregado.
 
@@ -181,17 +234,20 @@ backend/app/
   tools.py       registry de ferramentas + confinamento em /workspace + ferramentas de arquivo
   shell.py       run_command
   web.py         web_search (SearXNG) e fetch_url
+  browser.py     navegador integrado (Playwright): sessão, screencast, input do usuário e ferramentas browser_*
   mcp_client.py  conexão com servidores MCP (stdio/HTTP) e registro das ferramentas
   parsing.py     parser de tool calls em texto, detector de promessa e de loop
   compact.py     compactação de contexto
   llm.py         cliente OpenAI-compatível (SSE) e Ollama nativo
   agent.py       loop do agente, execução em background (Run), aprovações
   settings.py    configurações editáveis na UI (banco + aplicação em runtime)
+  policy.py      regras de auto-aprovação (Permissões)
+  uploads.py     anexos do chat (arquivos e imagens para visão)
   memory.py      leitura/limpeza da memória (via servidor MCP de grafo)
   main.py        rotas FastAPI
 config/          mcp.json (seu, fora do git) e mcp.example.json
 searxng/         settings.yml do SearXNG
-frontend/src/  React + Tailwind (App, Sidebar, InfoPanel, MessageView)
+frontend/src/  React + Tailwind (App, Sidebar, RightPanel, InfoPanel, BrowserPanel, MessageView)
 ```
 
 Para adicionar uma ferramenta, registre um `Tool(name, description, parameters, handler, mutating, preview)` em `tools.py`. O loop, o painel e o card de aprovação passam a usá-la automaticamente.

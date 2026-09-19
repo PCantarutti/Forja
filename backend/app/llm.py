@@ -218,3 +218,34 @@ async def _ollama_stream(provider, model, messages, tools, num_ctx):
 
 def _new_id() -> str:
     return "call_" + uuid.uuid4().hex[:12]
+
+
+# ------------------------------------------------------------------ capacidades do modelo
+
+_CAPS: dict[tuple[str, str], set[str]] = {}  # cache só de respostas positivas (None = tentar de novo)
+
+
+async def capabilities(provider: str, model: str) -> set[str] | None:
+    """{"vision", ...} declarado pelo provider; None = provider não informa (vale o override do usuário).
+
+    Ollama: POST /api/show devolve `capabilities` (desde ~0.6.5; ausente = desconhecido).
+    LM Studio: GET /api/v0/models/{id} devolve `type` in llm | vlm | embeddings.
+    """
+    key = (provider, model)
+    if key in _CAPS:
+        return _CAPS[key]
+    kind, host = spec(provider)["type"], base_url(provider).removesuffix("/v1")
+    caps = None
+    try:
+        async with httpx.AsyncClient(timeout=5, headers=headers(provider)) as c:
+            if kind == "ollama":
+                j = (await c.post(f"{host}/api/show", json={"model": model})).json()
+                caps = set(j["capabilities"]) if isinstance(j.get("capabilities"), list) else None
+            elif kind == "lmstudio":
+                t = (await c.get(f"{host}/api/v0/models/{model}")).json().get("type")
+                caps = None if not t else ({"vision"} if t == "vlm" else set())
+    except (httpx.HTTPError, ValueError, AttributeError):
+        caps = None
+    if caps is not None:
+        _CAPS[key] = caps
+    return caps

@@ -10,6 +10,10 @@ RUN apt-get update \
  && git config --system safe.directory "*"
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# Navegador integrado: só o chromium-headless-shell (1/3 do Chromium completo) + libs do sistema.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN playwright install --with-deps --only-shell chromium \
+ && rm -rf /var/lib/apt/lists/*
 COPY . .
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

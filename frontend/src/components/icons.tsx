@@ -28,4 +28,13 @@ export const Edit = base(<><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1
 export const Search = base(<><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></>);
 export const Trash = base(<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" />);
 export const Gear = base(<><circle cx="12" cy="12" r="3" /><path d="M19.4 13.5a7.7 7.7 0 0 0 0-3l1.7-1.3-2-3.4-2 .8a7.7 7.7 0 0 0-2.6-1.5L14.2 3H9.8l-.3 2.1a7.7 7.7 0 0 0-2.6 1.5l-2-.8-2 3.4 1.7 1.3a7.7 7.7 0 0 0 0 3L2.9 15l2 3.4 2-.8a7.7 7.7 0 0 0 2.6 1.5l.3 2.1h4.4l.3-2.1a7.7 7.7 0 0 0 2.6-1.5l2 .8 2-3.4z" /></>);
+export const Paperclip = base(<path d="M21 11.5 12.5 20a5 5 0 0 1-7-7l8-8a3.5 3.5 0 0 1 5 5l-8 8a2 2 0 0 1-3-3l7.5-7.5" />);
+export const Refresh = base(<><path d="M21 12a9 9 0 1 1-2.6-6.4" /><path d="M21 4v5h-5" /></>);
+export const Shield = base(<><path d="M12 3l7 3v6c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6z" /><path d="m9 12 2 2 4-4" /></>);
+export const X = base(<path d="M6 6l12 12M18 6L6 18" />);
+export const Globe = base(<><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18" /></>);
+export const Info = base(<><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></>);
+export const PanelRight = base(<><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></>);
+export const ArrowLeft = base(<path d="M19 12H5m6-6-6 6 6 6" />);
+export const ArrowRight = base(<path d="M5 12h14m-6-6 6 6-6 6" />);
 export const Wrench = base(<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z" />);

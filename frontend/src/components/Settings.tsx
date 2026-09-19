@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { McpStatus, ToolInfo } from "./InfoPanel";
-import { Chevron, Trash, Wrench } from "./icons";
+import { Shield, Trash, Wrench } from "./icons";
 
 export type Provider = {
   id: string;
@@ -23,6 +23,13 @@ export type AppSettings = {
   searxng_url: string;
   disabled_tools: string[];
   custom_instructions: string;
+  auto_approve_tools: string[];
+  auto_approve_commands: string[];
+  project_memory: boolean;
+  project_memory_file: string;
+  browser_idle_minutes: number;
+  browser_scale: number;
+  browser_stream: "png" | "jpeg";
 };
 
 type Entity = { name: string; entityType?: string; observations?: string[] };
@@ -36,7 +43,7 @@ type Memory = {
   raw?: string;
 };
 
-const TABS = ["Geral", "Provedores", "Ferramentas", "MCP", "Memória"] as const;
+const TABS = ["Geral", "Provedores", "Ferramentas", "Permissões", "MCP", "Memória"] as const;
 type Tab = (typeof TABS)[number];
 
 const input = "w-full rounded-lg border border-line bg-raised px-3 py-1.5 text-sm text-fg focus:border-[#555] focus:outline-none";
@@ -178,15 +185,32 @@ export default function Settings(props: {
                 <Field label="URL do SearXNG" hint="Serviço de busca. O padrão é o container do compose.">
                   <input className={input} value={s.searxng_url} onChange={(e) => set("searxng_url", e.target.value)} />
                 </Field>
+                <Field label="Navegador: fechar sessão ociosa após (min)" hint="0 = nunca. Sessões com o painel aberto não contam como ociosas.">
+                  <Num value={s.browser_idle_minutes} onChange={(v) => set("browser_idle_minutes", v)} />
+                </Field>
+                <Field label="Navegador: escala de renderização (1 a 3)" hint="2 = nítido em tela HiDPI; 3 se o Windows estiver acima de 200%. Vale quando o Chromium (re)inicia: sem sessões abertas, troca em até 1 min.">
+                  <Num value={s.browser_scale} onChange={(v) => set("browser_scale", v)} />
+                </Field>
+                <Field label="Navegador: formato do espelho" hint="PNG é sem perda; JPEG pesa menos em páginas com vídeo. Vale na próxima vez que a aba Navegador abrir.">
+                  <select className={input} value={s.browser_stream} onChange={(e) => set("browser_stream", e.target.value as "png" | "jpeg")}>
+                    <option value="png">png (qualidade máxima)</option>
+                    <option value="jpeg">jpeg (mais leve)</option>
+                  </select>
+                </Field>
               </div>
             ) : tab === "Provedores" ? (
               <Providers s={s} set={set} />
             ) : tab === "Ferramentas" ? (
               <Tools tools={props.tools} disabled={s.disabled_tools} onToggle={(d) => save({ disabled_tools: d })} />
+            ) : tab === "Permissões" ? (
+              <Permissions s={s} save={save} />
             ) : tab === "MCP" ? (
               <Mcp mcp={props.mcp} onChanged={props.onChanged} />
             ) : (
-              <MemoryTab />
+              <>
+                <ProjectMemory s={s} set={set} save={save} />
+                <MemoryTab />
+              </>
             )}
           </div>
         </div>
@@ -259,14 +283,45 @@ function Providers({ s, set }: { s: AppSettings; set: <K extends keyof AppSettin
           <TestProvider id={p.id} />
         </div>
       ))}
-      <button
-        className={btn}
-        onClick={() =>
-          set("providers", [...s.providers, { id: "novo", name: "Novo provedor", type: "openai", url: "https://" }])
-        }
-      >
-        + Adicionar provedor
-      </button>
+      <div className="flex flex-wrap gap-2">
+        <button
+          className={btn}
+          onClick={() =>
+            set("providers", [...s.providers, { id: "novo", name: "Novo provedor", type: "openai", url: "https://" }])
+          }
+        >
+          + Adicionar provedor
+        </button>
+        <button
+          className={btn}
+          title="Modelos grandes rodando na nuvem da Ollama; precisa de chave em ollama.com/settings/keys"
+          disabled={s.providers.some((p) => p.id === "ollama-cloud")}
+          onClick={() =>
+            set("providers", [
+              ...s.providers,
+              { id: "ollama-cloud", name: "Ollama Cloud", type: "ollama", url: "https://ollama.com/v1", api_key: "" },
+            ])
+          }
+        >
+          + Ollama Cloud
+        </button>
+        <button
+          className={btn}
+          disabled={s.providers.some((p) => p.id === "openrouter")}
+          onClick={() =>
+            set("providers", [
+              ...s.providers,
+              { id: "openrouter", name: "OpenRouter", type: "openai", url: "https://openrouter.ai/api/v1", api_key: "" },
+            ])
+          }
+        >
+          + OpenRouter
+        </button>
+      </div>
+      <p className="text-xs text-muted">
+        <strong className="text-fg">Ollama Cloud:</strong> depois de adicionar, cole a chave criada em ollama.com →
+        Settings → Keys e clique em Salvar. Os modelos da nuvem aparecem no seletor do topo.
+      </p>
     </div>
   );
 }
@@ -347,6 +402,81 @@ function Tools({ tools, disabled, onToggle }: { tools: ToolInfo[]; disabled: str
   );
 }
 
+// ------------------------------------------------------------------ permissões
+
+function ListEditor({ title, hint, placeholder, value, onChange }: {
+  title: string;
+  hint: string;
+  placeholder: string;
+  value: string[];
+  onChange: (v: string[]) => void;
+}) {
+  const [novo, setNovo] = useState("");
+  const add = () => {
+    const v = novo.trim();
+    if (v && !value.includes(v)) onChange([...value, v]);
+    setNovo("");
+  };
+  return (
+    <section className="space-y-2">
+      <h3 className="text-sm text-fg">{title}</h3>
+      <p className="text-xs text-muted">{hint}</p>
+      <div className="flex gap-2">
+        <input
+          className={`${input} font-mono`}
+          value={novo}
+          placeholder={placeholder}
+          onChange={(e) => setNovo(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && add()}
+        />
+        <button className={btn} onClick={add}>
+          Adicionar
+        </button>
+      </div>
+      <ul className="space-y-1">
+        {value.map((v) => (
+          <li key={v} className="flex items-center justify-between rounded-lg border border-line bg-surface px-3 py-1.5">
+            <span className="font-mono text-sm text-fg">{v}</span>
+            <button className="text-faint hover:text-red-400" onClick={() => onChange(value.filter((x) => x !== v))}>
+              <Trash className="size-3.5" />
+            </button>
+          </li>
+        ))}
+        {!value.length && <li className="text-sm text-muted">Nenhuma regra: tudo pede aprovação.</li>}
+      </ul>
+    </section>
+  );
+}
+
+function Permissions({ s, save }: { s: AppSettings; save: (patch: Partial<AppSettings>) => void }) {
+  return (
+    <div className="max-w-2xl space-y-6">
+      <div className="flex items-start gap-2 rounded-xl border border-line bg-surface p-3 text-sm text-muted">
+        <Shield className="mt-0.5 size-4 shrink-0 text-amber-200" />
+        <span>
+          Regras dispensam o card de aprovação. Aceita <span className="font-mono">*</span> como curinga, e a regra que
+          liberou fica registrada no bloco da ferramenta. Cuidado com regras largas como{" "}
+          <span className="font-mono">*</span> ou <span className="font-mono">git *</span>.
+        </span>
+      </div>
+      <ListEditor
+        title="Comandos liberados (run_command)"
+        hint="Compara o comando inteiro. Ex.: pytest*, git status, ls *, npm run build"
+        placeholder="pytest*"
+        value={s.auto_approve_commands}
+        onChange={(v) => save({ auto_approve_commands: v })}
+      />
+      <ListEditor
+        title="Ferramentas liberadas"
+        hint="Compara o nome da ferramenta. Ex.: write_file, mcp__memoria__*"
+        placeholder="mcp__memoria__*"
+        value={s.auto_approve_tools}
+        onChange={(v) => save({ auto_approve_tools: v })}
+      />
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------ mcp
 
 function Mcp({ mcp, onChanged }: { mcp: McpStatus | null; onChanged: () => void }) {
@@ -412,6 +542,75 @@ function Mcp({ mcp, onChanged }: { mcp: McpStatus | null; onChanged: () => void 
 }
 
 // ------------------------------------------------------------------ memória
+
+function ProjectMemory({ s, set, save }: {
+  s: AppSettings;
+  set: <K extends keyof AppSettings>(k: K, v: AppSettings[K]) => void;
+  save: (patch: Partial<AppSettings>) => void;
+}) {
+  const [file, setFile] = useState<{ content: string; exists: boolean; file: string } | null>(null);
+  const [msg, setMsg] = useState("");
+
+  const load = () => api.get<any>("/memory/project").then(setFile).catch(() => {});
+  useEffect(() => {
+    load();
+  }, [s.project_memory_file]);
+
+  return (
+    <section className="mb-8 max-w-2xl space-y-3 border-b border-line pb-6">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm text-fg">Memória do projeto</h3>
+        <label className="flex items-center gap-2 text-xs text-muted">
+          <input
+            type="checkbox"
+            checked={s.project_memory}
+            onChange={(e) => save({ project_memory: e.target.checked })}
+          />
+          enviar ao modelo
+        </label>
+      </div>
+      <p className="text-xs text-muted">
+        Arquivo na raiz da pasta de trabalho que vai junto no system prompt. O agente é instruído a mantê-lo com
+        decisões, convenções e comandos do projeto. Você também pode editar aqui.
+      </p>
+      <div className="flex gap-2">
+        <input
+          className={`${input} font-mono`}
+          value={s.project_memory_file}
+          onChange={(e) => set("project_memory_file", e.target.value)}
+          onBlur={() => save({ project_memory_file: s.project_memory_file })}
+        />
+        <button className={btn} onClick={load}>
+          Recarregar
+        </button>
+      </div>
+      <textarea
+        rows={10}
+        spellCheck={false}
+        className={`${input} font-mono text-xs`}
+        placeholder={`# ${s.project_memory_file}\n\n- O que a IA precisa lembrar deste projeto.`}
+        value={file?.content ?? ""}
+        onChange={(e) => setFile((f) => ({ ...(f ?? { exists: false, file: s.project_memory_file }), content: e.target.value }))}
+      />
+      <div className="flex items-center gap-3">
+        <button
+          className={btnPrimary}
+          onClick={async () => {
+            try {
+              setFile(await api.put<any>("/memory/project", { content: file?.content ?? "" }));
+              setMsg("Salvo em " + s.project_memory_file);
+            } catch (e: any) {
+              setMsg(e.message);
+            }
+          }}
+        >
+          Salvar arquivo
+        </button>
+        <span className="text-sm text-muted">{msg || (file?.exists ? "" : "O arquivo ainda não existe.")}</span>
+      </div>
+    </section>
+  );
+}
 
 function MemoryTab() {
   const [m, setM] = useState<Memory | null>(null);

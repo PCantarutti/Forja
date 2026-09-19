@@ -24,16 +24,22 @@ function Row({ k, children }: { k: string; children: React.ReactNode }) {
   );
 }
 
-function Badge({ t }: { t: ToolInfo }) {
+function Badge({ t }: { t: ToolInfo & { blocked?: string[] } }) {
+  if (t.blocked)
+    return (
+      <span className="rounded bg-raised px-1.5 text-[10px] text-red-300" title={`Modelo sem: ${t.blocked.join(", ")}`}>
+        bloqueada · sem {t.blocked.map((m) => (m === "vision" ? "visão" : m)).join(", ")}
+      </span>
+    );
   if (t.always_ask) return <span className="rounded bg-raised px-1.5 text-[10px] text-amber-200">sempre pergunta</span>;
   if (t.mutating) return <span className="rounded bg-raised px-1.5 text-[10px] text-muted">escrita</span>;
   return null;
 }
 
-function ToolRow({ t, label }: { t: ToolInfo; label?: string }) {
+function ToolRow({ t, label }: { t: ToolInfo & { blocked?: string[] }; label?: string }) {
   return (
     <li className="flex items-center justify-between gap-2 font-mono">
-      <span className="flex min-w-0 items-center gap-1.5 text-fg" title={t.name}>
+      <span className={`flex min-w-0 items-center gap-1.5 ${t.blocked ? "text-faint line-through" : "text-fg"}`} title={t.name}>
         <Wrench className="size-3 shrink-0 text-faint" /> <span className="truncate">{label ?? t.name}</span>
       </span>
       <Badge t={t} />
@@ -42,10 +48,10 @@ function ToolRow({ t, label }: { t: ToolInfo; label?: string }) {
 }
 
 /** Ferramentas nativas listadas uma a uma; as de MCP agrupadas por servidor (recolhíveis). */
-function Tools({ list, info }: { list: { name: string; mutating: boolean }[]; info: Map<string, ToolInfo> }) {
+function Tools({ list, info }: { list: { name: string; mutating: boolean; blocked?: string[] }[]; info: Map<string, ToolInfo> }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   if (!list.length) return <div className="text-muted">Nenhuma ferramenta.</div>;
-  const full = list.map((t) => ({ ...t, ...info.get(t.name) }));
+  const full = list.map((t) => ({ ...t, ...info.get(t.name), blocked: t.blocked }));
   const builtin = full.filter((t) => !t.name.startsWith("mcp__"));
   const groups = new Map<string, ToolInfo[]>();
   for (const t of full.filter((t) => t.name.startsWith("mcp__"))) {
@@ -101,23 +107,35 @@ const DOT: Record<string, string> = {
   stopped: "text-faint",
 };
 
+const SELECT = "rounded-md border border-line bg-raised px-1.5 py-0.5 text-fg";
+
 export default function InfoPanel(props: {
   settings: Settings;
   toolMode: string;
   onToolMode: (m: string) => void;
+  vision: string;
+  onVision: (v: string) => void;
   allTools: ToolInfo[];
   sent: ToolsSent | null;
   mcp: McpStatus | null;
   onReloadMcp: () => void;
+  usage: { model: string; tokens: number; seconds: number; tps: number | null }[];
 }) {
   const { settings, sent, mcp } = props;
   const agent = settings.mode === "agent";
   const nextVia = !agent ? "none" : props.toolMode === "text" ? "prompt" : "native";
   const info = new Map(props.allTools.map((t) => [t.name, t]));
   const enabled = props.allTools.filter((t) => t.enabled !== false); // desligadas em Configurações não vão
+  // Bloqueadas por capacidade: só sabemos depois de uma requisição com este modelo (o backend detecta).
+  const sameModel = sent?.model === settings.model;
+  const blockedNow = new Map((sameModel ? sent?.blocked ?? [] : []).map((b) => [b.name, b.missing]));
+  const withBlocked = (list: { name: string; mutating: boolean }[]) => list.map((t) => ({ ...t, blocked: blockedNow.get(t.name) }));
+  const visionLabel = !sent || !sameModel
+    ? props.vision === "yes" ? "sim (forçado)" : props.vision === "no" ? "não (forçado)" : "detecta na próxima requisição"
+    : `${sent.capabilities?.includes("vision") ? "sim" : "não"} (${sent.vision_source === "override" ? "forçado" : sent.vision_source})`;
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col gap-3 overflow-y-auto border-l border-line bg-bg p-3 text-xs">
+    <aside className="flex h-full flex-col gap-3 overflow-y-auto bg-bg p-3 text-xs">
       <Section title="Estado">
         <Row k="Modo">{agent ? "Agente" : "Chat"}</Row>
         <Row k="Provider">{settings.provider}</Row>
@@ -125,17 +143,32 @@ export default function InfoPanel(props: {
           <span title={settings.model}>{settings.model || "—"}</span>
         </Row>
         <Row k="Escrita">{settings.writePolicy === "ask" ? "perguntar" : "automática"}</Row>
+        <Row k="Visão">{visionLabel}</Row>
+        {sent && sameModel && (
+          <Row k="Capacidades">
+            <span title="O que o provider informou sobre o modelo (Ollama /api/show ou LM Studio type)">
+              {sent.capabilities_detected === null || sent.capabilities_detected === undefined
+                ? "provider não informa"
+                : sent.capabilities_detected.length
+                  ? sent.capabilities_detected.join(", ")
+                  : "nenhuma"}
+            </span>
+          </Row>
+        )}
         <label className="mt-2 flex items-center justify-between gap-2">
           <span className="text-faint">Tool calling do modelo</span>
-          <select
-            value={props.toolMode}
-            onChange={(e) => props.onToolMode(e.target.value)}
-            disabled={!settings.model}
-            className="rounded-md border border-line bg-raised px-1.5 py-0.5 text-fg"
-          >
+          <select value={props.toolMode} onChange={(e) => props.onToolMode(e.target.value)} disabled={!settings.model} className={SELECT}>
             <option value="auto">auto</option>
             <option value="native">native</option>
             <option value="text">text</option>
+          </select>
+        </label>
+        <label className="mt-1.5 flex items-center justify-between gap-2" title="Libera ou bloqueia ferramentas que exigem visão (browser_screenshot)">
+          <span className="text-faint">Visão do modelo</span>
+          <select value={props.vision} onChange={(e) => props.onVision(e.target.value)} disabled={!settings.model} className={SELECT}>
+            <option value="auto">auto (detectar)</option>
+            <option value="yes">sim</option>
+            <option value="no">não</option>
           </select>
         </label>
       </Section>
@@ -145,8 +178,9 @@ export default function InfoPanel(props: {
           <>
             <div className="mb-2 text-muted">
               {sent.model} · via {VIA[sent.via]} · {sent.tools.length} ferramentas
+              {!!sent.blocked?.length && ` · ${sent.blocked.length} bloqueada${sent.blocked.length > 1 ? "s" : ""}`}
             </div>
-            <Tools list={sent.tools} info={info} />
+            <Tools list={[...sent.tools, ...(sent.blocked ?? []).map((b) => ({ name: b.name, mutating: false, blocked: b.missing }))]} info={info} />
           </>
         ) : (
           <div className="text-muted">Nenhuma requisição nesta sessão ainda.</div>
@@ -156,11 +190,28 @@ export default function InfoPanel(props: {
       <Section title="Próxima requisição enviará">
         <div className="mb-2 text-muted">
           via {VIA[nextVia]}
-          {agent && ` · ${enabled.length} ferramentas`}
+          {agent && ` · ${enabled.length - blockedNow.size} ferramentas`}
         </div>
-        <Tools list={agent ? enabled : []} info={info} />
+        <Tools list={agent ? withBlocked(enabled) : []} info={info} />
         {!agent && <div className="mt-1 text-muted">Modo Chat não envia ferramentas. Troque para Agente.</div>}
       </Section>
+
+      {!!props.usage.length && (
+        <Section title="Modelos nesta conversa">
+          <ul className="space-y-1">
+            {props.usage.map((u) => (
+              <li key={u.model} className="flex items-center justify-between gap-2">
+                <span className="truncate font-mono text-fg" title={u.model}>
+                  {u.model}
+                </span>
+                <span className="shrink-0 text-faint">
+                  {u.tokens.toLocaleString("pt-BR")} tok{u.tps ? ` · ${u.tps.toFixed(1)} t/s` : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
 
       <Section
         title="Servidores MCP"

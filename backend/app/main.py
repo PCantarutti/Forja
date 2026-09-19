@@ -3,13 +3,14 @@ import json
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from . import config, db, llm, mcp_client, memory, settings, uploads
 from .agent import RUNS, Run, RunRequest, active_run
-from .tools import REGISTRY
+from .browser import MANAGER
+from .tools import REGISTRY, ToolError
 
 
 settings.apply()
@@ -22,6 +23,7 @@ async def lifespan(_app):
     yield
     task.cancel()
     await mcp_client.stop()
+    await MANAGER.shutdown()
 
 
 app = FastAPI(title="Forja", lifespan=lifespan)
@@ -124,24 +126,146 @@ async def get_models(provider: str):
         raise HTTPException(502, str(e))
 
 
-class ToolModeBody(BaseModel):
+class ModelSettingBody(BaseModel):
     model: str
-    tool_mode: str
+    tool_mode: str | None = None  # native | text | auto
+    vision: str | None = None     # auto | yes | no
 
 
 @app.get("/api/model-settings")
 def get_model_settings(model: str):
-    return {"model": model, "tool_mode": db.get_tool_mode(model)}
+    return {"model": model, **db.get_model_setting(model)}
 
 
 @app.put("/api/model-settings")
-def put_model_settings(body: ToolModeBody):
-    if body.tool_mode not in ("native", "text", "auto"):
+def put_model_settings(body: ModelSettingBody):
+    if body.tool_mode is not None and body.tool_mode not in ("native", "text", "auto"):
         raise HTTPException(400, "tool_mode deve ser native, text ou auto")
+    if body.vision is not None and body.vision not in ("auto", "yes", "no"):
+        raise HTTPException(400, "vision deve ser auto, yes ou no")
+    current = db.get_model_setting(body.model)
     with db.session() as s:
-        s.merge(db.ModelSetting(model=body.model, tool_mode=body.tool_mode))
+        s.merge(db.ModelSetting(model=body.model, tool_mode=body.tool_mode or current["tool_mode"],
+                                vision=body.vision or current["vision"]))
         s.commit()
-    return body
+    return {"model": body.model, **db.get_model_setting(body.model)}
+
+
+# ------------------------------------------------------------------ navegador integrado
+# Uma sessão por conversa: `conv` é o id da conversa ("0" = rascunho da tela inicial).
+
+class NavigateBody(BaseModel):
+    url: str = ""
+    action: str = ""  # back | forward | reload (vazio = goto url)
+
+
+class InputBody(BaseModel):
+    type: str  # click | dblclick | move | wheel | key | text
+    x: float = 0
+    y: float = 0
+    button: str = "left"
+    delta_x: float = 0
+    delta_y: float = 0
+    key: str = ""
+    text: str = ""
+
+
+class ViewportBody(BaseModel):
+    width: int
+    height: int
+
+
+class TabsBody(BaseModel):
+    action: str  # new | switch | close
+    index: int | None = None
+    url: str = ""
+
+
+def _sess(conv: str):
+    return MANAGER.session(conv)
+
+
+@app.get("/api/browser")
+async def get_browser(conv: str = "0"):
+    return await _sess(conv).state_with_title()
+
+
+@app.get("/api/browser/stream")
+def browser_stream(conv: str = "0"):
+    """SSE do espelho: evento `state` + frames do screencast enquanto houver assinante."""
+    async def stream():
+        async for ev in _sess(conv).frames():
+            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/browser/navigate")
+async def browser_navigate(body: NavigateBody, conv: str = "0"):
+    try:
+        await _sess(conv).navigate(body.url, body.action)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+    return await _sess(conv).state_with_title()
+
+
+@app.post("/api/browser/input")
+async def browser_input(body: InputBody, conv: str = "0"):
+    """Mouse/teclado do usuário no espelho. Sem aprovação: é o usuário agindo, não o modelo."""
+    try:
+        await _sess(conv).input(body.model_dump())
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/browser/viewport")
+async def browser_viewport(body: ViewportBody, conv: str = "0"):
+    """O painel da UI redimensionou: as abas do Chromium passam a ter esse tamanho."""
+    try:
+        await _sess(conv).set_viewport(body.width, body.height)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+    return _sess(conv).state()
+
+
+@app.post("/api/browser/tabs")
+async def browser_tabs(body: TabsBody, conv: str = "0"):
+    s = _sess(conv)
+    try:
+        if body.action == "new":
+            await s.new_tab(body.url)
+        elif body.action == "switch":
+            await s.switch_tab(body.index)
+        elif body.action == "close":
+            await s.close_tab(body.index)
+        else:
+            raise HTTPException(400, "action deve ser new, switch ou close")
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+    return await s.state_with_title()
+
+
+@app.post("/api/browser/upload")
+async def browser_upload(conv: str = "0", file: UploadFile | None = File(None)):
+    """Responde ao seletor de arquivo aberto pela página: sem arquivo = cancelar."""
+    s = _sess(conv)
+    try:
+        if file is None:
+            await s.upload([])
+        else:
+            att = uploads.save(file.filename or "arquivo", await file.read(), file.content_type)
+            await s.upload([str(config.WORKSPACE_ROOT / att["path"])])
+    except (ToolError, ValueError, OSError) as e:
+        raise HTTPException(400, str(e))
+    return await s.state_with_title()
+
+
+@app.post("/api/browser/close")
+async def browser_close(conv: str = "0"):
+    await MANAGER.close(conv)
+    return _sess(conv).state()
 
 
 # ------------------------------------------------------------------ conversas
@@ -181,10 +305,11 @@ def get_conversation(conv_id: int):
 
 
 @app.delete("/api/conversations/{conv_id}")
-def delete_conversation(conv_id: int):
+async def delete_conversation(conv_id: int):
     with db.session() as s:
         s.delete(_get_conv(s, conv_id))
         s.commit()
+    await MANAGER.close(str(conv_id))  # a sessão do navegador morre com a conversa
     return {"ok": True}
 
 
@@ -197,6 +322,19 @@ class RunBody(BaseModel):
     mode: str = "agent"
     write_policy: str = "ask"
     attachments: list | None = None
+
+
+@app.get("/api/files")
+def get_file(path: str):
+    """Serve um arquivo da pasta de trabalho (miniatura de anexo). Confinado como as ferramentas."""
+    from .tools import ToolError, resolve_path
+    try:
+        p = resolve_path(config.WORKSPACE_ROOT, path)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+    if not p.is_file():
+        raise HTTPException(404, "Arquivo não encontrado")
+    return FileResponse(p)
 
 
 @app.post("/api/uploads")

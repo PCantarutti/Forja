@@ -3,7 +3,9 @@ export type ToolCall = { id: string; name: string; arguments: Record<string, unk
 export type Preview = { kind: "diff" | "new" | "command"; path: string; text: string };
 
 /** Aprovação pendente: preview é null para ferramentas sem preview (ex.: MCP); sent = decisão já enviada. */
-export type Approval = { preview: Preview | null; sent?: boolean };
+export type Approval = { preview: Preview | null; suggest?: string; tool?: string; sent?: boolean };
+
+export type Attachment = { path: string; name: string; size: number; mime: string; kind: "image" | "text" | "file" };
 
 export type Message = {
   id: number;
@@ -27,6 +29,27 @@ export type ToolsSent = {
   via: "native" | "prompt" | "none";
   num_ctx: number | null;
   tools: { name: string; mutating: boolean }[];
+  /** Capacidades efetivas do modelo nesta requisição (ex.: "vision") e de onde veio a informação. */
+  capabilities?: string[];
+  capabilities_detected?: string[] | null;
+  vision_source?: "detectado" | "override" | "desconhecido";
+  /** Ferramentas ligadas mas não enviadas porque o modelo não tem a capacidade exigida. */
+  blocked?: { name: string; missing: string[] }[];
+};
+
+export type BrowserTab = { index: number; url: string; title: string; active: boolean };
+
+/** Estado da sessão do navegador de uma conversa (`key` = id da conversa, "0" = rascunho). */
+export type BrowserState = {
+  key?: string;
+  open: boolean;
+  url: string;
+  title: string;
+  width: number;
+  height: number;
+  scale?: number;
+  tabs?: BrowserTab[];
+  file_chooser?: boolean;
 };
 
 export type Settings = {

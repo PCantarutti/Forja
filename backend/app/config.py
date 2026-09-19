@@ -18,6 +18,11 @@ SHELL_TIMEOUT_MAX = int(os.getenv("SHELL_TIMEOUT_MAX", "300"))
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8080")
 COMPACT_AT = float(os.getenv("COMPACT_AT", "0.8"))  # fração da janela que dispara a compactação
 
+# Navegador integrado
+BROWSER_IDLE_MINUTES = int(os.getenv("BROWSER_IDLE_MINUTES", "30"))  # 0 = nunca fechar sessão ociosa
+BROWSER_SCALE = int(os.getenv("BROWSER_SCALE", "2"))                  # render 1x..3x (vale ao (re)lançar o Chromium)
+BROWSER_STREAM = os.getenv("BROWSER_STREAM", "png")                   # png (sem perda) | jpeg (mais leve)
+
 # type: ollama (API nativa, aceita num_ctx) | lmstudio (OpenAI + janela do modelo carregado) | openai
 PROVIDERS = {
     "ollama": {"id": "ollama", "name": "Ollama", "type": "ollama",

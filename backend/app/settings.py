@@ -27,6 +27,9 @@ ENV_DEFAULTS: dict[str, Any] = {
     "auto_approve_commands": [],
     "project_memory": True,
     "project_memory_file": "FORJA.md",
+    "browser_idle_minutes": config.BROWSER_IDLE_MINUTES,
+    "browser_scale": config.BROWSER_SCALE,
+    "browser_stream": config.BROWSER_STREAM,
 }
 
 LISTS = ("disabled_tools", "auto_approve_tools", "auto_approve_commands")
@@ -37,6 +40,8 @@ NUMBERS = {  # chave: (tipo, mínimo, máximo)
     "max_file_bytes": (int, 1_000, 200_000_000),
     "shell_timeout_max": (int, 5, 3_600),
     "compact_at": (float, 0.3, 0.95),
+    "browser_idle_minutes": (int, 0, 1_440),
+    "browser_scale": (int, 1, 3),
 }
 TYPES = ("ollama", "lmstudio", "openai")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
@@ -69,6 +74,9 @@ def apply(values: dict | None = None) -> dict:
     config.AUTO_APPROVE_COMMANDS = list(values["auto_approve_commands"])
     config.PROJECT_MEMORY = bool(values["project_memory"])
     config.PROJECT_MEMORY_FILE = values["project_memory_file"]
+    config.BROWSER_IDLE_MINUTES = int(values["browser_idle_minutes"])
+    config.BROWSER_SCALE = int(values["browser_scale"])
+    config.BROWSER_STREAM = values["browser_stream"]
     return values
 
 
@@ -137,6 +145,10 @@ def validate(patch: dict, current: dict) -> dict:
             if "/" in name or "\\" in name or name.startswith("."):
                 raise SettingsError("O arquivo de memória deve ser um nome simples na raiz da pasta de trabalho.")
             values[key] = name
+        elif key == "browser_stream":
+            if raw not in ("png", "jpeg"):
+                raise SettingsError("browser_stream deve ser png ou jpeg.")
+            values[key] = raw
         elif key == "searxng_url":
             url = str(raw).strip().rstrip("/")
             if not url.startswith(("http://", "https://")):

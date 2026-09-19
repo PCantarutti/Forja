@@ -4,6 +4,7 @@ services:
   backend:
     build: ./backend
     restart: unless-stopped
+    init: true  # colhe zumbis do Chromium e dos dev servers (setsid nohup) reparentados ao PID 1
     environment:
       WORKSPACE_ROOT: /workspace
       DB_PATH: /data/forja.db
