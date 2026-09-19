@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, streamRun } from "./api";
+import { api, streamSSE } from "./api";
 import Sidebar from "./components/Sidebar";
-import InfoPanel from "./components/InfoPanel";
+import InfoPanel, { type McpStatus, type ToolInfo } from "./components/InfoPanel";
 import { CopyButton, EventNotice, Markdown, StatsRow, Thinking, ToolBlock, type TurnStats } from "./components/MessageView";
 import { ArrowUp, ChevronDown, Cube, Square } from "./components/icons";
-import type { Conversation, Message, Preview, Settings, Stats, ToolsSent } from "./types";
+import type { Approval, Conversation, Message, Settings, Stats, ToolsSent } from "./types";
 
 type Config = { providers: string[]; num_ctx: number };
+type Live = {
+  messages: Message[];
+  run: { run_id: string; cursor: number; draft: { content: string; thinking: string } | null; sent: ToolsSent | null; approvals: { call: { id: string }; preview: any }[] } | null;
+};
 
 function loadSettings(): Settings {
   const def: Settings = { provider: "ollama", model: "", mode: "agent", writePolicy: "ask" };
@@ -35,7 +39,8 @@ const fmt = (n: number) => n.toLocaleString("pt-BR");
 
 export default function App() {
   const [config, setConfig] = useState<Config>({ providers: ["ollama", "lmstudio"], num_ctx: 32768 });
-  const [allTools, setAllTools] = useState<{ name: string; mutating: boolean }[]>([]);
+  const [allTools, setAllTools] = useState<ToolInfo[]>([]);
+  const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [models, setModels] = useState<string[]>([]);
   const [modelsError, setModelsError] = useState("");
@@ -45,13 +50,15 @@ export default function App() {
   const [currentId, setCurrentId] = useState<number | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState<{ content: string; thinking: string } | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
-  const [approvals, setApprovals] = useState<Record<string, Preview | null>>({});
+  const [approvals, setApprovals] = useState<Record<string, Approval>>({});
   const [sent, setSent] = useState<ToolsSent | null>(null);
   const [ctx, setCtx] = useState<{ used: number; max: number | null; estimated: boolean } | null>(null);
   const [error, setError] = useState("");
   const [input, setInput] = useState("");
   const runId = useRef<string | null>(null);
+  const streamCtl = useRef<AbortController | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
 
   const update = (p: Partial<Settings>) => setSettings((s) => ({ ...s, ...p }));
@@ -62,9 +69,24 @@ export default function App() {
 
   useEffect(() => {
     api.get<Config>("/config").then(setConfig).catch(() => {});
-    api.get<{ name: string; mutating: boolean }[]>("/tools").then(setAllTools).catch(() => {});
+    refreshTools();
     refreshConversations();
+    // F5: volta para a conversa aberta e reconecta à execução, se houver.
+    const saved = Number(localStorage.getItem("forja.current"));
+    if (saved) openConversation(saved).catch(() => localStorage.removeItem("forja.current"));
   }, []);
+
+  // Enquanto algum servidor MCP estiver conectando, atualiza status e ferramentas a cada 2s.
+  useEffect(() => {
+    if (!mcp?.servers.some((s) => s.status === "connecting")) return;
+    const t = setTimeout(refreshTools, 2000);
+    return () => clearTimeout(t);
+  }, [mcp]);
+
+  useEffect(() => {
+    if (currentId === null) localStorage.removeItem("forja.current");
+    else localStorage.setItem("forja.current", String(currentId));
+  }, [currentId]);
 
   useEffect(() => {
     setModelsError("");
@@ -96,17 +118,73 @@ export default function App() {
     api.get<Conversation[]>("/conversations").then(setConversations).catch((e) => setError(e.message));
   }
 
-  async function openConversation(id: number) {
-    if (running) return;
-    setCurrentId(id);
+  function refreshTools() {
+    api.get<ToolInfo[]>("/tools").then(setAllTools).catch(() => {});
+    api.get<McpStatus>("/mcp").then(setMcp).catch(() => {});
+  }
+
+  async function reloadMcp() {
+    setMcp((m) => m && { ...m, servers: m.servers.map((s) => ({ ...s, status: "connecting" })) });
+    try {
+      setMcp(await api.post<McpStatus>("/mcp/reload"));
+    } catch (e: any) {
+      setError(e.message);
+    }
+    refreshTools();
+  }
+
+  function resetLive() {
+    setDraft(null);
+    setStatus(null);
     setApprovals({});
+    runId.current = null;
+  }
+
+  /** Assina o SSE de uma execução. Trocar de conversa só aborta a assinatura; a execução segue no servidor. */
+  async function follow(convId: number, path: string, init?: RequestInit) {
+    streamCtl.current?.abort();
+    const ctl = new AbortController();
+    streamCtl.current = ctl;
+    setRunning(true);
+    try {
+      await streamSSE(path, { ...init, signal: ctl.signal }, onEvent);
+    } catch (e: any) {
+      if (!ctl.signal.aborted) setError(e.message);
+    } finally {
+      if (!ctl.signal.aborted) {
+        // Recarrega do banco: a tela fica igual ao que foi persistido.
+        const live = await api.get<Live>(`/conversations/${convId}/live`).catch(() => null);
+        if (live) setMessages(live.messages);
+        setRunning(false);
+        resetLive();
+        refreshConversations();
+      }
+    }
+  }
+
+  async function openConversation(id: number) {
+    streamCtl.current?.abort();
+    setRunning(false);
+    resetLive();
     setCtx(null);
-    const c = await api.get<{ messages: Message[] }>(`/conversations/${id}`);
-    setMessages(c.messages);
+    setError("");
+    setCurrentId(id);
+    const live = await api.get<Live>(`/conversations/${id}/live`);
+    setMessages(live.messages);
+    const run = live.run;
+    if (run) {
+      runId.current = run.run_id;
+      setDraft(run.draft);
+      setSent(run.sent);
+      setApprovals(Object.fromEntries(run.approvals.map((a) => [a.call.id, { preview: a.preview }])));
+      follow(id, `/runs/${run.run_id}/stream?cursor=${run.cursor}`);
+    }
   }
 
   function newConversation() {
-    if (running) return;
+    streamCtl.current?.abort();
+    setRunning(false);
+    resetLive();
     setCurrentId(null);
     setMessages([]);
     setCtx(null);
@@ -131,14 +209,18 @@ export default function App() {
       case "tools_sent":
         setSent(ev);
         break;
+      case "status":
+        setStatus(ev.text);
+        break;
       case "message":
       case "event":
       case "tool_result":
+        setStatus(null);
         setMessages((ms) => [...ms, ev.message]);
-        if (ev.type === "tool_result")
-          setApprovals(({ [ev.message.tool_call_id]: _, ...rest }) => rest);
+        if (ev.type === "tool_result") setApprovals(({ [ev.message.tool_call_id]: _, ...rest }) => rest);
         break;
       case "assistant_start":
+        setStatus(null);
         setDraft({ content: "", thinking: "" });
         break;
       case "token":
@@ -152,7 +234,7 @@ export default function App() {
         setMessages((ms) => [...ms, ev.message]);
         break;
       case "approval_request":
-        setApprovals((a) => ({ ...a, [ev.call.id]: ev.preview }));
+        setApprovals((a) => ({ ...a, [ev.call.id]: { preview: ev.preview } }));
         break;
       case "context":
         setCtx(ev);
@@ -169,31 +251,22 @@ export default function App() {
     }
     setError("");
     setInput("");
-    setRunning(true);
-    try {
-      let id = currentId;
-      if (id === null) {
-        id = (await api.post<Conversation>("/conversations")).id;
-        setCurrentId(id);
-        setMessages([]);
-      }
-      await streamRun(
-        `/conversations/${id}/run`,
-        { content, provider: settings.provider, model: settings.model, mode: settings.mode, write_policy: settings.writePolicy },
-        onEvent,
-      );
-      // Recarrega do banco: garante que a tela é igual ao que foi persistido.
-      const c = await api.get<{ messages: Message[] }>(`/conversations/${id}`);
-      setMessages(c.messages);
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setRunning(false);
-      setDraft(null);
-      setApprovals({});
-      runId.current = null;
-      refreshConversations();
+    let id = currentId;
+    if (id === null) {
+      id = (await api.post<Conversation>("/conversations")).id;
+      setCurrentId(id);
+      setMessages([]);
     }
+    await follow(id, `/conversations/${id}/run`, {
+      method: "POST",
+      body: JSON.stringify({
+        content,
+        provider: settings.provider,
+        model: settings.model,
+        mode: settings.mode,
+        write_policy: settings.writePolicy,
+      }),
+    });
   }
 
   async function stop() {
@@ -202,10 +275,9 @@ export default function App() {
 
   async function decide(callId: string, approved: boolean) {
     if (!runId.current) return;
-    setApprovals((a) => ({ ...a, [callId]: null })); // evita clique duplo
+    setApprovals((a) => ({ ...a, [callId]: { ...a[callId], sent: true } })); // evita clique duplo
     await api.post(`/runs/${runId.current}/approve`, { call_id: callId, approved }).catch((e) => setError(e.message));
   }
-
 
   const results = useMemo(() => {
     const m = new Map<string, Message>();
@@ -334,13 +406,14 @@ export default function App() {
                 <div key={m.id} className="my-4">
                   <Thinking text={m.thinking} />
                   {m.content && <Markdown text={m.content} />}
-                  {m.tool_calls?.map((c) => (
+                  {m.tool_calls?.map((c, k) => (
                     <ToolBlock
                       key={c.id}
                       call={c}
                       result={results.get(c.id)}
                       approval={approvals[c.id]}
                       running={running}
+                      queued={m.tool_calls!.slice(0, k).some((p) => !results.has(p.id))}
                       onDecide={(ok) => decide(c.id, ok)}
                     />
                   ))}
@@ -364,6 +437,7 @@ export default function App() {
                 )}
               </div>
             )}
+            {status && !draft && <div className="my-4 animate-pulse text-sm text-muted">{status}</div>}
             <div ref={bottom} />
           </div>
         </div>
@@ -445,7 +519,15 @@ export default function App() {
         </div>
       </main>
 
-      <InfoPanel settings={settings} toolMode={toolMode} onToolMode={changeToolMode} allTools={allTools} sent={sent} />
+      <InfoPanel
+        settings={settings}
+        toolMode={toolMode}
+        onToolMode={changeToolMode}
+        allTools={allTools}
+        sent={sent}
+        mcp={mcp}
+        onReloadMcp={reloadMcp}
+      />
     </div>
   );
 }

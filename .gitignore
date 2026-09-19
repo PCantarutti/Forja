@@ -8,3 +8,4 @@ dist/
 data/
 *.db
 *.tsbuildinfo
+config/mcp.json

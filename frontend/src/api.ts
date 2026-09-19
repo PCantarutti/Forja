@@ -18,13 +18,9 @@ export const api = {
   del: <T>(path: string) => req<T>(path, { method: "DELETE" }),
 };
 
-/** POST que devolve SSE (EventSource só faz GET). Chama onEvent para cada `data:` recebido. */
-export async function streamRun(path: string, body: unknown, onEvent: (ev: any) => void) {
-  const r = await fetch(`/api${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+/** Lê um SSE via fetch (EventSource não faz POST nem aceita AbortSignal). Chama onEvent a cada `data:`. */
+export async function streamSSE(path: string, init: RequestInit, onEvent: (ev: any) => void) {
+  const r = await fetch(`/api${path}`, { ...init, headers: { "Content-Type": "application/json", ...init.headers } });
   if (!r.ok || !r.body) {
     const b = await r.json().catch(() => ({}));
     throw new Error(b.detail ?? `HTTP ${r.status}`);

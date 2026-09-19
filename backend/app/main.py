@@ -1,3 +1,4 @@
+import asyncio
 import json
 from contextlib import asynccontextmanager
 
@@ -13,8 +14,10 @@ from .tools import REGISTRY
 
 @asynccontextmanager
 async def lifespan(_app):
-    await mcp_client.start()
+    # MCP conecta em background: npx/uvx podem demorar e a API não deve esperar (o painel mostra "connecting").
+    task = asyncio.create_task(mcp_client.start())
     yield
+    task.cancel()
     await mcp_client.stop()
 
 

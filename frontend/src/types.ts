@@ -1,6 +1,9 @@
 export type ToolCall = { id: string; name: string; arguments: Record<string, unknown> };
 
-export type Preview = { kind: "diff" | "new"; path: string; text: string };
+export type Preview = { kind: "diff" | "new" | "command"; path: string; text: string };
+
+/** Aprovação pendente: preview é null para ferramentas sem preview (ex.: MCP); sent = decisão já enviada. */
+export type Approval = { preview: Preview | null; sent?: boolean };
 
 export type Message = {
   id: number;
