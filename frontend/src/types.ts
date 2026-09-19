@@ -32,3 +32,13 @@ export type Settings = {
   mode: "chat" | "agent";
   writePolicy: "ask" | "auto";
 };
+
+export type Stats = {
+  model: string;
+  prompt_tokens: number;
+  tokens: number;
+  estimated: boolean;
+  seconds: number;
+  tps: number | null;
+  ctx_max: number | null;
+};

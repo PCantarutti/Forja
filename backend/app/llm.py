@@ -5,7 +5,7 @@
   `num_ctx` só é respeitado pela API nativa — era a causa do contexto de 4k truncando as ferramentas.
 
 `chat_stream` normaliza os dois para eventos: ("content", str), ("reasoning", str),
-("done", {"tool_calls": [...], "prompt_tokens": int|None}).
+("done", {"tool_calls": [...], "prompt_tokens": int|None, "completion_tokens": int|None}).
 Mensagens de entrada/saída ficam sempre no formato OpenAI.
 """
 from __future__ import annotations
@@ -93,7 +93,7 @@ async def _openai_stream(provider, model, messages, tools, num_ctx):
     if tools:
         body["tools"] = tools
     calls: dict[int, dict] = {}
-    prompt_tokens = None
+    prompt_tokens = completion_tokens = None
     async with httpx.AsyncClient(timeout=TIMEOUT) as c:
         async with c.stream("POST", f"{base_url(provider)}/chat/completions", json=body) as r:
             if r.status_code >= 400:
@@ -107,6 +107,7 @@ async def _openai_stream(provider, model, messages, tools, num_ctx):
                 chunk = json.loads(data)
                 if chunk.get("usage"):
                     prompt_tokens = chunk["usage"].get("prompt_tokens")
+                    completion_tokens = chunk["usage"].get("completion_tokens")
                 if chunk.get("error"):
                     raise LLMError(str(chunk["error"]))
                 for choice in chunk.get("choices", []):
@@ -129,7 +130,7 @@ async def _openai_stream(provider, model, messages, tools, num_ctx):
         except json.JSONDecodeError:
             args = {"__raw__": acc["arguments"]}
         out.append({"id": acc["id"] or _new_id(), "name": acc["name"], "arguments": args})
-    yield "done", {"tool_calls": out, "prompt_tokens": prompt_tokens}
+    yield "done", {"tool_calls": out, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
 
 
 # ------------------------------------------------------------------ Ollama nativo
@@ -159,7 +160,7 @@ async def _ollama_stream(provider, model, messages, tools, num_ctx):
                   "options": {"num_ctx": num_ctx}}
     if tools:
         body["tools"] = tools
-    calls, prompt_tokens = [], None
+    calls, prompt_tokens, completion_tokens = [], None, None
     async with httpx.AsyncClient(timeout=TIMEOUT) as c:
         async with c.stream("POST", f"{host}/api/chat", json=body) as r:
             if r.status_code >= 400:
@@ -183,7 +184,8 @@ async def _ollama_stream(provider, model, messages, tools, num_ctx):
                     calls.append({"id": _new_id(), "name": fn.get("name", ""), "arguments": args})
                 if chunk.get("done"):
                     prompt_tokens = chunk.get("prompt_eval_count")
-    yield "done", {"tool_calls": calls, "prompt_tokens": prompt_tokens}
+                    completion_tokens = chunk.get("eval_count")
+    yield "done", {"tool_calls": calls, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
 
 
 def _new_id() -> str:

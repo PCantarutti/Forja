@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from typing import AsyncIterator
@@ -144,6 +145,19 @@ def _load(conv_id: int) -> list[db.Message]:
         return list(s.get(db.Conversation, conv_id).messages)
 
 
+def _stats(messages, tools, content, reasoning, done, t0, t_first, ctx_max, model) -> dict:
+    """Tokens reais do provider quando disponíveis; senão estimativa chars/4 (estimated=True)."""
+    end = time.monotonic()
+    est_prompt = sum(len(json.dumps(m, ensure_ascii=False)) for m in messages) // 4 + (
+        len(json.dumps(tools)) // 4 if tools else 0)
+    est_out = (len(content) + len(reasoning)) // 4
+    out = done.get("completion_tokens") or est_out
+    gen = end - (t_first or end)
+    return {"model": model, "prompt_tokens": done.get("prompt_tokens") or est_prompt, "tokens": out,
+            "estimated": not done.get("completion_tokens"), "seconds": round(end - t0, 2),
+            "tps": round(out / gen, 2) if gen > 0.05 else None, "ctx_max": ctx_max}
+
+
 def _save_partial(conv_id: int, content: str, reasoning: str) -> None:
     if content or reasoning:
         _save(conv_id, role="assistant", content=split_think(content)[1], thinking=reasoning, meta={"partial": True})
@@ -192,12 +206,16 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
         tools = [t.openai_schema() for t in REGISTRY.values()] if via == "native" else None
 
         content = reasoning = ""
-        done: dict = {"tool_calls": [], "prompt_tokens": None}
+        done: dict = {"tool_calls": [], "prompt_tokens": None, "completion_tokens": None}
         yield {"type": "assistant_start"}
+        t0 = time.monotonic()
+        t_first = None
         try:
             async for kind, val in llm.chat_stream(req.provider, req.model, messages, tools, config.NUM_CTX):
                 if run.cancel.is_set():
                     break
+                if kind != "done" and t_first is None:
+                    t_first = time.monotonic()
                 if kind == "content":
                     content += val
                     yield {"type": "token", "text": val}
@@ -225,10 +243,8 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
             _save_partial(conv_id, content, reasoning)
             break
 
-        est = sum(len(json.dumps(m, ensure_ascii=False)) for m in messages) // 4 + (
-            len(json.dumps(tools)) // 4 if tools else 0)
-        yield {"type": "context", "used": done["prompt_tokens"] or est,
-               "estimated": done["prompt_tokens"] is None, "max": ctx_max}
+        stats = _stats(messages, tools, content, reasoning, done, t0, t_first, ctx_max, req.model)
+        yield {"type": "context", "used": stats["prompt_tokens"], "estimated": stats["estimated"], "max": ctx_max}
 
         think, visible = split_think(content)
         reasoning = (reasoning + "\n" + think).strip()
@@ -238,7 +254,7 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
             calls = [{"id": "call_" + uuid.uuid4().hex[:12], **c} for c in parsed]
 
         msg = _save(conv_id, role="assistant", content=visible, thinking=reasoning,
-                    tool_calls=calls or None, meta={"via": via})
+                    tool_calls=calls or None, meta={"via": via, "stats": stats})
         yield {"type": "assistant_end", "message": msg.to_dict()}
 
         if not calls:

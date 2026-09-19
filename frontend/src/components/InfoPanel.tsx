@@ -1,4 +1,5 @@
 import type { Settings, ToolsSent } from "../types";
+import { Wrench } from "./icons";
 
 const VIA: Record<string, string> = {
   native: "nativo (campo tools da API)",
@@ -9,23 +10,34 @@ const VIA: Record<string, string> = {
 function Row({ k, children }: { k: string; children: React.ReactNode }) {
   return (
     <div className="flex justify-between gap-2 py-0.5">
-      <span className="text-zinc-500">{k}</span>
-      <span className="truncate text-right text-zinc-200">{children}</span>
+      <span className="text-faint">{k}</span>
+      <span className="truncate text-right text-fg">{children}</span>
     </div>
   );
 }
 
 function Tools({ list }: { list: { name: string; mutating: boolean }[] }) {
-  if (!list.length) return <div className="text-zinc-400">Nenhuma ferramenta.</div>;
+  if (!list.length) return <div className="text-muted">Nenhuma ferramenta.</div>;
   return (
     <ul className="space-y-1">
       {list.map((t) => (
         <li key={t.name} className="flex items-center justify-between font-mono">
-          <span className="text-amber-300">{t.name}</span>
-          {t.mutating && <span className="rounded bg-zinc-800 px-1.5 text-[10px] text-zinc-200">escrita</span>}
+          <span className="flex items-center gap-1.5 text-fg">
+            <Wrench className="size-3 text-faint" /> {t.name}
+          </span>
+          {t.mutating && <span className="rounded bg-raised px-1.5 text-[10px] text-muted">escrita</span>}
         </li>
       ))}
     </ul>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="rounded-2xl border border-line bg-surface p-3.5">
+      <h3 className="mb-2 text-[11px] font-medium tracking-wider text-faint uppercase">{title}</h3>
+      {children}
+    </section>
   );
 }
 
@@ -35,18 +47,14 @@ export default function InfoPanel(props: {
   onToolMode: (m: string) => void;
   allTools: { name: string; mutating: boolean }[];
   sent: ToolsSent | null;
-  ctx: { used: number; max: number | null; estimated: boolean } | null;
-  numCtx: number;
 }) {
-  const { settings, sent, ctx } = props;
+  const { settings, sent } = props;
   const agent = settings.mode === "agent";
   const nextVia = !agent ? "none" : props.toolMode === "text" ? "prompt" : "native";
-  const pct = ctx?.max ? Math.min(100, (ctx.used / ctx.max) * 100) : 0;
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col gap-5 overflow-y-auto border-l border-zinc-800 bg-zinc-950 p-4 text-xs">
-      <section>
-        <h3 className="mb-2 text-[11px] font-semibold tracking-wider text-zinc-400 uppercase">Estado</h3>
+    <aside className="flex w-72 shrink-0 flex-col gap-3 overflow-y-auto border-l border-line bg-bg p-3 text-xs">
+      <Section title="Estado">
         <Row k="Modo">{agent ? "Agente" : "Chat"}</Row>
         <Row k="Provider">{settings.provider}</Row>
         <Row k="Modelo">
@@ -54,69 +62,38 @@ export default function InfoPanel(props: {
         </Row>
         <Row k="Escrita">{settings.writePolicy === "ask" ? "perguntar" : "automática"}</Row>
         <label className="mt-2 flex items-center justify-between gap-2">
-          <span className="text-zinc-500">Tool calling deste modelo</span>
+          <span className="text-faint">Tool calling do modelo</span>
           <select
             value={props.toolMode}
             onChange={(e) => props.onToolMode(e.target.value)}
             disabled={!settings.model}
-            className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-zinc-200"
+            className="rounded-md border border-line bg-raised px-1.5 py-0.5 text-fg"
           >
             <option value="auto">auto</option>
             <option value="native">native</option>
             <option value="text">text</option>
           </select>
         </label>
-      </section>
+      </Section>
 
-      <section>
-        <h3 className="mb-2 text-[11px] font-semibold tracking-wider text-zinc-400 uppercase">
-          Enviadas na última requisição
-        </h3>
+      <Section title="Enviadas na última requisição">
         {sent ? (
           <>
-            <div className="mb-2 text-zinc-400">
+            <div className="mb-2 text-muted">
               {sent.model} · via {VIA[sent.via]}
             </div>
             <Tools list={sent.tools} />
           </>
         ) : (
-          <div className="text-zinc-400">Nenhuma requisição nesta sessão ainda.</div>
+          <div className="text-muted">Nenhuma requisição nesta sessão ainda.</div>
         )}
-      </section>
+      </Section>
 
-      <section>
-        <h3 className="mb-2 text-[11px] font-semibold tracking-wider text-zinc-400 uppercase">
-          Próxima requisição enviará
-        </h3>
-        <div className="mb-2 text-zinc-400">via {VIA[nextVia]}</div>
+      <Section title="Próxima requisição enviará">
+        <div className="mb-2 text-muted">via {VIA[nextVia]}</div>
         <Tools list={agent ? props.allTools : []} />
-        {!agent && <div className="mt-1 text-zinc-400">Modo Chat não envia ferramentas. Troque para Agente.</div>}
-      </section>
-
-      <section>
-        <h3 className="mb-2 text-[11px] font-semibold tracking-wider text-zinc-400 uppercase">Contexto</h3>
-        {ctx ? (
-          <>
-            <div className="mb-1 h-2 overflow-hidden rounded bg-zinc-800">
-              <div
-                className={`h-full ${pct > 85 ? "bg-red-500" : pct > 60 ? "bg-amber-500" : "bg-emerald-500"}`}
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-            <div className="text-zinc-300">
-              {ctx.estimated ? "~" : ""}
-              {ctx.used.toLocaleString()} / {ctx.max ? ctx.max.toLocaleString() : "?"} tokens
-            </div>
-          </>
-        ) : (
-          <div className="text-zinc-400">Sem dados ainda.</div>
-        )}
-        <div className="mt-1 text-zinc-500">
-          {settings.provider === "ollama"
-            ? `num_ctx enviado ao Ollama: ${props.numCtx.toLocaleString()}`
-            : "Janela definida ao carregar o modelo no LM Studio."}
-        </div>
-      </section>
+        {!agent && <div className="mt-1 text-muted">Modo Chat não envia ferramentas. Troque para Agente.</div>}
+      </Section>
     </aside>
   );
 }

@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, streamRun } from "./api";
 import Sidebar from "./components/Sidebar";
 import InfoPanel from "./components/InfoPanel";
-import { EventNotice, Markdown, Thinking, ToolBlock } from "./components/MessageView";
-import type { Conversation, Message, Preview, Settings, ToolsSent } from "./types";
+import { CopyButton, EventNotice, Markdown, StatsRow, Thinking, ToolBlock, type TurnStats } from "./components/MessageView";
+import { ArrowUp, ChevronDown, Cube, Square } from "./components/icons";
+import type { Conversation, Message, Preview, Settings, Stats, ToolsSent } from "./types";
 
 type Config = { providers: string[]; num_ctx: number };
 
@@ -16,7 +17,21 @@ function loadSettings(): Settings {
   }
 }
 
-const select = "rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm text-zinc-200";
+const pill = "rounded-full border border-line bg-transparent px-3 py-1 text-xs text-muted hover:bg-raised";
+
+function aggregate(list: Stats[]): TurnStats {
+  const withTps = list.filter((s) => s.tps);
+  const gen = withTps.reduce((a, s) => a + s.tokens / s.tps!, 0);
+  return {
+    model: list[list.length - 1].model,
+    tokens: list.reduce((a, s) => a + s.tokens, 0),
+    seconds: list.reduce((a, s) => a + s.seconds, 0),
+    tps: gen > 0 ? withTps.reduce((a, s) => a + s.tokens, 0) / gen : null,
+    estimated: list.some((s) => s.estimated),
+  };
+}
+
+const fmt = (n: number) => n.toLocaleString("pt-BR");
 
 export default function App() {
   const [config, setConfig] = useState<Config>({ providers: ["ollama", "lmstudio"], num_ctx: 32768 });
@@ -85,6 +100,7 @@ export default function App() {
     if (running) return;
     setCurrentId(id);
     setApprovals({});
+    setCtx(null);
     const c = await api.get<{ messages: Message[] }>(`/conversations/${id}`);
     setMessages(c.messages);
   }
@@ -93,6 +109,7 @@ export default function App() {
     if (running) return;
     setCurrentId(null);
     setMessages([]);
+    setCtx(null);
   }
 
   async function deleteConversation(id: number) {
@@ -189,11 +206,52 @@ export default function App() {
     await api.post(`/runs/${runId.current}/approve`, { call_id: callId, approved }).catch((e) => setError(e.message));
   }
 
+
   const results = useMemo(() => {
     const m = new Map<string, Message>();
     for (const msg of messages) if (msg.role === "tool" && msg.tool_call_id) m.set(msg.tool_call_id, msg);
     return m;
   }, [messages]);
+
+  // Estatísticas por turno (todas as iterações do agente até a próxima mensagem do usuário),
+  // exibidas embaixo da última resposta do turno.
+  const turns = useMemo(() => {
+    const out = new Map<number, { stats: TurnStats | null; text: string }>();
+    let acc: Stats[] = [];
+    let text: string[] = [];
+    let last = -1;
+    const flush = () => {
+      if (last >= 0) out.set(last, { stats: acc.length ? aggregate(acc) : null, text: text.join("\n\n") });
+      acc = [];
+      text = [];
+      last = -1;
+    };
+    messages.forEach((m, i) => {
+      if (m.role === "user") flush();
+      else if (m.role === "assistant") {
+        last = i;
+        if (m.meta?.stats) acc.push(m.meta.stats);
+        if (m.content) text.push(m.content);
+      }
+    });
+    flush();
+    return out;
+  }, [messages]);
+
+  // Linha acima do input: contexto atual, saída do último turno e média de t/s da conversa.
+  const summary = useMemo(() => {
+    const all: Stats[] = messages.flatMap((m) => (m.role === "assistant" && m.meta?.stats ? [m.meta.stats] : []));
+    const lastStats = all[all.length - 1];
+    const lastTurn = [...turns.values()].pop()?.stats;
+    const avg = all.length ? aggregate(all).tps : null;
+    // Contexto ocupado após a última resposta = prompt + saída (é o que entra na próxima requisição).
+    const used = lastStats ? lastStats.prompt_tokens + lastStats.tokens : (ctx?.used ?? null);
+    const max = ctx?.max ?? lastStats?.ctx_max ?? null;
+    return { used, max, out: lastTurn?.tokens ?? null, avg };
+  }, [messages, turns, ctx]);
+
+  // O turno atual ainda está rodando: não mostra estatísticas dele até terminar.
+  const lastUserIndex = messages.map((m) => m.role).lastIndexOf("user");
 
   return (
     <div className="flex h-full">
@@ -205,97 +263,95 @@ export default function App() {
         onDelete={deleteConversation}
       />
 
-      <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex flex-wrap items-center gap-2 border-b border-zinc-800 px-4 py-2">
-          <select className={select} value={settings.provider} onChange={(e) => update({ provider: e.target.value })}>
-            {config.providers.map((p) => (
-              <option key={p} value={p}>
-                {p === "lmstudio" ? "LM Studio" : p === "ollama" ? "Ollama" : p}
-              </option>
-            ))}
-          </select>
-          <select
-            className={`${select} max-w-72`}
-            value={settings.model}
-            onChange={(e) => update({ model: e.target.value })}
-          >
-            {!models.length && <option value="">(sem modelos)</option>}
-            {models.map((m) => (
-              <option key={m}>{m}</option>
-            ))}
-          </select>
-
-          <div className="ml-2 flex overflow-hidden rounded-md border border-zinc-700 text-sm" role="radiogroup" aria-label="Modo">
-            {(["chat", "agent"] as const).map((m) => (
-              <button
-                key={m}
-                role="radio"
-                aria-checked={settings.mode === m}
-                onClick={() => update({ mode: m })}
-                className={`px-3 py-1 ${settings.mode === m ? "bg-amber-500 font-medium text-zinc-950" : "text-zinc-300 hover:bg-zinc-800"}`}
-              >
-                {m === "chat" ? "Chat" : "Agente"}
-              </button>
-            ))}
-          </div>
-
-          <label className="ml-2 flex items-center gap-1 text-sm text-zinc-400">
-            Escrita
+      <main className="flex min-w-0 flex-1 flex-col bg-bg">
+        <header className="flex items-center gap-1 px-4 py-2.5">
+          <label className="relative flex items-center text-muted">
             <select
-              className={select}
-              value={settings.writePolicy}
-              onChange={(e) => update({ writePolicy: e.target.value as Settings["writePolicy"] })}
-              disabled={settings.mode === "chat"}
+              value={settings.provider}
+              onChange={(e) => update({ provider: e.target.value })}
+              className="appearance-none bg-transparent py-1 pr-6 pl-2 text-sm hover:text-fg focus:outline-none"
             >
-              <option value="ask">perguntar</option>
-              <option value="auto">automática</option>
+              {config.providers.map((p) => (
+                <option key={p} value={p} className="bg-surface">
+                  {p === "lmstudio" ? "LM Studio" : p === "ollama" ? "Ollama" : p}
+                </option>
+              ))}
             </select>
+            <ChevronDown className="pointer-events-none absolute right-1 size-3.5" />
+          </label>
+          <span className="text-faint">/</span>
+          <label className="relative flex items-center">
+            <select
+              value={settings.model}
+              onChange={(e) => update({ model: e.target.value })}
+              className="max-w-80 appearance-none truncate bg-transparent py-1 pr-7 pl-2 text-[17px] font-medium text-fg focus:outline-none"
+            >
+              {!models.length && <option value="">(sem modelos)</option>}
+              {models.map((m) => (
+                <option key={m} className="bg-surface text-sm">
+                  {m}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="pointer-events-none absolute right-1.5 size-4 text-muted" />
           </label>
         </header>
 
         {modelsError && (
-          <div className="border-b border-red-900 bg-red-950/50 px-4 py-2 text-sm text-red-200">
+          <div className="mx-4 rounded-xl border border-red-500/30 bg-surface px-4 py-2 text-sm text-red-200">
             Não consegui listar modelos: {modelsError}
           </div>
         )}
 
         <div className="flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-3xl px-4 py-6">
+          <div className="mx-auto max-w-3xl px-5 py-6">
             {!messages.length && !draft && (
-              <div className="mt-24 text-center text-zinc-400">
-                <div className="mb-2 text-2xl font-semibold text-zinc-200">O que vamos construir?</div>
-                <div className="text-sm">
+              <div className="mt-[22vh]">
+                <div className="mb-4 grid size-11 place-items-center rounded-full bg-fg text-xl font-bold text-black">F</div>
+                <div className="text-3xl font-semibold">Olá!</div>
+                <div className="text-3xl text-faint">Como posso ajudar hoje?</div>
+                <div className="mt-4 text-sm text-muted">
                   Modo {settings.mode === "agent" ? "Agente: lê e escreve em /workspace" : "Chat: sem ferramentas"}.
                 </div>
               </div>
             )}
 
-            {messages.map((m) => {
+            {messages.map((m, i) => {
               if (m.role === "user")
                 return (
-                  <div key={m.id} className="my-4 flex justify-end">
-                    <div className="max-w-[85%] rounded-2xl bg-zinc-800 px-4 py-2 whitespace-pre-wrap">{m.content}</div>
+                  <div key={m.id} className="group my-6 flex flex-col items-end">
+                    <div className="max-w-[85%] rounded-3xl bg-raised px-5 py-2.5 whitespace-pre-wrap">{m.content}</div>
+                    <div className="mt-1 opacity-0 transition group-hover:opacity-100">
+                      <CopyButton text={m.content} />
+                    </div>
                   </div>
                 );
               if (m.role === "event") return <EventNotice key={m.id} m={m} />;
-              if (m.role === "assistant")
-                return (
-                  <div key={m.id} className="my-4">
-                    <Thinking text={m.thinking} />
-                    {m.content && <Markdown text={m.content} />}
-                    {m.tool_calls?.map((c) => (
-                      <ToolBlock
-                        key={c.id}
-                        call={c}
-                        result={results.get(c.id)}
-                        approval={approvals[c.id]}
-                        running={running}
-                        onDecide={(ok) => decide(c.id, ok)}
-                      />
-                    ))}
-                  </div>
-                );
-              return null;
+              if (m.role !== "assistant") return null;
+              const turn = turns.get(i);
+              const showTurn = turn && !(running && i > lastUserIndex);
+              return (
+                <div key={m.id} className="my-4">
+                  <Thinking text={m.thinking} />
+                  {m.content && <Markdown text={m.content} />}
+                  {m.tool_calls?.map((c) => (
+                    <ToolBlock
+                      key={c.id}
+                      call={c}
+                      result={results.get(c.id)}
+                      approval={approvals[c.id]}
+                      running={running}
+                      onDecide={(ok) => decide(c.id, ok)}
+                    />
+                  ))}
+                  {showTurn && (
+                    <div className="mt-4 space-y-1.5">
+                      {turn.stats && <StatsRow s={turn.stats} />}
+                      <CopyButton text={turn.text} />
+                    </div>
+                  )}
+                </div>
+              );
             })}
 
             {draft && (
@@ -304,7 +360,7 @@ export default function App() {
                 {draft.content ? (
                   <Markdown text={draft.content} />
                 ) : (
-                  !draft.thinking && <div className="animate-pulse text-zinc-500">…</div>
+                  !draft.thinking && <div className="animate-pulse text-faint">●</div>
                 )}
               </div>
             )}
@@ -312,48 +368,84 @@ export default function App() {
           </div>
         </div>
 
-        <div className="border-t border-zinc-800 p-3">
-          {error && <div className="mx-auto mb-2 max-w-3xl text-sm text-red-300">{error}</div>}
-          <div className="mx-auto flex max-w-3xl items-end gap-2">
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-              rows={Math.min(8, input.split("\n").length)}
-              placeholder={settings.mode === "agent" ? "Peça algo ao agente…" : "Mensagem…"}
-              className="flex-1 resize-none rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-2.5 text-zinc-100 placeholder:text-zinc-500 focus:border-amber-500 focus:outline-none"
-            />
-            {running ? (
-              <button onClick={stop} className="rounded-xl bg-red-600 px-4 py-2.5 font-medium text-white hover:bg-red-500">
-                Parar
-              </button>
-            ) : (
-              <button
-                onClick={send}
-                disabled={!input.trim()}
-                className="rounded-xl bg-amber-500 px-4 py-2.5 font-medium text-zinc-950 hover:bg-amber-400 disabled:opacity-40"
-              >
-                Enviar
-              </button>
+        <div className="px-5 pb-4">
+          <div className="mx-auto max-w-3xl">
+            {summary.used != null && (
+              <div className="mb-2 flex flex-wrap justify-center gap-x-8 font-mono text-[13px] text-muted">
+                <span>
+                  Contexto: {fmt(summary.used)}/{summary.max ? fmt(summary.max) : "?"}
+                  {summary.max ? ` (${Math.round((summary.used / summary.max) * 100)}%)` : ""}
+                </span>
+                {summary.out != null && <span>Saída: {fmt(summary.out)}</span>}
+                {summary.avg != null && <span>Média: {summary.avg.toFixed(1)} t/s</span>}
+              </div>
             )}
+            {error && <div className="mb-2 text-sm text-red-300">{error}</div>}
+
+            <div className="rounded-3xl border border-line bg-surface px-4 pt-3 pb-2.5 focus-within:border-[#454545]">
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    send();
+                  }
+                }}
+                rows={Math.min(8, Math.max(2, input.split("\n").length))}
+                placeholder={settings.mode === "agent" ? "Peça algo ao agente..." : "Digite uma mensagem..."}
+                className="w-full resize-none bg-transparent text-[15px] text-fg placeholder:text-faint focus:outline-none"
+              />
+              <div className="mt-1 flex items-center gap-2">
+                <div className="flex rounded-full border border-line p-0.5 text-xs" role="radiogroup" aria-label="Modo">
+                  {(["chat", "agent"] as const).map((m) => (
+                    <button
+                      key={m}
+                      role="radio"
+                      aria-checked={settings.mode === m}
+                      onClick={() => update({ mode: m })}
+                      className={`rounded-full px-3 py-1 ${settings.mode === m ? "bg-fg font-medium text-black" : "text-muted hover:text-fg"}`}
+                    >
+                      {m === "chat" ? "Chat" : "Agente"}
+                    </button>
+                  ))}
+                </div>
+                {settings.mode === "agent" && (
+                  <select
+                    value={settings.writePolicy}
+                    onChange={(e) => update({ writePolicy: e.target.value as Settings["writePolicy"] })}
+                    className={pill}
+                    title="Permissão de escrita"
+                  >
+                    <option value="ask" className="bg-surface">Escrita: perguntar</option>
+                    <option value="auto" className="bg-surface">Escrita: automática</option>
+                  </select>
+                )}
+
+                <span className="ml-auto hidden max-w-60 items-center gap-1.5 truncate rounded-lg bg-raised px-2.5 py-1 text-xs text-muted sm:inline-flex">
+                  <Cube className="size-3.5 shrink-0" /> <span className="truncate">{settings.model || "sem modelo"}</span>
+                </span>
+                {running ? (
+                  <button onClick={stop} title="Parar" className="grid size-9 place-items-center rounded-full bg-raised text-fg hover:bg-[#3a3a3a]">
+                    <Square />
+                  </button>
+                ) : (
+                  <button
+                    onClick={send}
+                    disabled={!input.trim()}
+                    title="Enviar"
+                    className="grid size-9 place-items-center rounded-full bg-fg text-black hover:bg-white disabled:bg-raised disabled:text-faint"
+                  >
+                    <ArrowUp />
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </main>
 
-      <InfoPanel
-        settings={settings}
-        toolMode={toolMode}
-        onToolMode={changeToolMode}
-        allTools={allTools}
-        sent={sent}
-        ctx={ctx}
-        numCtx={config.num_ctx}
-      />
+      <InfoPanel settings={settings} toolMode={toolMode} onToolMode={changeToolMode} allTools={allTools} sent={sent} />
     </div>
   );
 }
