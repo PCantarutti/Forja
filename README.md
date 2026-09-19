@@ -2,11 +2,14 @@
 
 Ambiente de desenvolvimento pessoal com agente de IA **local**. Uma interface web de chat onde um modelo rodando no seu PC (Ollama ou LM Studio) lê e escreve arquivos numa pasta de trabalho, sempre com aprovação visível e sem ferramentas escondidas.
 
-- **Chat** (sem ferramentas) ou **Agente** (com `list_dir`, `read_file`, `write_file` e `edit_file`)
+- **Chat** (sem ferramentas) ou **Agente** (arquivos, shell, busca web e servidores MCP)
 - Tool calling nativo, com fallback para chamadas escritas em texto (`<tool_call>`, blocos ```json e XML)
 - Card de aprovação com diff antes de qualquer escrita
 - Painel lateral com as ferramentas **realmente enviadas** ao modelo em cada requisição
 - Detecção de "promessa sem ação" (lembra o modelo até 2x) e de loop (3 chamadas idênticas seguidas)
+- Execuções continuam no servidor: recarregar a página (F5) reconecta, inclusive com aprovação pendente
+- Compactação automática do contexto quando a conversa fica grande
+- Tokens, tempo e tokens/s de cada resposta
 
 ## Requisitos
 
@@ -25,6 +28,49 @@ Abra http://localhost:3000. No topo, escolha o provider e o modelo, selecione **
 
 Para atualizar depois de mudar o código, rode `docker compose up -d --build` de novo. As conversas ficam no volume `forja-data`.
 
+## Ferramentas
+
+| Ferramenta | O que faz | Aprovação |
+|---|---|---|
+| `list_dir`, `read_file` | Lê a pasta de trabalho | não |
+| `write_file`, `edit_file` | Cria e edita arquivos (card com diff) | conforme **Escrita** (perguntar/automática) |
+| `run_command` | `bash` no container Linux, com cwd em `/workspace` (python, git, node, uv) | **sempre**, mesmo com escrita automática |
+| `web_search` | Busca via SearXNG local (sem chave, sem conta) | não |
+| `fetch_url` | Baixa uma página e devolve o texto. Bloqueia endereços da rede local. | não |
+| `mcp__<servidor>__<tool>` | Ferramentas dos servidores MCP configurados | sim, a menos que o servidor marque a ferramenta como somente leitura (`readOnlyHint`) |
+
+O `run_command` roda **dentro do container**, não no Windows. Ele só enxerga `/workspace`, tem timeout (padrão 60s, teto `SHELL_TIMEOUT_MAX`) e, ao estourar o tempo, mata o processo e todos os filhos.
+
+## MCP
+
+Copie o exemplo e edite:
+
+```powershell
+copy config\mcp.example.json config\mcp.json
+```
+
+O formato é o mesmo do Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "memoria": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"] },
+    "tempo":   { "command": "uvx", "args": ["mcp-server-time"] },
+    "remoto":  { "url": "http://host.docker.internal:8931/mcp", "headers": { "Authorization": "Bearer ..." } },
+    "desligado": { "command": "...", "disabled": true }
+  }
+}
+```
+
+- **stdio** (`command`): o processo roda no container do backend, que já tem `npx` e `uvx`. O cwd é `/workspace`.
+- **HTTP** (`url`): streamable HTTP. Para um servidor rodando no Windows, use `host.docker.internal`.
+- Depois de editar, clique em **recarregar** no painel *Servidores MCP*. Não precisa reiniciar o container.
+- Servidor com erro não derruba o app. O erro aparece no painel.
+
+## Contexto longo: compactação
+
+Antes de cada chamada, o Forja estima o tamanho do prompt. Se passar de `COMPACT_AT` (padrão 80%) da janela do modelo, as mensagens anteriores aos 2 últimos turnos viram um resumo escrito pelo próprio modelo. O resumo aparece na conversa como *Contexto compactado* e pode ser expandido. Nada é apagado do banco: o histórico completo continua visível. Só o que vai para o modelo encolhe.
+
 ## Variáveis (.env)
 
 | Variável | Padrão | Para que serve |
@@ -36,6 +82,8 @@ Para atualizar depois de mudar o código, rode `docker compose up -d --build` de
 | `NUM_CTX` | `32768` | Janela de contexto enviada ao Ollama |
 | `MAX_ITERATIONS` | `25` | Máximo de passos do agente por mensagem |
 | `MAX_FILE_BYTES` | `1000000` | Tamanho máximo de arquivo lido/escrito |
+| `SHELL_TIMEOUT_MAX` | `300` | Teto em segundos do `run_command` |
+| `COMPACT_AT` | `0.8` | Fração da janela que dispara a compactação |
 
 ## Apontando para Ollama ou LM Studio
 
@@ -74,10 +122,16 @@ New-NetFirewallRule -DisplayName "Ollama" -Direction Inbound -LocalPort 11434 -P
 ```
 
 **Modelo "esquece" as ferramentas ou responde fora de contexto**
-Em geral o contexto está pequeno. No Ollama, aumente `NUM_CTX` no `.env` (32768 ou mais, se couber na VRAM). No LM Studio, recarregue o modelo com um *Context Length* maior. A barra **Contexto** no painel mostra quanto está em uso.
+Em geral o contexto está pequeno. No Ollama, aumente `NUM_CTX` no `.env` (32768 ou mais, se couber na VRAM). No LM Studio, recarregue o modelo com um *Context Length* maior. A linha **Contexto** acima do campo de mensagem mostra quanto está em uso.
 
 **"Conexão interrompida... modelo descarregado"**
-O LM Studio pode descarregar o modelo por TTL/JIT no meio de uma resposta. Mande a mensagem de novo.
+O LM Studio pode descarregar o modelo por TTL/JIT. Se a conexão cair antes do primeiro token, o Forja tenta de novo uma vez sozinho. Se cair no meio da resposta, mande a mensagem de novo.
+
+**Busca web: "Busca indisponível"**
+Confira se o container `searxng` está de pé (`docker compose ps`). O SearXNG não é exposto no host; só o backend fala com ele.
+
+**Servidor MCP em "error"**
+Leia a mensagem no painel. Em servidores stdio, o comando precisa existir **no container** (`npx`, `uvx`, `python`). Um executável do Windows não funciona aqui. Para servidores no Windows, use `url` com `host.docker.internal`.
 
 **O modelo diz "vou criar o arquivo" e não cria**
 O Forja manda até 2 lembretes automáticos (aparecem em azul na conversa). Se não resolver, troque o modo de tool calling do modelo para `text` no painel lateral.
@@ -103,11 +157,17 @@ $env:API_URL="http://127.0.0.1:3000"; npx vite
 
 ```
 backend/app/
-  tools.py    registry de ferramentas + confinamento em /workspace
-  parsing.py  parser de tool calls em texto, detector de promessa e de loop
-  llm.py      cliente OpenAI-compatível (SSE) e Ollama nativo
-  agent.py    loop do agente, eventos SSE, aprovações
-  main.py     rotas FastAPI
+  tools.py       registry de ferramentas + confinamento em /workspace + ferramentas de arquivo
+  shell.py       run_command
+  web.py         web_search (SearXNG) e fetch_url
+  mcp_client.py  conexão com servidores MCP (stdio/HTTP) e registro das ferramentas
+  parsing.py     parser de tool calls em texto, detector de promessa e de loop
+  compact.py     compactação de contexto
+  llm.py         cliente OpenAI-compatível (SSE) e Ollama nativo
+  agent.py       loop do agente, execução em background (Run), aprovações
+  main.py        rotas FastAPI
+config/          mcp.json (seu, fora do git) e mcp.example.json
+searxng/         settings.yml do SearXNG
 frontend/src/  React + Tailwind (App, Sidebar, InfoPanel, MessageView)
 ```
 
