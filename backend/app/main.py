@@ -1,15 +1,24 @@
 import json
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from . import config, db, llm
-from .agent import RUNS, Run, RunRequest, run_agent
+from . import config, db, llm, mcp_client
+from .agent import RUNS, Run, RunRequest, active_run
 from .tools import REGISTRY
 
-app = FastAPI(title="Forja")
+
+@asynccontextmanager
+async def lifespan(_app):
+    await mcp_client.start()
+    yield
+    await mcp_client.stop()
+
+
+app = FastAPI(title="Forja", lifespan=lifespan)
 
 
 @app.get("/api/config")
@@ -20,7 +29,21 @@ def get_config():
 
 @app.get("/api/tools")
 def get_tools():
-    return [{"name": t.name, "description": t.description, "mutating": t.mutating} for t in REGISTRY.values()]
+    return [{"name": t.name, "description": t.description, "mutating": t.mutating, "always_ask": t.always_ask,
+             "source": t.source} for t in REGISTRY.values()]
+
+
+@app.get("/api/mcp")
+def get_mcp():
+    return mcp_client.status()
+
+
+@app.post("/api/mcp/reload")
+async def reload_mcp():
+    if any(not r.finished for r in RUNS.values()):
+        raise HTTPException(409, "Espere a execução atual terminar antes de recarregar o MCP")
+    await mcp_client.start()
+    return mcp_client.status()
 
 
 @app.get("/api/models")
@@ -105,25 +128,43 @@ class RunBody(BaseModel):
     write_policy: str = "ask"
 
 
+def _sse(run: Run, cursor: int) -> StreamingResponse:
+    # Desconectar só encerra esta assinatura; a execução continua em background.
+    async def stream():
+        async for ev in run.subscribe(cursor):
+            yield f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.post("/api/conversations/{conv_id}/run")
 async def start_run(conv_id: int, body: RunBody):
     with db.session() as s:
         _get_conv(s, conv_id)
     if body.mode not in ("chat", "agent") or body.write_policy not in ("ask", "auto"):
         raise HTTPException(400, "mode deve ser chat|agent e write_policy ask|auto")
-    run = Run()
+    if active_run(conv_id):
+        raise HTTPException(409, "Esta conversa já tem uma execução em andamento")
+    run = Run(conv_id)
     RUNS[run.id] = run
+    run.start(RunRequest(**body.model_dump()))
+    return _sse(run, 0)
 
-    async def stream():
-        try:
-            async for ev in run_agent(conv_id, RunRequest(**body.model_dump()), run):
-                yield f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
-        finally:
-            run.stop()
-            RUNS.pop(run.id, None)
 
-    return StreamingResponse(stream(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+@app.get("/api/conversations/{conv_id}/live")
+async def live(conv_id: int):  # async: roda no event loop, atômico em relação ao publish()
+    """Mensagens salvas + estado da execução ativa (rascunho, aprovações pendentes, cursor)."""
+    with db.session() as s:
+        c = _get_conv(s, conv_id)
+        messages = [m.to_dict() for m in c.messages]
+    run = active_run(conv_id)  # sem await entre as duas leituras: snapshot consistente
+    return {"messages": messages, "run": run.snapshot() if run else None}
+
+
+@app.get("/api/runs/{run_id}/stream")
+def stream_run(run_id: str, cursor: int = 0):
+    return _sse(_get_run(run_id), cursor)
 
 
 class ApproveBody(BaseModel):

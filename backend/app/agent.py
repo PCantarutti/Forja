@@ -13,11 +13,15 @@ import uuid
 from dataclasses import dataclass
 from typing import AsyncIterator
 
-from . import config, db, llm
+from . import compact, config, db, llm
+from . import shell, web  # noqa: F401  (registram run_command, web_search, fetch_url)
 from .parsing import LoopDetector, detect_promise, parse_text_tool_calls, split_think
-from .tools import REGISTRY, ToolError, get_tool, preview_tool, run_tool
+from .tools import REGISTRY, ToolError, execute, get_tool, preview_tool
 
 MAX_NUDGES = 2
+MAX_RETRIES = 1
+RETRY_DELAY = 2.0
+KEEP_FINISHED_RUN = 120  # segundos que uma execução terminada continua consultável
 
 
 @dataclass
@@ -30,10 +34,78 @@ class RunRequest:
 
 
 class Run:
-    def __init__(self):
+    """Execução em background, desacoplada da conexão HTTP.
+
+    O loop roda numa task e publica eventos num buffer; o SSE só assina o buffer a partir de
+    um cursor. Fechar/recarregar a página não interrompe nada: o cliente reconecta via
+    snapshot() e continua do cursor. Só o botão Parar cancela.
+    """
+
+    def __init__(self, conv_id: int):
         self.id = uuid.uuid4().hex
+        self.conv_id = conv_id
         self.cancel = asyncio.Event()
         self.pending: dict[str, asyncio.Future] = {}
+        self.events: list[dict] = []
+        self.finished = False
+        self._changed = asyncio.Condition()
+        # Estado derivado dos eventos, para reconexão:
+        self.draft: dict | None = None
+        self.approvals: dict[str, dict] = {}
+        self.sent: dict | None = None
+
+    async def publish(self, ev: dict) -> None:
+        t = ev["type"]
+        if t == "assistant_start":
+            self.draft = {"content": "", "thinking": ""}
+        elif t == "token" and self.draft is not None:
+            self.draft["content"] += ev["text"]
+        elif t == "thinking" and self.draft is not None:
+            self.draft["thinking"] += ev["text"]
+        elif t == "assistant_end":
+            self.draft = None
+        elif t == "approval_request":
+            self.approvals[ev["call"]["id"]] = {"call": ev["call"], "preview": ev["preview"]}
+        elif t == "tool_result":
+            self.approvals.pop(ev["message"]["tool_call_id"], None)
+        elif t == "tools_sent":
+            self.sent = ev
+        async with self._changed:
+            self.events.append(ev)
+            self._changed.notify_all()
+
+    async def subscribe(self, cursor: int = 0) -> AsyncIterator[dict]:
+        while True:
+            async with self._changed:
+                await self._changed.wait_for(lambda: len(self.events) > cursor or self.finished)
+                batch = self.events[cursor:]
+                cursor = len(self.events)
+                finished = self.finished
+            for ev in batch:
+                yield ev
+            if finished:
+                return
+
+    def snapshot(self) -> dict:
+        return {"run_id": self.id, "cursor": len(self.events), "draft": self.draft, "sent": self.sent,
+                "approvals": list(self.approvals.values())}
+
+    def start(self, req: "RunRequest") -> None:
+        async def main():
+            try:
+                async for ev in run_agent(self.conv_id, req, self):
+                    await self.publish(ev)
+            except Exception as e:  # bug no loop: mostra em vez de sumir
+                await self.publish(_event(self.conv_id, "error", f"Erro interno: {e.__class__.__name__}: {e}"))
+                await self.publish({"type": "done"})
+            finally:
+                async with self._changed:
+                    self.finished = True
+                    self._changed.notify_all()
+            await asyncio.sleep(KEEP_FINISHED_RUN)
+            RUNS.pop(self.id, None)
+
+        self._task = asyncio.create_task(main())
 
     def resolve(self, call_id: str, approved: bool) -> bool:
         fut = self.pending.get(call_id)
@@ -50,6 +122,10 @@ class Run:
 
 
 RUNS: dict[str, Run] = {}
+
+
+def active_run(conv_id: int) -> Run | None:
+    return next((r for r in RUNS.values() if r.conv_id == conv_id and not r.finished), None)
 
 
 # ------------------------------------------------------------------ prompts
@@ -95,6 +171,10 @@ def nudge_text(via: str) -> str:
 def build_history(msgs: list[db.Message], via: str) -> list[dict]:
     native = via == "native"
     out: list[dict] = [{"role": "system", "content": system_prompt(via)}]
+    summary = compact.last_summary(msgs)
+    if summary:
+        out.append({"role": "user", "content": f"[Resumo automático da conversa anterior]\n{summary[0]}"})
+        msgs = [m for m in msgs if m.id > summary[1]]
     for m in msgs:
         if m.role == "user":
             out.append({"role": "user", "content": m.content})
@@ -145,11 +225,31 @@ def _load(conv_id: int) -> list[db.Message]:
         return list(s.get(db.Conversation, conv_id).messages)
 
 
+def _estimate(messages: list[dict], tools: list[dict] | None) -> int:
+    return (sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)
+            + (len(json.dumps(tools)) if tools else 0)) // 4
+
+
+async def _compact(conv_id: int, msgs: list, req: RunRequest, ctx_max: int) -> AsyncIterator[dict]:
+    until = compact.split_point(msgs)
+    if until is None:
+        return  # só restam os últimos turnos; nada a resumir
+    yield {"type": "status", "text": "Compactando contexto..."}
+    try:
+        text = compact.transcript(msgs, until, max_chars=int(ctx_max * 4 * 0.5))
+        summary = await compact.summarize(req.provider, req.model, text, config.NUM_CTX)
+    except llm.LLMError as e:
+        yield _event(conv_id, "warning", f"Falha ao compactar o contexto: {e}")
+        return
+    if summary:
+        m = _save(conv_id, role="event", content=summary, meta={"kind": "summary", "covers_until": until})
+        yield {"type": "event", "message": m.to_dict()}
+
+
 def _stats(messages, tools, content, reasoning, done, t0, t_first, ctx_max, model) -> dict:
     """Tokens reais do provider quando disponíveis; senão estimativa chars/4 (estimated=True)."""
     end = time.monotonic()
-    est_prompt = sum(len(json.dumps(m, ensure_ascii=False)) for m in messages) // 4 + (
-        len(json.dumps(tools)) // 4 if tools else 0)
+    est_prompt = _estimate(messages, tools)
     est_out = (len(content) + len(reasoning)) // 4
     out = done.get("completion_tokens") or est_out
     gen = end - (t_first or end)
@@ -186,7 +286,7 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
     via = "none" if not agent else ("prompt" if tool_mode == "text" else "native")
     ctx_max = await llm.context_limit(req.provider, req.model, config.NUM_CTX)
     loop = LoopDetector()
-    nudges = iterations = 0
+    nudges = iterations = retries = 0
 
     def tools_sent() -> dict:
         # Fonte da verdade do painel lateral: exatamente o que vai nesta requisição.
@@ -202,8 +302,13 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
             break
         iterations += 1
 
-        messages = build_history(_load(conv_id), via)
+        msgs = _load(conv_id)
+        messages = build_history(msgs, via)
         tools = [t.openai_schema() for t in REGISTRY.values()] if via == "native" else None
+        if ctx_max and _estimate(messages, tools) > config.COMPACT_AT * ctx_max:
+            async for ev in _compact(conv_id, msgs, req, ctx_max):
+                yield ev
+            messages = build_history(_load(conv_id), via)
 
         content = reasoning = ""
         done: dict = {"tool_calls": [], "prompt_tokens": None, "completion_tokens": None}
@@ -233,9 +338,15 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
                 yield tools_sent()
                 iterations -= 1
                 continue
+            if e.status is None and not content and not reasoning and retries < MAX_RETRIES:
+                retries += 1
+                yield _event(conv_id, "info", f"{e} Tentando de novo...")
+                await asyncio.sleep(RETRY_DELAY)
+                iterations -= 1
+                continue
             yield _event(conv_id, "error", str(e))
             break
-        except (asyncio.CancelledError, GeneratorExit):  # cliente desconectou
+        except asyncio.CancelledError:  # servidor desligando
             _save_partial(conv_id, content, reasoning)
             raise
 
@@ -312,7 +423,7 @@ async def _execute(conv_id: int, call: dict, req: RunRequest, run: Run) -> Async
         yield result("erro", str(e))
         return
 
-    if tool.mutating and req.write_policy != "auto":
+    if tool.mutating and (req.write_policy != "auto" or tool.always_ask):
         fut = asyncio.get_running_loop().create_future()
         run.pending[call["id"]] = fut
         yield {"type": "approval_request", "call": call, "preview": meta["preview"]}
@@ -329,7 +440,7 @@ async def _execute(conv_id: int, call: dict, req: RunRequest, run: Run) -> Async
         meta["approved"] = True
 
     try:
-        out = await asyncio.to_thread(run_tool, name, args)
+        out = await execute(name, args)
         yield result("ok", out)
     except ToolError as e:
         yield result("erro", str(e))
