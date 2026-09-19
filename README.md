@@ -81,13 +81,34 @@ Um Chromium (Playwright, `chromium-headless-shell`) roda dentro do container do 
 
 ## Pasta de trabalho por conversa
 
-Como no Claude Desktop, cada conversa tem a sua pasta. Ela aparece no chip ao lado do título, no topo; clique para trocar. O seletor mostra os discos montados, as pastas usadas recentemente e a pasta padrão (`WORKSPACE_PATH`), e aceita um caminho digitado (`C:/Users/voce/Projetos/app`). Na tela inicial, a pasta escolhida vale para a próxima conversa criada. Trocar a pasta de uma conversa existente vale a partir da próxima mensagem.
+Como no Claude Desktop, cada conversa tem a sua pasta. Ela aparece no chip ao lado do título, no topo. Clique nele para abrir o **seletor de pasta do sistema**: o do Explorer no Windows, o do GNOME/KDE no Linux e o do Finder no macOS. Na tela inicial, a pasta escolhida vale para a próxima conversa criada. Trocar a pasta de uma conversa existente vale a partir da próxima mensagem.
+
+### forja-picker (seletor de pasta do sistema)
+
+O Forja roda no Docker e a interface roda no navegador, e nenhum dos dois consegue abrir o Explorer e receber o caminho da pasta. Por isso existe um ajudante pequeno, `tools/forja_picker.py` (só Python padrão), que roda **no seu sistema**. Ele escuta só em `127.0.0.1:3001` e só atende a interface do Forja: pedidos vindos de outros sites são recusados.
+
+- **Windows**: dê dois cliques em `toolsorja-picker.cmd` (roda sem janela). Para abrir junto com o Windows: `Win+R` → `shell:startup` → cole um atalho para esse `.cmd`.
+- **Linux**: `python3 tools/forja_picker.py &`. Usa o `zenity` (GNOME) ou o `kdialog` (KDE). Sem eles, usa o Tk (`sudo apt install python3-tk`). Para iniciar no login, crie um serviço de usuário:
+
+  ```ini
+  # ~/.config/systemd/user/forja-picker.service
+  [Service]
+  ExecStart=/usr/bin/python3 /caminho/do/forja/tools/forja_picker.py
+  [Install]
+  WantedBy=default.target
+  ```
+  e rode `systemctl --user enable --now forja-picker`.
+- **macOS**: `python3 tools/forja_picker.py &` (usa o `choose folder` do sistema).
+
+Se o ajudante não estiver rodando, o chip abre o **seletor interno** do Forja: discos montados, pastas recentes e caminho digitado. Ele avisa como ligar o ajudante e tem o botão *Abrir seletor do sistema*. Porta e origens: `FORJA_PICKER_PORT` e `FORJA_ORIGINS` no ajudante, e `FORJA_PICKER_URL` no `.env` do Forja.
 
 **Como funciona**: o disco `C:` é montado no container em `/host/c` (`HOST_DRIVE_C`/`HOST_MOUNTS`). As ferramentas de arquivo (`read_file`, `write_file`, `edit_file`, `list_dir`), os anexos, o `FORJA.md` e o cwd do `run_command` usam a pasta da conversa, e caminhos fora dela são bloqueados.
 
 **Segurança (igual ao Claude Desktop)**: o `run_command` roda bash no container e **enxerga o disco montado inteiro**. A proteção é a aprovação: ele sempre pede confirmação, exceto nos comandos que você liberou em *Permissões*. Evite regras largas (`*`) e leia o comando antes de aprovar.
 
-**Outro disco** (ex.: `D:`): em `docker-compose.yml`, acrescente o volume `- D:/:/host/d` no backend e defina `HOST_MOUNTS=C=/host/c,D=/host/d` no `.env`. Para **não** expor o disco inteiro, troque `HOST_DRIVE_C=C:/` por uma pasta (ex.: `C:/Users/pedro`). Aí o seletor só enxerga o que está dentro dela, mas os caminhos continuam começando em `C:/`.
+**Outro disco** (ex.: `D:`): em `docker-compose.yml`, acrescente o volume `- D:/:/host/d` no backend e defina `HOST_MOUNTS=C=/host/c,D=/host/d` no `.env`.
+
+**Linux**: monte a sua home (ou outra raiz) e diga o prefixo: volume `- /home/voce:/host/home` e `HOST_MOUNTS=/home/voce=/host/home`. O formato é `prefixo-no-seu-sistema=pasta-no-container`, e vale mais de um separado por vírgula. O mais específico ganha. O `HOST_DRIVE_C` só faz sentido no Windows: no Linux, apague essa linha do compose. Para **não** expor o disco inteiro, troque `HOST_DRIVE_C=C:/` por uma pasta (ex.: `C:/Users/pedro`). Aí o seletor só enxerga o que está dentro dela, mas os caminhos continuam começando em `C:/`.
 
 ## Checkpoints (desfazer alterações)
 
@@ -175,7 +196,8 @@ Antes de cada chamada, o Forja estima o tamanho do prompt. Se passar de `COMPACT
 |---|---|---|
 | `WORKSPACE_PATH` | `C:/Users/pedro/Dev/forja-workspace` | Pasta de trabalho **padrão** (conversas sem pasta escolhida) |
 | `HOST_DRIVE_C` | `C:/` | O que do Windows aparece como disco `C:` no seletor de pasta (pode ser uma subpasta) |
-| `HOST_MOUNTS` | `C=/host/c` | Discos montados no container; para `D:`, some `D=/host/d` e o volume no compose |
+| `HOST_MOUNTS` | `C=/host/c` | O que está montado no container, como `prefixo=pasta` (ex.: `C=/host/c`, `/home/voce=/host/home`) |
+| `FORJA_PICKER_URL` | `http://127.0.0.1:3001` | Endereço do forja-picker, visto pelo navegador |
 | `FORJA_PORT` | `3000` | Porta da interface no host |
 | `OLLAMA_URL` | `http://host.docker.internal:11434/v1` | Endpoint do Ollama |
 | `LMSTUDIO_URL` | `http://host.docker.internal:1234/v1` | Endpoint do LM Studio |

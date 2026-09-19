@@ -17,6 +17,8 @@ export default function FolderPicker(props: {
   current: string | null;
   onPick: (path: string | null) => void;
   onClose: () => void;
+  nativeError?: string; // por que o seletor nativo não abriu (ajudante desligado etc.)
+  onNative?: () => void; // tentar o seletor nativo de novo
 }) {
   const [roots, setRoots] = useState<Roots | null>(null);
   const [list, setList] = useState<Listing | null>(null);
@@ -53,11 +55,25 @@ export default function FolderPicker(props: {
         <header className="flex items-center gap-3 border-b border-line px-5 py-3">
           <Folder className="size-4 text-muted" />
           <h2 className="flex-1 text-sm font-medium">Pasta de trabalho</h2>
+          {props.onNative && (
+            <button onClick={props.onNative} className="rounded-full border border-line px-3 py-1 text-xs text-fg hover:bg-raised">
+              Abrir seletor do sistema
+            </button>
+          )}
           <button onClick={props.onClose} className="rounded-md p-1 text-faint hover:bg-raised hover:text-fg" title="Fechar">
             <X />
           </button>
         </header>
 
+        {props.nativeError && (
+          <div className="border-b border-line bg-surface px-5 py-2.5 text-xs text-muted">
+            <span className="text-amber-200">Seletor do sistema indisponível:</span> {props.nativeError} Para usar o
+            Explorer (ou o seletor do Linux), rode no seu computador{" "}
+            <span className="font-mono text-fg">toolsorja-picker.cmd</span> (Windows) ou{" "}
+            <span className="font-mono text-fg">python3 tools/forja_picker.py &amp;</span> (Linux/macOS). Enquanto isso, escolha
+            por aqui.
+          </div>
+        )}
         <div className="flex min-h-0 flex-1">
           <nav className="w-52 shrink-0 space-y-4 overflow-y-auto border-r border-line bg-side p-3 text-sm">
             <section>

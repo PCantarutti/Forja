@@ -31,7 +31,7 @@ def test_normalize(raw, expected):
     assert workspace.normalize(raw) == expected
 
 
-@pytest.mark.parametrize("bad", ["Users/pedro", "/etc", "C:/Users/../Windows", ""])
+@pytest.mark.parametrize("bad", ["Users/pedro", "relativo/x", "C:/Users/../Windows", "/home/../etc", ""])
 def test_normalize_rejects(bad):
     with pytest.raises(workspace.WorkspaceError):
         workspace.normalize(bad)
@@ -49,8 +49,42 @@ def test_default_folder_shows_windows_path(monkeypatch):
 
 
 def test_unmounted_drive_is_explained():
-    with pytest.raises(workspace.WorkspaceError, match="D: não está montado"):
+    with pytest.raises(workspace.WorkspaceError, match="não está dentro de uma pasta montada"):
         workspace.to_container("D:/dados")
+
+
+# ------------------------------------------------ Linux/macOS
+
+@pytest.mark.parametrize("raw,expected", [("/home/pedro/app/", "/home/pedro/app"), ("/", "/"), ("//home//x", "/home/x")])
+def test_normalize_posix(raw, expected):
+    assert workspace.normalize(raw) == expected
+
+
+def test_linux_mount_roundtrip(tmp_path, monkeypatch):
+    home = tmp_path / "hosthome"
+    (home / "app" / "src").mkdir(parents=True)
+    monkeypatch.setattr(config, "HOST_MOUNTS", f"/home/pedro={home}")
+    assert workspace.to_container("/home/pedro/app") == home / "app"
+    assert workspace.to_host(home / "app" / "src") == "/home/pedro/app/src"
+    assert workspace.roots() == [{"name": "/home/pedro", "path": "/home/pedro"}]
+    listing = workspace.list_dirs("/home/pedro/app")
+    assert listing["parent"] == "/home/pedro" and listing["dirs"][0]["path"] == "/home/pedro/app/src"
+    assert workspace.list_dirs("/home/pedro")["parent"] is None  # não sobe para fora do que está montado
+    with pytest.raises(workspace.WorkspaceError):
+        workspace.to_container("/home/outra")
+    # caminho absoluto do Linux dentro da pasta da conversa é aceito pelas ferramentas
+    workspace.CURRENT.set(workspace.resolve("/home/pedro/app"))
+    assert resolve_path(workspace.root(), "/home/pedro/app/src") == (home / "app" / "src").resolve()
+    with pytest.raises(ToolError, match="fora da pasta"):
+        resolve_path(workspace.root(), "/home/pedro/segredo")
+
+
+def test_longest_mount_wins(tmp_path, monkeypatch):
+    a, b = tmp_path / "a", tmp_path / "b"
+    (a).mkdir(); (b / "x").mkdir(parents=True)
+    monkeypatch.setattr(config, "HOST_MOUNTS", f"C={a},C:/Users/pedro={b}")
+    assert workspace.to_container("C:/Users/pedro/x") == b / "x"
+    assert workspace.to_container("c:/users/PEDRO/x") == b / "x"  # Windows ignora maiúsculas
 
 
 def test_list_dirs_and_parent(clean):

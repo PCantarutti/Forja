@@ -145,6 +145,11 @@ def resolve_path(root: Path, path: str | None) -> Path:
             raw = str(workspace.to_container(raw))
         except workspace.WorkspaceError as e:
             raise ToolError(str(e)) from None
+    elif raw.startswith("/") and not Path(raw).is_relative_to(root_r):
+        try:  # caminho absoluto do Linux/macOS do usuário (ex.: /home/voce/app/x)
+            raw = str(workspace.to_container(raw))
+        except workspace.WorkspaceError:
+            pass  # segue como está e cai na checagem de confinamento abaixo
     target = (root_r / raw).resolve()  # resolve() segue symlinks
     if not target.is_relative_to(root_r):
         raise ToolError(

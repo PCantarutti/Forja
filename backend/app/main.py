@@ -34,6 +34,7 @@ def get_config():
     return {"providers": [{"id": p["id"], "name": p["name"]} for p in config.PROVIDERS.values()],
             "num_ctx": config.NUM_CTX, "max_iterations": config.MAX_ITERATIONS,
             "default_workspace": workspace.label(None), "drives": [d["name"] for d in workspace.roots()],
+            "picker_url": config.PICKER_URL,
             "subagents": {k: v for k, v in subagents.configured().items()}}
 
 

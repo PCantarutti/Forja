@@ -22,7 +22,12 @@ import {
 import { ArrowUp, ChevronDown, Edit, Laptop, Paperclip, Refresh, Square, Undo } from "./components/icons";
 import type { Approval, Attachment, BrowserState, Conversation, Message, Settings, Stats, ToolsSent } from "./types";
 
-type Config = { providers: { id: string; name: string }[]; num_ctx: number; default_workspace?: string };
+type Config = {
+  providers: { id: string; name: string }[];
+  num_ctx: number;
+  default_workspace?: string;
+  picker_url?: string;
+};
 type SubState = { status: string; steps: { call: any; result?: Message }[] };
 type Live = {
   messages: Message[];
@@ -88,6 +93,8 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [catalogKey, setCatalogKey] = useState(0); // força o seletor de modelo a recarregar
   const [showFolder, setShowFolder] = useState(false);
+  const [nativeError, setNativeError] = useState("");
+  const [picking, setPicking] = useState(false); // diálogo nativo aberto no sistema
   // Pasta escolhida antes de a conversa existir (tela inicial); vira a pasta da conversa no 1º envio.
   const [pendingWs, setPendingWs] = useState<string | null>(() => localStorage.getItem("forja.workspace"));
   const [subSteps, setSubSteps] = useState<Record<string, SubState>>({});
@@ -382,6 +389,34 @@ export default function App() {
     return c.id;
   }
 
+  /** Seletor de pasta do sistema (Explorer no Windows) via forja-picker; sem ele, o seletor interno. */
+  async function chooseFolder() {
+    const base = config.picker_url ?? "http://127.0.0.1:3001";
+    const start = (currentId !== null ? conv?.workspace : pendingWs) ?? config.default_workspace ?? "";
+    setNativeError("");
+    try {
+      const ping = await fetch(`${base}/ping`, { signal: AbortSignal.timeout(1500) });
+      if (!ping.ok) throw new Error(`o ajudante respondeu HTTP ${ping.status}.`);
+    } catch (e: any) {
+      setNativeError(e?.name === "TimeoutError" || e instanceof TypeError ? "o forja-picker não está rodando." : String(e.message));
+      setShowFolder(true);
+      return;
+    }
+    setShowFolder(false);
+    setPicking(true);
+    try {
+      const r = await fetch(`${base}/pick?start=${encodeURIComponent(start)}`);
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error ?? `HTTP ${r.status}`);
+      if (body.path) await pickFolder(body.path);
+    } catch (e: any) {
+      setNativeError(String(e.message));
+      setShowFolder(true);
+    } finally {
+      setPicking(false);
+    }
+  }
+
   async function pickFolder(path: string | null) {
     setShowFolder(false);
     setError("");
@@ -596,17 +631,26 @@ export default function App() {
             {conv?.title ?? "Nova conversa"}
           </span>
           <button
-            onClick={() => setShowFolder(true)}
-            disabled={running}
+            onClick={chooseFolder}
+            disabled={running || picking}
             title={`Pasta de trabalho: ${wsLabel}\nClique para trocar`}
             className="inline-flex max-w-56 shrink-0 items-center gap-1 rounded-md bg-raised px-2 py-0.5 text-xs text-muted hover:text-fg disabled:opacity-50"
           >
-            <span className="truncate">{folderName(conv ? conv.workspace ?? config.default_workspace : pendingWs ?? config.default_workspace)}</span>
+            <span className="truncate">
+              {picking ? "escolhendo…" : folderName(conv ? conv.workspace ?? config.default_workspace : pendingWs ?? config.default_workspace)}
+            </span>
             <ChevronDown className="size-3 shrink-0" />
           </button>
+          {picking && <span className="text-xs text-muted">Escolha a pasta na janela do sistema (pode estar atrás do navegador).</span>}
         </header>
         {showFolder && (
-          <FolderPicker current={conv ? conv.workspace ?? null : pendingWs} onPick={pickFolder} onClose={() => setShowFolder(false)} />
+          <FolderPicker
+            current={conv ? conv.workspace ?? null : pendingWs}
+            onPick={pickFolder}
+            onClose={() => setShowFolder(false)}
+            nativeError={nativeError}
+            onNative={chooseFolder}
+          />
         )}
 
         <div

@@ -10,6 +10,7 @@ services:
       WORKSPACE_HOST: ${WORKSPACE_PATH}
       # Discos do Windows visíveis no seletor de pasta. Para outro disco, some aqui e em volumes (ex.: D=/host/d).
       HOST_MOUNTS: ${HOST_MOUNTS:-C=/host/c}
+      FORJA_PICKER_URL: ${FORJA_PICKER_URL:-http://127.0.0.1:3001}
       DB_PATH: /data/forja.db
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434/v1}
       LMSTUDIO_URL: ${LMSTUDIO_URL:-http://host.docker.internal:1234/v1}

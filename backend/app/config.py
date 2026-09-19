@@ -9,6 +9,7 @@ from pathlib import Path
 
 WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", "/workspace"))  # pasta padrão (conversa sem pasta escolhida)
 WORKSPACE_HOST = os.getenv("WORKSPACE_HOST", "")  # o mesmo caminho visto no Windows, só para exibir
+PICKER_URL = os.getenv("FORJA_PICKER_URL", "http://127.0.0.1:3001")  # forja-picker (diálogo nativo), visto pelo navegador
 HOST_MOUNTS = os.getenv("HOST_MOUNTS", "")          # discos do Windows no container: "C=/host/c,D=/host/d"
 DB_PATH = os.getenv("DB_PATH", "/data/forja.db")
 MCP_CONFIG = Path(os.getenv("MCP_CONFIG", "/config/mcp.json"))
