@@ -1,0 +1,29 @@
+name: forja
+
+services:
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      WORKSPACE_ROOT: /workspace
+      DB_PATH: /data/forja.db
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434/v1}
+      LMSTUDIO_URL: ${LMSTUDIO_URL:-http://host.docker.internal:1234/v1}
+      NUM_CTX: ${NUM_CTX:-32768}
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-25}
+      MAX_FILE_BYTES: ${MAX_FILE_BYTES:-1000000}
+    volumes:
+      - forja-data:/data
+      - ${WORKSPACE_PATH:?defina WORKSPACE_PATH no .env}:/workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on: [backend]
+    ports:
+      - "${FORJA_PORT:-3000}:80"
+
+volumes:
+  forja-data:

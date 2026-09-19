@@ -34,6 +34,9 @@ def base_url(provider: str) -> str:
 
 
 def _conn_error(provider: str, e: Exception) -> LLMError:
+    if not isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return LLMError(f"Conexão com {provider} interrompida ({e.__class__.__name__}). "
+                        "O modelo pode ter sido descarregado/recarregado; tente de novo.")
     hint = {
         "ollama": "Ollama está rodando? Ele precisa escutar em 0.0.0.0 (OLLAMA_HOST=0.0.0.0) para o Docker alcançar.",
         "lmstudio": "LM Studio está com o servidor ligado e 'Serve on Local Network' ativo?",

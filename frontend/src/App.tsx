@@ -41,7 +41,9 @@ export default function App() {
 
   const update = (p: Partial<Settings>) => setSettings((s) => ({ ...s, ...p }));
 
-  useEffect(() => localStorage.setItem("forja.settings", JSON.stringify(settings)), [settings]);
+  useEffect(() => {
+    localStorage.setItem("forja.settings", JSON.stringify(settings));
+  }, [settings]);
 
   useEffect(() => {
     api.get<Config>("/config").then(setConfig).catch(() => {});
@@ -71,7 +73,9 @@ export default function App() {
       .catch(() => {});
   }, [settings.model]);
 
-  useEffect(() => bottom.current?.scrollIntoView({ block: "end" }), [messages, draft, approvals]);
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ block: "end" });
+  }, [messages, draft, approvals]);
 
   function refreshConversations() {
     api.get<Conversation[]>("/conversations").then(setConversations).catch((e) => setError(e.message));
