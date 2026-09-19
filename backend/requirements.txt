@@ -1,5 +1,6 @@
-fastapi==0.115.*
+fastapi>=0.140,<1
 uvicorn[standard]==0.32.*
 sqlalchemy==2.0.*
 httpx==0.28.*
+mcp>=1.9,<2
 pytest==8.*

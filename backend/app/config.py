@@ -11,3 +11,8 @@ PROVIDERS = {
     "ollama": os.getenv("OLLAMA_URL", "http://host.docker.internal:11434/v1"),
     "lmstudio": os.getenv("LMSTUDIO_URL", "http://host.docker.internal:1234/v1"),
 }
+
+SHELL_TIMEOUT_MAX = int(os.getenv("SHELL_TIMEOUT_MAX", "300"))
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8080")
+MCP_CONFIG = Path(os.getenv("MCP_CONFIG", "/config/mcp.json"))
+COMPACT_AT = float(os.getenv("COMPACT_AT", "0.8"))  # fração da janela que dispara a compactação

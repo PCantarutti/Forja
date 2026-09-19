@@ -6,7 +6,9 @@ só com um `register(Tool(...))`, sem mexer no loop do agente.
 """
 from __future__ import annotations
 
+import asyncio
 import difflib
+import inspect
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,9 +26,11 @@ class Tool:
     name: str
     description: str
     parameters: dict
-    handler: Callable[[Path, dict], str]
+    handler: Callable[[Path, dict], str]  # pode ser async (ex.: MCP)
     mutating: bool = False
     preview: Callable[[Path, dict], dict] | None = None
+    always_ask: bool = False  # pede aprovação mesmo com escrita "automática" (ex.: shell)
+    source: str = "builtin"   # builtin | mcp:<servidor>
 
     def openai_schema(self) -> dict:
         return {"type": "function", "function": {
@@ -71,6 +75,22 @@ def _call(name: str, fn_attr: str, args: dict, root: Path | None):
 
 def run_tool(name: str, args: dict, root: Path | None = None) -> str:
     return _call(name, "handler", args, root)
+
+
+async def execute(name: str, args: dict, root: Path | None = None) -> str:
+    """Executa handler sync (em thread) ou async (direto)."""
+    tool = get_tool(name)
+    if not inspect.iscoroutinefunction(tool.handler):
+        return await asyncio.to_thread(run_tool, name, args, root)
+    try:
+        return await tool.handler(root or config.WORKSPACE_ROOT, coerce_args(tool, args))
+    except (KeyError, TypeError, ValueError) as e:
+        raise ToolError(f"Argumentos inválidos para {name}: faltando ou incorreto {e}") from e
+
+
+def unregister_source(source: str) -> None:
+    for name in [n for n, t in REGISTRY.items() if t.source == source]:
+        del REGISTRY[name]
 
 
 def preview_tool(name: str, args: dict, root: Path | None = None) -> dict | None:

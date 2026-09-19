@@ -1,0 +1,64 @@
+import sys
+
+import pytest
+
+import app.shell  # noqa: F401  (registra run_command)
+from app.tools import REGISTRY, ToolError, preview_tool, run_tool
+from app.web import check_public_url, html_to_text
+
+linux = pytest.mark.skipif(sys.platform == "win32", reason="shell roda no container Linux")
+
+
+# ------------------------------------------------ run_command
+
+def test_shell_registered_and_always_asks():
+    t = REGISTRY["run_command"]
+    assert t.mutating and t.always_ask
+
+
+@linux
+def test_shell_ok_uses_workspace_cwd(tmp_path):
+    (tmp_path / "a.txt").write_text("x")
+    out = run_tool("run_command", {"command": "ls && echo fim"}, tmp_path)
+    assert out.startswith("exit code: 0") and "a.txt" in out and "fim" in out
+
+
+@linux
+def test_shell_nonzero_exit_is_error(tmp_path):
+    with pytest.raises(ToolError, match="exit code: 3"):
+        run_tool("run_command", {"command": "echo ruim; exit 3"}, tmp_path)
+
+
+@linux
+def test_shell_timeout_kills(tmp_path):
+    with pytest.raises(ToolError, match="Timeout"):
+        run_tool("run_command", {"command": "sleep 30", "timeout": 1}, tmp_path)
+
+
+def test_shell_cwd_confined(tmp_path):
+    with pytest.raises(ToolError, match="fora da pasta"):
+        preview_tool("run_command", {"command": "ls", "cwd": "../.."}, tmp_path)
+
+
+def test_shell_preview(tmp_path):
+    (tmp_path / "sub").mkdir()
+    pv = preview_tool("run_command", {"command": "pytest -q", "cwd": "sub"}, tmp_path)
+    assert pv == {"kind": "command", "path": "/workspace/sub", "text": "pytest -q"}
+
+
+# ------------------------------------------------ web
+
+@pytest.mark.parametrize("url", ["file:///etc/passwd", "ftp://x.com", "http://localhost:8000",
+                                 "http://127.0.0.1/", "http://10.0.0.5/", "http://192.168.1.1", "not a url"])
+def test_fetch_blocks_local_and_non_http(url):
+    with pytest.raises(ToolError):
+        check_public_url(url)
+
+
+def test_html_to_text():
+    title, text = html_to_text(
+        "<html><head><title>T</title><script>alert(1)</script></head>"
+        "<body><nav>menu</nav><h1>Oi</h1><p>um   texto</p><style>x{}</style><p>dois</p></body></html>")
+    assert title == "T"
+    assert "alert" not in text and "menu" not in text and "x{}" not in text
+    assert text == "Oi\n\num texto\n\ndois"
