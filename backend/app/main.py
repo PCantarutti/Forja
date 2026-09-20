@@ -815,8 +815,8 @@ async def start_run(conv_id: int, body: RunBody):
         _get_conv(s, conv_id)
     if body.permission not in policy.MODES:
         raise HTTPException(400, f"permission deve ser um de {', '.join(policy.MODES)}")
-    if body.effort not in ("baixo", "medio", "alto", "maximo"):
-        raise HTTPException(400, "effort deve ser baixo, medio, alto ou maximo")
+    if body.effort not in ("baixo", "medio", "alto", "maximo", "extremo"):
+        raise HTTPException(400, "effort deve ser baixo, medio, alto, maximo ou extremo")
     if active_run(conv_id):
         raise HTTPException(409, "Esta conversa já tem uma execução em andamento")
     with db.session() as s:

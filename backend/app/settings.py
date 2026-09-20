@@ -31,7 +31,8 @@ ENV_DEFAULTS: dict[str, Any] = {
     "browser_scale": config.BROWSER_SCALE,
     "browser_stream": config.BROWSER_STREAM,
     "enabled_models": {},
-    "subagents": {"rapido": {"provider": "", "model": ""}, "capaz": {"provider": "", "model": ""}},
+    "subagents": {"rapido": {"provider": "", "model": ""}, "capaz": {"provider": "", "model": ""},
+                  "nuvem": {"provider": "", "model": ""}},
     "subagent_max_iterations": 15,
 }
 
@@ -154,7 +155,7 @@ def validate(patch: dict, current: dict) -> dict:
             if not isinstance(raw, dict):
                 raise SettingsError("'subagents' precisa ser um objeto.")
             out = {}
-            for slot in ("rapido", "capaz"):
+            for slot in ("rapido", "capaz", "nuvem"):
                 spec = raw.get(slot) or {}
                 provider, model = str(spec.get("provider") or ""), str(spec.get("model") or "")
                 if provider and provider not in {p["id"] for p in values["providers"]}:

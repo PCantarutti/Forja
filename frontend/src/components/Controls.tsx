@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Bubble, Check, Clipboard, Code, Gauge, PanelLeft, Shield, Sliders } from "./icons";
 
 export type Permission = "auto" | "manual" | "edits" | "plan" | "bypass";
-export type Effort = "baixo" | "medio" | "alto" | "maximo";
+export type Effort = "baixo" | "medio" | "alto" | "maximo" | "extremo";
 export type Section = "chat" | "agent";
 
 export const PERMISSIONS: { id: Permission; label: string; hint: string }[] = [
@@ -18,6 +18,7 @@ export const EFFORTS: { id: Effort; label: string; hint: string }[] = [
   { id: "medio", label: "Médio", hint: "Equilíbrio entre rapidez e cuidado" },
   { id: "alto", label: "Alto", hint: "Confere o que fez e roda testes quando faz sentido" },
   { id: "maximo", label: "Máximo", hint: "Investiga a fundo, testa e revisa antes de concluir" },
+  { id: "extremo", label: "Extremo", hint: "Delega o difícil a um modelo mais forte, verifica com um comando e revisa o diff" },
 ];
 
 /** Shift+Tab: durante uma resposta o modo Plano fica de fora (entrar nele no meio não faz sentido). */

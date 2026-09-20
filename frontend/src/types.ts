@@ -121,7 +121,7 @@ export type Settings = {
   provider: string;
   model: string;
   permission: "auto" | "manual" | "edits" | "plan" | "bypass";
-  effort: "baixo" | "medio" | "alto" | "maximo";
+  effort: "baixo" | "medio" | "alto" | "maximo" | "extremo";
 };
 
 export type Stats = {

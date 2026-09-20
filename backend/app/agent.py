@@ -26,6 +26,8 @@ EFFORT = {
     "medio": (1.0, ""),
     "alto": (1.6, "Esforço alto: confira o que fez (leia de volta, rode testes quando fizer sentido) antes de concluir."),
     "maximo": (3.0, "Esforço máximo: investigue a fundo, considere alternativas, teste e revise antes de concluir."),
+    "extremo": (4.0, "Esforço extremo: não escreva a lógica difícil você mesmo — delegue, verifique com um "
+                     "comando objetivo e integre. Só conclua com a verificação passando."),
 }
 MODE_LABEL = {"auto": "Automático", "manual": "Manual", "edits": "Aceitar edições",
               "plan": "Plano", "bypass": "Ignorar permissões"}
@@ -271,11 +273,19 @@ def system_prompt(via: str, caps: set[str] | None = None, exclude: set[str] | No
     if "update_tasks" in names:
         rules.append("- Trabalho com 3 ou mais passos: crie a lista com update_tasks no início e atualize a cada "
                      "passo (doing ao começar, done ao terminar). O usuário acompanha essa lista.")
-    if "delegate_task" in names:
+    if "delegate_task" in names and effort == "extremo":
+        rules.append("- ESFORÇO EXTREMO: você NÃO escreve a lógica difícil. Localize os arquivos, entenda o problema "
+                     "e chame delegate_task(level='capaz') com: 'task' completa (o que fazer e por quê), 'files' com "
+                     "os arquivos relevantes e 'done_when' com o comando que prova que ficou pronto (teste, build, "
+                     "lint). O comando roda sozinho depois e o resultado volta no relatório. Você integra o que ele "
+                     "entregou e responde. Edite direto só o trivial (import, renomear, uma ou duas linhas). Se a "
+                     "verificação falhar, delegue de novo colando a saída do erro.")
+    elif "delegate_task" in names:
         rules.append("- delegate_task passa uma subtarefa autocontida para outro modelo e devolve só o relatório. "
                      "Use level='rapido' para tarefas simples e mecânicas (buscar, resumir, listar, editar algo óbvio) "
                      "e level='capaz' para raciocínio difícil (depurar, projetar, código complexo). Descreva a tarefa "
-                     "por completo: o subagente não vê esta conversa.")
+                     "por completo: o subagente não vê esta conversa. Em 'files', os arquivos que ele precisa ler (o "
+                     "conteúdo vai junto); em 'done_when', o comando que prova que ficou pronto.")
     if permission == "plan":
         rules = ["- MODO PLANO: você NÃO pode alterar nada (sem escrever arquivos, sem comandos, sem agir na página).",
                  "- Investigue com as ferramentas de leitura o quanto precisar: leia os arquivos que o plano vai "

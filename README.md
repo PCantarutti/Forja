@@ -4,7 +4,7 @@ Ambiente de desenvolvimento pessoal com agente de IA **local**. Uma interface we
 
 - **Chat** e **Agente** em seções separadas (seletor no canto superior esquerdo, barra de conversas recolhível)
 - **Modos de permissão** como no Claude: Automático, Manual, Aceitar edições, Plano e Ignorar permissões
-- **Esforço** (Baixo a Máximo): controla o raciocínio do modelo e quantos passos o agente pode dar
+- **Esforço** (Baixo a Extremo): controla o raciocínio do modelo e quantos passos o agente pode dar. No **Extremo** ele vira multi-modelo: delega a lógica difícil a um modelo mais forte, roda o comando de verificação e revisa o diff
 - **Navegador integrado**: o agente abre rotas, clica, lê o DOM e tira screenshot; você assiste ao vivo na aba *Navegador* e pode interagir também
 - Tool calling nativo, com fallback para chamadas escritas em texto (`<tool_call>`, blocos ```json e XML)
 - Card de aprovação com diff antes de qualquer escrita
@@ -144,11 +144,13 @@ O agente recebe **só as ferramentas de leitura** mais uma, `exit_plan_mode`, e 
 
 ## Esforço
 
-Baixo, Médio, Alto ou Máximo, ao lado do modo. Mexe em três coisas:
+Baixo, Médio, Alto, Máximo ou Extremo, ao lado do modo. Mexe em três coisas:
 
 - **Raciocínio do modelo**: `think` no Ollama (só em modelo que declara suporte), `reasoning_effort` nos modelos de raciocínio via API OpenAI (gpt-oss, gpt-5, o-series, deepseek-r) e o interruptor `/no_think` nos Qwen quando o esforço é baixo.
-- **Passos**: multiplica o limite de iterações (Baixo 0,4× · Médio 1× · Alto 1,6× · Máximo 3× de `MAX_ITERATIONS`).
+- **Passos**: multiplica o limite de iterações (Baixo 0,4× · Médio 1× · Alto 1,6× · Máximo 3× · Extremo 4× de `MAX_ITERATIONS`).
 - **Instrução**: uma linha no system prompt pedindo mais objetividade ou mais verificação.
+
+**Extremo (multi-modelo)** vai além da instrução: com subagentes configurados, o principal é orientado a **não escrever a lógica difícil**. Ele localiza os arquivos, delega com `files` e `done_when`, integra o que voltou e responde. Uma delegação sem contexto suficiente é recusada com um exemplo de chamada correta — é erro de ferramenta, o modelo refaz. Faz sentido quando o modelo principal é pequeno (e barato) e o *Capaz*/*Nuvem* é bem maior; com dois modelos do mesmo tamanho, você só espera duas vezes.
 
 ## Conversa: anexos, editar e regenerar
 
@@ -197,12 +199,17 @@ Mudanças feitas por **`run_command`**, servidores MCP ou pelo navegador **não*
 
 ## Subagentes
 
-Em **Configurações › Subagentes**, escolha provedor e modelo para dois níveis:
+Em **Configurações › Subagentes**, escolha provedor e modelo para três níveis:
 
 - **Rápido**: modelo menor, para tarefas simples e mecânicas (buscar, listar, resumir, edições óbvias).
 - **Capaz**: modelo maior e mais lento, para raciocínio difícil (depurar, projetar, código complexo).
+- **Nuvem**: rede de segurança. O modelo **nunca** escolhe este nível: ele entra quando o escolhido não roda agora nesta máquina ou falha (ex.: Ollama Cloud, em Configurações › Provedores).
 
-Com pelo menos um nível configurado, o agente principal ganha a ferramenta `delegate_task(task, level)` e decide sozinho quando delegar e para qual nível. Se o nível pedido não estiver configurado, usa o outro e avisa. O subagente usa as mesmas ferramentas, aprovações, permissões e pasta de trabalho, mas não pode delegar de novo. Os passos dele aparecem **dentro do bloco da delegação**, inclusive os cards de aprovação, com modelo, tokens e tempo. Só o relatório final volta para a conversa, o que economiza o contexto do agente principal. O limite de passos por subagente fica na mesma tela (padrão 15).
+Com pelo menos um nível configurado, o agente principal ganha a ferramenta `delegate_task(task, level, files, done_when)` e decide sozinho quando delegar e para qual nível. Em `files` vão os arquivos relevantes — o conteúdo segue junto com a tarefa, então o subagente começa sabendo em vez de gastar iterações procurando.
+
+**`done_when`** é o comando que prova que ficou pronto (`pytest -q ...`, `npm test`, um lint). Ele roda **depois** que o subagente para, pelo caminho normal do `run_command`: card de aprovação, políticas e globs de auto-aprovação valem igual (`pytest*` em Configurações › Permissões evita o card a cada delegação). Quem verifica é o turno principal, não o subagente — o relatório dele é palavra dele, o exit code é medição. No esforço **Extremo**, o diff dos arquivos que ele tocou ainda vai para uma revisão barata no nível *Rápido*: o parecer entra no relatório como conselho, nunca como veredito.
+
+**Quando um nível não roda**: um slot que aponta para o provedor local só vale se o modelo dele for justamente o que está carregado — o Forja sobe um `llama-server` por vez e o llama.cpp ignora o campo `model` do pedido, então pedir outro alias rodaria o modelo errado calado. Nesse caso a delegação cai para a *Nuvem*, e sem ela devolve um erro dizendo o porquê, para o principal fazer sozinho. Falha de conexão no meio também cai para o próximo nível — mas só se o subagente ainda não tiver mexido em arquivo nenhum. O subagente usa as mesmas ferramentas, aprovações, permissões e pasta de trabalho, mas não pode delegar de novo. Os passos dele aparecem **dentro do bloco da delegação**, inclusive os cards de aprovação, com modelo, tokens e tempo. Só o relatório final volta para a conversa, o que economiza o contexto do agente principal. O limite de passos por subagente fica na mesma tela (padrão 15).
 
 ## Memória do projeto (`FORJA.md`)
 

@@ -28,7 +28,7 @@ export type AppSettings = {
   project_memory: boolean;
   project_memory_file: string;
   enabled_models: Record<string, string[] | undefined>;
-  subagents: Record<"rapido" | "capaz", { provider: string; model: string }>;
+  subagents: Record<"rapido" | "capaz" | "nuvem", { provider: string; model: string }>;
   subagent_max_iterations: number;
   browser_idle_minutes: number;
   browser_scale: number;
@@ -410,6 +410,7 @@ function ProviderModels({ id, chosen, onChange }: {
 const SLOTS = [
   { key: "rapido", title: "Rápido", hint: "Modelo menor e rápido para tarefas simples: buscar, listar, resumir, edições óbvias." },
   { key: "capaz", title: "Capaz", hint: "Modelo maior e mais lento para raciocínio difícil: depurar, projetar, código complexo." },
+  { key: "nuvem", title: "Nuvem", hint: "Rede de segurança: entra quando o slot escolhido não roda nesta máquina ou falha (ex.: Ollama Cloud). O modelo nunca escolhe este slot sozinho." },
 ] as const;
 
 function SlotModels({ provider, value, onChange }: { provider: string; value: string; onChange: (m: string) => void }) {
@@ -443,7 +444,7 @@ function SlotModels({ provider, value, onChange }: { provider: string; value: st
 }
 
 function Subagents({ s, set }: { s: AppSettings; set: <K extends keyof AppSettings>(k: K, v: AppSettings[K]) => void }) {
-  const change = (slot: "rapido" | "capaz", patch: Partial<{ provider: string; model: string }>) =>
+  const change = (slot: "rapido" | "capaz" | "nuvem", patch: Partial<{ provider: string; model: string }>) =>
     set("subagents", { ...s.subagents, [slot]: { ...s.subagents[slot], ...patch } });
   return (
     <div className="max-w-2xl space-y-5">
