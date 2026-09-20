@@ -1,14 +1,30 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import type { Approval, Attachment, Message, Preview, Task, ToolCall } from "../types";
 import { Brain, Check, Chevron, Clipboard, Split, Clock, Copy, Cube, Gauge, Shield, Tokens, X } from "./icons";
 
+/** Bloco de código com botão de copiar no canto (aparece ao passar o mouse). */
+function CodeBlock(props: React.ComponentProps<"pre">) {
+  const ref = useRef<HTMLPreElement>(null);
+  // ponytail: o texto vem do DOM já renderizado, sem remontar o AST do markdown
+  return (
+    <div className="group relative">
+      <pre ref={ref} {...props} />
+      <div className="absolute top-1.5 right-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+        <CopyButton text={() => ref.current?.textContent ?? ""} bg />
+      </div>
+    </div>
+  );
+}
+
+const MD_COMPONENTS = { pre: CodeBlock };
+
 export function Markdown({ text }: { text: string }) {
   return (
     <div className="md text-[15px]">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={MD_COMPONENTS}>
         {text}
       </ReactMarkdown>
     </div>
@@ -118,17 +134,19 @@ export function Attachments({ list, onRemove }: { list: Attachment[]; onRemove?:
   );
 }
 
-export function CopyButton({ text }: { text: string }) {
+export function CopyButton({ text, bg }: { text: string | (() => string); bg?: boolean }) {
   const [done, setDone] = useState(false);
   return (
     <button
-      title="Copiar"
+      title={done ? "Copiado" : "Copiar"}
       onClick={() => {
-        navigator.clipboard?.writeText(text);
+        navigator.clipboard?.writeText(typeof text === "function" ? text() : text);
         setDone(true);
         setTimeout(() => setDone(false), 1200);
       }}
-      className="rounded-md p-1.5 text-faint hover:bg-raised hover:text-fg"
+      className={`rounded-md p-1.5 text-faint hover:bg-raised hover:text-fg ${
+        bg ? "border border-line bg-surface/90 backdrop-blur" : ""
+      }`}
     >
       {done ? <Check /> : <Copy />}
     </button>
