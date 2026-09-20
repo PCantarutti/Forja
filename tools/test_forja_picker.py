@@ -31,9 +31,9 @@ def get(url, origin):
 
 def test_forja_origin_gets_path_and_cors(server):
     base, _ = server
-    status, body, headers = get(f"{base}/pick", "http://localhost:3000")
+    status, body, headers = get(f"{base}/pick", "http://localhost:7001")
     assert status == 200 and body["path"] == "C:/Users/pedro/app" and not body["cancelled"]
-    assert headers["Access-Control-Allow-Origin"] == "http://localhost:3000"
+    assert headers["Access-Control-Allow-Origin"] == "http://localhost:7001"
 
 
 @pytest.mark.parametrize("origin", ["https://site-malicioso.com", "http://localhost:9999", None])
@@ -46,10 +46,10 @@ def test_other_origins_are_refused(server, origin):
 def test_cancel(server):
     base, chosen = server
     chosen["value"] = None
-    status, body, _ = get(f"{base}/pick", "http://127.0.0.1:3000")
+    status, body, _ = get(f"{base}/pick", "http://127.0.0.1:7001")
     assert status == 200 and body["cancelled"] and body["path"] is None
 
 
 def test_ping(server):
     base, _ = server
-    assert get(f"{base}/ping", "http://localhost:3000")[0] == 200
+    assert get(f"{base}/ping", "http://localhost:7001")[0] == 200

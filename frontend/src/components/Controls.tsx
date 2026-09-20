@@ -20,8 +20,12 @@ export const EFFORTS: { id: Effort; label: string; hint: string }[] = [
   { id: "maximo", label: "Máximo", hint: "Investiga a fundo, testa e revisa antes de concluir" },
 ];
 
-export const nextPermission = (p: Permission): Permission =>
-  PERMISSIONS[(PERMISSIONS.findIndex((x) => x.id === p) + 1) % PERMISSIONS.length].id;
+/** Shift+Tab: durante uma resposta o modo Plano fica de fora (entrar nele no meio não faz sentido). */
+export const nextPermission = (p: Permission, running = false): Permission => {
+  const list = running ? PERMISSIONS.filter((x) => x.id !== "plan") : PERMISSIONS;
+  const i = list.findIndex((x) => x.id === p);
+  return list[(i + 1) % list.length].id;
+};
 
 /** Menu que abre para cima, no rodapé do campo de mensagem (como no Claude). */
 function Menu<T extends string>(props: {
@@ -87,11 +91,19 @@ function Menu<T extends string>(props: {
   );
 }
 
-export function PermissionMenu({ value, onChange }: { value: Permission; onChange: (v: Permission) => void }) {
+export function PermissionMenu({
+  value,
+  onChange,
+  running = false,
+}: {
+  value: Permission;
+  onChange: (v: Permission) => void;
+  running?: boolean;
+}) {
   return (
     <Menu
-      title="Modo (Shift+Tab alterna)"
-      items={PERMISSIONS}
+      title={running ? "Modo (vale já nesta resposta)" : "Modo (Shift+Tab alterna)"}
+      items={running ? PERMISSIONS.filter((x) => x.id !== "plan") : PERMISSIONS}
       value={value}
       onChange={onChange}
       button={(label) => (
@@ -164,7 +176,8 @@ export function ModeWarning({ permission }: { permission: Permission }) {
   return (
     <div className="mb-2 flex items-center gap-2 rounded-xl border border-amber-500/40 bg-surface px-3 py-1.5 text-xs text-amber-200">
       <Sliders className="size-3.5 shrink-0" />
-      Modo <strong>Ignorar permissões</strong>: comandos e alterações rodam sem perguntar.
+      Modo <strong>Ignorar permissões</strong>: comandos e alterações rodam sem perguntar. Só comando
+      destrutivo (apagar, formatar, desligar, sudo, force push) ainda pede confirmação.
     </div>
   );
 }

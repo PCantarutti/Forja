@@ -6,7 +6,8 @@ Modos (escolhidos no campo de mensagem, `Shift+Tab` alterna):
 - `edits`    — aceita edições de arquivo; o resto (shell, navegador, MCP) pergunta.
 - `auto`     — o Forja decide: edições e comandos reconhecidamente seguros passam, o resto pergunta.
 - `plan`     — só leitura. O agente investiga e propõe um plano; nada é alterado.
-- `bypass`   — aceita tudo, inclusive shell e JavaScript na página. Use com cuidado.
+- `bypass`   — aceita tudo, inclusive shell e JavaScript na página. Só comando destrutivo
+               (apagar, formatar, desligar, sudo, force push...) ainda pede confirmação.
 
 As regras de `Configurações › Permissões` (globs) continuam valendo em todos os modos menos `plan`,
 e a razão pela qual algo foi liberado sempre aparece no bloco da ferramenta: nada é aprovado em
@@ -45,7 +46,37 @@ SAFE_PYTHON_ARGS = {"-m", "--version", "-V", "-c"}
 DANGEROUS = re.compile(r"(^|\s)(rm|rmdir|mv|dd|mkfs|chmod|chown|sudo|su|kill|pkill|shutdown|reboot|"
                        r"curl|wget|nc|ssh|scp|apt|apt-get|yum|brew|systemctl)(\s|$)")
 REDIRECT = re.compile(r"[>]|(^|\s)tee(\s|$)")
+# Comandos que destroem dados ou mexem no sistema: nem o modo Ignorar permissões deixa passar calado.
+# Casa no início de qualquer trecho (depois de ; && || | ( ` $( ), então `$(rm -rf x)` também é pego.
+DESTRUCTIVE = re.compile(
+    r"(?:^|[\s;&|(`]|\$\()\s*"
+    r"(rm|rmdir|del|erase|rd|dd|shred|srm|wipe|mkfs\S*|fdisk|diskpart|format|"
+    r"shutdown|reboot|halt|poweroff|stop-computer|restart-computer|"
+    r"sudo|su|doas|runas|"
+    r"kill|pkill|killall|taskkill|"
+    r"chmod|chown|chattr|icacls|takeown|attrib|"
+    r"truncate|mkswap|swapoff|mount|umount|"
+    r"useradd|userdel|usermod|passwd|"
+    r"systemctl|launchctl|bcdedit|regedit|reg|vssadmin|cipher|"
+    r"remove-item|clear-content|set-executionpolicy|uninstall-\S+)"
+    r"(?=$|[\s;&|)])", re.I)
+DESTRUCTIVE_EXTRA = re.compile(
+    r"\bgit\s+(clean|filter-branch)\b|\bgit\s+reset\s+--hard\b|\bgit\s+push\b[^;&|]*?\s-{1,2}f(orce)?\b|"
+    r"\bdocker\s+(rm|rmi|kill)\b|\bdocker\s+(\S+\s+)?prune\b|"
+    r"\b(npm|pnpm|yarn)\s+publish\b|\bkubectl\s+delete\b|\bterraform\s+destroy\b|"
+    r"\bdrop\s+(table|database|schema)\b", re.I)
 SPLIT = re.compile(r"&&|\|\||;|\|")
+
+
+def destructive_command(command: str) -> bool:
+    """True se o comando apaga dados, mexe no sistema ou publica algo: pergunta mesmo no bypass."""
+    c = command or ""
+    return bool(DESTRUCTIVE.search(c) or DESTRUCTIVE_EXTRA.search(c))
+
+
+def destructive_args(args: dict) -> bool:
+    """Só ferramentas de shell têm `command`; sem ele, nada é considerado destrutivo."""
+    return destructive_command(str((args or {}).get("command") or ""))
 
 
 def safe_command(command: str) -> bool:
@@ -94,11 +125,13 @@ def decide(tool, args: dict, mode: str) -> tuple[bool, str | None]:
         return False, None
     if mode == "plan":  # nem deveria chegar aqui: no modo Plano essas ferramentas não são enviadas
         return True, None
-    if mode == "bypass":
-        return False, "modo Ignorar permissões"
     rule = auto_rule(tool.name, args)
     if rule:
         return False, rule
+    if mode == "bypass":
+        if destructive_args(args):  # apagar/formatar/desligar/sudo: pergunta mesmo aqui
+            return True, None
+        return False, "modo Ignorar permissões"
     if tool.always_ask:  # shell e browser_eval só passam por regra explícita ou bypass
         return True, None
     if mode == "manual":

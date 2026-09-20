@@ -905,6 +905,23 @@ def approve(run_id: str, body: ApproveBody):
     return {"ok": True}
 
 
+@app.post("/api/runs/{run_id}/permission")
+def change_permission(run_id: str, body: dict):
+    """Troca o modo de permissão no meio da resposta; vale já na próxima ferramenta.
+
+    Aprovações abertas que o novo modo aceita são liberadas na hora (trocar para Ignorar
+    permissões com um card na tela executa aquele card em vez de deixar tudo parado).
+    """
+    mode = str(body.get("permission") or "")
+    if mode not in policy.MODES or mode == "plan":  # entrar no Plano no meio não faz sentido
+        raise HTTPException(400, f"permission deve ser um de {', '.join(m for m in policy.MODES if m != 'plan')}")
+    run = _get_run(run_id)
+    if run.finished:
+        raise HTTPException(409, "A execução já terminou")
+    freed = run.set_permission(mode)
+    return {"ok": True, "permission": mode, "freed": freed}
+
+
 @app.post("/api/runs/{run_id}/stop")
 def stop(run_id: str):
     _get_run(run_id).stop()

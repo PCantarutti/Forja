@@ -72,7 +72,9 @@ class Run:
         self.id = uuid.uuid4().hex
         self.conv_id = conv_id
         self.turn_id = 0  # id da mensagem do usuário deste turno (checkpoints)
-        self.permission = "manual"  # pode mudar no meio (aprovação do plano)
+        self.permission = "manual"  # pode mudar no meio (plano aprovado ou troca no campo de mensagem)
+        self.mode_note: str | None = None   # o que dizer na conversa quando o modo muda
+        self.waiting: dict[str, tuple] = {}  # call_id -> (tool, args) das aprovações abertas
         self.queue: list[str] = []      # mensagens enviadas pelo usuário durante a execução (entram no próximo passo)
         self.tasks: list[dict] = []     # lista de tarefas do agente (update_tasks), estado mais recente
         self.cancel = asyncio.Event()
@@ -138,6 +140,17 @@ class Run:
             RUNS.pop(self.id, None)
 
         self._task = asyncio.create_task(main())
+
+    def set_permission(self, mode: str, note: str | None = None) -> int:
+        """Troca o modo no meio da execução. Libera na hora as aprovações que o novo modo já aceita."""
+        self.permission = mode
+        self.mode_note = note or f"Modo de permissão: {MODE_LABEL.get(mode, mode)}."
+        freed = 0
+        for call_id, (tool, args) in list(self.waiting.items()):
+            needs, _ = policy.decide(tool, args, mode)
+            if not needs and self.resolve(call_id, True):
+                freed += 1
+        return freed
 
     def resolve(self, call_id: str, decision) -> bool:
         """decision: bool (aprovação de ferramenta) ou dict (plano: aprovado, modo, feedback)."""
@@ -639,8 +652,10 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
                 continue
             async for ev in _execute(conv_id, call, req, run, caps):
                 yield ev
-        if run.permission != mode_at_start:  # plano aprovado: o conjunto de ferramentas muda
-            yield _event(conv_id, "info", f"Plano aprovado. Modo de permissão: {MODE_LABEL[run.permission]}.")
+        if run.permission != mode_at_start:  # plano aprovado ou modo trocado: o conjunto de ferramentas muda
+            yield _event(conv_id, "info", run.mode_note or
+                         f"Modo de permissão: {MODE_LABEL.get(run.permission, run.permission)}.")
+            run.mode_note = None
             yield tools_sent()
         for ev in _flush_queue(conv_id, run):  # mensagens enviadas durante as ferramentas entram já no próximo passo
             yield ev
@@ -717,20 +732,25 @@ async def _run_call(conv_id: int, call: dict, req: RunRequest, run: Run, caps: s
     if run.permission == "plan" and tool.mutating:
         result("erro", "Modo Plano: nada pode ser alterado. Termine de planejar e chame exit_plan_mode.")
         return
+    mode_now = run.permission
     needs_approval, rule = policy.decide(tool, args, run.permission)
     if rule:
         meta["auto_rule"] = rule  # por que passou sem perguntar (sempre visível na UI)
     if needs_approval:
         fut = asyncio.get_running_loop().create_future()
         run.pending[call["id"]] = fut
+        run.waiting[call["id"]] = (tool, args)
         yield {"type": "approval_request", "call": call, "preview": meta["preview"],
                "suggest": policy.suggest(name, args), **tag}
         decision = await fut
         approved = decision.get("approved") if isinstance(decision, dict) else bool(decision)
         run.pending.pop(call["id"], None)
+        run.waiting.pop(call["id"], None)
         if run.cancel.is_set():
             result("cancelada", "Não executada: geração interrompida pelo usuário.")
             return
+        if approved and run.permission != mode_now:
+            meta["auto_rule"] = f"modo alterado para {MODE_LABEL.get(run.permission, run.permission)}"
         if not approved:
             meta["approved"] = False
             result("rejeitada", "O usuário rejeitou esta alteração. Não tente de novo sem perguntar; "
@@ -801,7 +821,7 @@ async def _plan(call: dict, run: Run, out: dict, meta: dict) -> AsyncIterator[di
                         " Continue no modo Plano: não altere nada.")
         return
     mode = decision.get("mode") if decision.get("mode") in policy.MODES and decision.get("mode") != "plan" else "edits"
-    run.permission = mode
+    run.set_permission(mode, f"Plano aprovado. Modo de permissão: {MODE_LABEL[mode]}.")
     meta["approved"] = True
     meta["approved_mode"] = mode
     out.update(status="ok", meta=meta,

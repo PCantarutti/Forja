@@ -32,7 +32,7 @@ copy .env.example .env
 docker compose up -d --build
 ```
 
-Abra http://localhost:3000. No topo, escolha o provider e o modelo, selecione **Agente** e peça, por exemplo: *"crie calc.py com funções soma e multiplicacao"*.
+Abra http://localhost:7001. No topo, escolha o provider e o modelo, selecione **Agente** e peça, por exemplo: *"crie calc.py com funções soma e multiplicacao"*.
 
 Para atualizar depois de mudar o código, rode `docker compose up -d --build` de novo. As conversas ficam no volume `forja-data`.
 
@@ -123,7 +123,18 @@ No rodapé do campo de mensagem, no Agente. `Shift+Tab` alterna, e os números 1
 | **Manual** | Nada. Toda alteração mostra o card |
 | **Aceitar edições** | Só `write_file` e `edit_file`. O resto pergunta |
 | **Plano** | Nada é alterado: o agente só lê e propõe um plano |
-| **Ignorar permissões** | Tudo, inclusive shell e JavaScript. Aparece um aviso fixo no rodapé |
+| **Ignorar permissões** | Qualquer comando **não destrutivo**, além de edições e JavaScript. Aparece um aviso fixo no rodapé |
+
+No **Ignorar permissões**, o Forja ainda pede confirmação para comando destrutivo: apagar (`rm`, `del`,
+`Remove-Item`, `shred`), formatar/particionar, desligar ou reiniciar, `sudo`/`runas`, matar processo,
+`chmod`/`chown`/`icacls`, mexer em registro/serviços, `git reset --hard`, `git clean`, `git push --force`,
+`docker rm`/`prune`, `kubectl delete`, `terraform destroy`, `npm publish` e `drop table|database`. Para
+liberar até isso, crie a regra em *Configurações › Permissões* (as regras valem acima do modo).
+
+**Trocar o modo no meio da resposta funciona**: vale já na próxima ferramenta e, se houver um card de
+aprovação aberto que o novo modo aceita, ele é executado na hora em vez de ficar esperando. A conversa
+registra a troca e o painel lateral volta a mostrar as ferramentas do novo modo. (Entrar no modo Plano
+no meio de uma resposta não é oferecido: ele só vale no começo do turno.)
 
 As regras de *Configurações › Permissões* valem em todos os modos (menos Plano) e, como sempre, o bloco da ferramenta mostra o motivo de algo ter passado sem perguntar.
 
@@ -266,7 +277,7 @@ Antes de cada chamada, o Forja estima o tamanho do prompt. Se passar de `COMPACT
 | `HOST_DRIVE_C` | `C:/` | O que do Windows aparece como disco `C:` no seletor de pasta (pode ser uma subpasta) |
 | `HOST_MOUNTS` | `C=/host/c` | O que está montado no container, como `prefixo=pasta` (ex.: `C=/host/c`, `/home/voce=/host/home`) |
 | `FORJA_PICKER_URL` | `http://127.0.0.1:3001` | Endereço do forja-picker, visto pelo navegador |
-| `FORJA_PORT` | `3000` | Porta da interface no host |
+| `FORJA_PORT` | `7001` | Porta da interface no host |
 | `FORJA_RUNNER_URL` | `http://host.docker.internal:3002` | forja-runner (comandos e servidores no seu sistema). Vazio = sempre no container |
 | `OLLAMA_URL` | `http://host.docker.internal:11434/v1` | Endpoint do Ollama |
 | `LMSTUDIO_URL` | `http://host.docker.internal:1234/v1` | Endpoint do LM Studio |
@@ -348,7 +359,7 @@ Para o frontend com hot reload (backend rodando em Docker):
 
 ```powershell
 cd frontend; npm install
-$env:API_URL="http://127.0.0.1:3000"; npx vite
+$env:API_URL="http://127.0.0.1:7001"; npx vite
 ```
 
 ### Estrutura

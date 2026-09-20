@@ -14,7 +14,7 @@ Diálogo usado:
     macOS   -> osascript "choose folder"
 
 Só usa a biblioteca padrão. Variáveis: FORJA_PICKER_PORT (3001), FORJA_ORIGINS
-("http://localhost:3000,http://127.0.0.1:3000").
+("http://localhost:7001,http://127.0.0.1:7001").
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, urlparse
 
 PORT = int(os.getenv("FORJA_PICKER_PORT", "3001"))
 ORIGINS = {o.strip().rstrip("/") for o in
-           os.getenv("FORJA_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if o.strip()}
+           os.getenv("FORJA_ORIGINS", "http://localhost:7001,http://127.0.0.1:7001").split(",") if o.strip()}
 TITLE = "Forja: escolher a pasta de trabalho"
 SYSTEM = platform.system()
 _dialog_lock = threading.Lock()  # um diálogo por vez

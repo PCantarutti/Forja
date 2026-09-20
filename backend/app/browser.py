@@ -487,7 +487,7 @@ def check_url(url: str) -> str:
     u = urlparse(url)
     if u.scheme not in ("http", "https") or not u.netloc:
         raise ToolError("Só URLs http(s) completas, ex.: http://localhost:5173/rota ou "
-                        "http://host.docker.internal:3000 (app rodando no Windows).")
+                        "http://host.docker.internal:7001 (app rodando no Windows).")
     return url
 
 

@@ -187,6 +187,14 @@ export default function App() {
 
   const update = (p: Partial<Settings>) => setSettings((s) => ({ ...s, ...p }));
 
+  /** Trocar o modo no meio da resposta vale já para a próxima ferramenta (e libera o card aberto). */
+  function changePermission(permission: Permission) {
+    update({ permission });
+    if (running && runId.current) {
+      api.post(`/runs/${runId.current}/permission`, { permission }).catch((e) => setError(e.message));
+    }
+  }
+
   useEffect(() => {
     localStorage.setItem("forja.settings", JSON.stringify(settings));
   }, [settings]);
@@ -1254,7 +1262,7 @@ export default function App() {
                   }
                   if (e.key === "Tab" && e.shiftKey && section === "agent") {
                     e.preventDefault();
-                    update({ permission: nextPermission(settings.permission) });
+                    changePermission(nextPermission(settings.permission, running));
                   }
                 }}
                 rows={Math.min(8, Math.max(2, input.split("\n").length))}
@@ -1278,7 +1286,7 @@ export default function App() {
                   />
                 </label>
                 {section === "agent" && (
-                  <PermissionMenu value={settings.permission} onChange={(permission) => update({ permission })} />
+                  <PermissionMenu value={settings.permission} onChange={changePermission} running={running} />
                 )}
                 <EffortMenu value={settings.effort} onChange={(effort) => update({ effort })} />
                 <ContextRing

@@ -50,7 +50,10 @@ def tool(name):
     ("auto", "browser_click", {"selector": "e1"}, False),
     ("auto", "run_command", {"command": "pytest -q"}, True),   # shell é always_ask: nem no automático passa
     ("auto", "browser_eval", {"script": "1"}, True),
-    ("bypass", "run_command", {"command": "rm -rf /"}, False),
+    ("bypass", "run_command", {"command": "npm install"}, False),
+    ("bypass", "run_command", {"command": "node server.js"}, False),
+    ("bypass", "run_command", {"command": "rm -rf /"}, True),      # destrutivo pergunta mesmo no bypass
+    ("bypass", "run_command", {"command": "git push --force"}, True),
     ("bypass", "browser_eval", {"script": "1"}, False),
 ])
 def test_decide(mode, name, args, expected):
@@ -230,3 +233,105 @@ def test_chat_mode_sends_no_tools(monkeypatch):
     events = asyncio.run(scenario())
     sent = next(e for e in events if e["type"] == "tools_sent")
     assert sent["tools"] == []
+
+
+# ------------------------------------------------ comandos destrutivos (nem o bypass libera)
+
+@pytest.mark.parametrize("cmd", [
+    "rm -rf build", "sudo apt install x", "git reset --hard", "git push -f origin main",
+    "docker system prune -f", "npm run build && del dist", "$(rm -rf /)", "shutdown /s",
+    "Remove-Item dist -Recurse", "chmod 777 .", "taskkill /F /IM python.exe", "npm publish",
+])
+def test_destructive(cmd):
+    assert policy.destructive_command(cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    "npm install", "node server.js", "python manage.py migrate", "git push", "docker compose up -d",
+    "echo oi > f.txt", "mkdir -p a/b", "cp a b", "pytest -q", "uv sync", "cargo build --release",
+])
+def test_not_destructive(cmd):
+    assert not policy.destructive_command(cmd)
+
+
+def test_bypass_still_respects_explicit_rule():
+    settings.update({"auto_approve_commands": ["rm -rf build"]})
+    needs, why = policy.decide(tool("run_command"), {"command": "rm -rf build"}, "bypass")
+    assert needs is False and why == "comando rm -rf build"
+
+
+# ------------------------------------------------ trocar o modo no meio da resposta
+
+def test_permission_change_frees_open_approval():
+    async def scenario():
+        run = agent.Run(1)
+        fut = asyncio.get_running_loop().create_future()
+        run.pending["c1"] = fut
+        run.waiting["c1"] = (tool("run_command"), {"command": "npm install"})
+        freed = run.set_permission("bypass")
+        return freed, fut.result(), run.permission, run.mode_note
+
+    freed, decision, permission, note = asyncio.run(scenario())
+    assert freed == 1 and decision is True and permission == "bypass"
+    assert "Ignorar permissões" in note
+
+
+def test_permission_change_keeps_destructive_waiting():
+    async def scenario():
+        run = agent.Run(1)
+        fut = asyncio.get_running_loop().create_future()
+        run.pending["c1"] = fut
+        run.waiting["c1"] = (tool("run_command"), {"command": "rm -rf dist"})
+        return run.set_permission("bypass"), fut.done()
+
+    freed, done = asyncio.run(scenario())
+    assert freed == 0 and done is False
+
+
+def test_permission_change_mid_run_applies_to_next_tool(monkeypatch):
+    """Card de shell aberto: o usuário troca para Ignorar permissões e a execução segue sozinha."""
+    step = {"n": 0}
+
+    async def fake_stream(provider, model, messages, tools, num_ctx, effort=None):
+        step["n"] += 1
+        if step["n"] == 1:
+            yield "done", {"tool_calls": [{"id": "s1", "name": "run_command",
+                                           "arguments": {"command": "echo primeiro"}}]}
+        elif step["n"] == 2:
+            yield "done", {"tool_calls": [{"id": "s2", "name": "run_command",
+                                           "arguments": {"command": "echo segundo"}}]}
+        else:
+            yield "content", "Pronto."
+            yield "done", {"tool_calls": []}
+
+    async def none(*a):
+        return None
+
+    async def fake_run_command(command, cwd=".", timeout=None, target="auto"):
+        return f"$ {command}"
+
+    monkeypatch.setattr(llm, "chat_stream", fake_stream)
+    monkeypatch.setattr(llm, "context_limit", none)
+    monkeypatch.setattr(llm, "capabilities", none)
+    monkeypatch.setitem(REGISTRY, "run_command",
+                        REGISTRY["run_command"].__class__(**{**REGISTRY["run_command"].__dict__,
+                                                             "handler": fake_run_command}))
+
+    async def scenario():
+        with db.session() as s:
+            c = db.Conversation(kind="agent")
+            s.add(c)
+            s.commit()
+            conv = c.id
+        run = agent.Run(conv)
+        req = agent.RunRequest(content="rode", provider="lmstudio", model="m", mode="agent", permission="manual")
+        approvals = 0
+        async for ev in agent.run_agent(conv, req, run):
+            if ev["type"] == "approval_request":
+                approvals += 1
+                run.set_permission("bypass")  # o usuário troca o modo com o card na tela
+        return run, approvals
+
+    run, approvals = asyncio.run(scenario())
+    assert approvals == 1          # o segundo comando já não pergunta
+    assert run.permission == "bypass"

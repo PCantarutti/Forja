@@ -46,7 +46,7 @@ services:
     restart: unless-stopped
     depends_on: [backend]
     ports:
-      - "${FORJA_PORT:-3000}:80"
+      - "${FORJA_PORT:-7001}:80"
 
 volumes:
   forja-data:

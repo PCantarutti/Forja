@@ -63,7 +63,7 @@ def test_ref_regex_rejects_selectors(sel):
 
 def test_check_url_accepts_local_http():
     assert browser.check_url(" http://localhost:5173/x ") == "http://localhost:5173/x"
-    assert browser.check_url("http://host.docker.internal:3000") == "http://host.docker.internal:3000"
+    assert browser.check_url("http://host.docker.internal:7001") == "http://host.docker.internal:7001"
 
 
 def test_set_viewport_clamps_and_updates_state_without_browser():
