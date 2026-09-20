@@ -69,7 +69,7 @@ export default function FolderPicker(props: {
           <div className="border-b border-line bg-surface px-5 py-2.5 text-xs text-muted">
             <span className="text-amber-200">Seletor do sistema indisponível:</span> {props.nativeError} Para usar o
             Explorer (ou o seletor do Linux), rode no seu computador{" "}
-            <span className="font-mono text-fg">toolsorja-picker.cmd</span> (Windows) ou{" "}
+            <span className="font-mono text-fg">tools/forja-picker.cmd</span> (Windows) ou{" "}
             <span className="font-mono text-fg">python3 tools/forja_picker.py &amp;</span> (Linux/macOS). Enquanto isso, escolha
             por aqui.
           </div>

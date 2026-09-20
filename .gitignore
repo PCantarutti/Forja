@@ -9,3 +9,4 @@ data/
 *.db
 *.tsbuildinfo
 config/mcp.json
+config/runner-token

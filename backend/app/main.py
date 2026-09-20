@@ -2,13 +2,16 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 
+from pathlib import Path
+
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from . import checkpoints, config, db, llm, mcp_client, memory, policy, settings, subagents, uploads, workspace
-from .agent import RUNS, Run, RunRequest, active_run
+from . import (checkpoints, compact, config, db, gitops, llm, mcp_client, memory, policy, runner, settings, shell,
+               skills, subagents, terminal, uploads, workspace)
+from .agent import RUNS, Run, RunRequest, _load, _save, active_run
 from .browser import MANAGER
 from .tools import REGISTRY, ToolError
 
@@ -211,6 +214,55 @@ def put_model_settings(body: ModelSettingBody):
     return {"model": body.model, **db.get_model_setting(body.model)}
 
 
+# ------------------------------------------------------------------ forja-runner
+
+@app.post("/api/picker/start")
+async def picker_start():
+    """O navegador não inicia processos; o runner (no sistema do usuário) sobe o forja-picker por ele."""
+    if not runner.online():
+        await asyncio.to_thread(runner.refresh, True)
+    if not runner.online():
+        raise HTTPException(400, "Nem o forja-picker nem o forja-runner estão rodando. Inicie tools/forja-picker.cmd "
+                                 "(Windows) ou tools/forja_runner.py: ele sobe o seletor junto.")
+    try:
+        return await asyncio.to_thread(runner.picker_start)
+    except runner.RunnerError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/runner")
+async def get_runner():
+    """Estado do forja-runner (sistema do usuário) para o painel; força um /ping novo."""
+    info = await asyncio.to_thread(runner.refresh, True)
+    return {"online": bool(info and info.get("ok")), "label": runner.describe(info), "info": info,
+            "url": config.RUNNER_URL}
+
+
+# ------------------------------------------------------------------ instâncias (servidores do agente)
+
+@app.get("/api/servers")
+async def get_servers():
+    """Servidores iniciados por serve_start (no seu sistema via runner e no container)."""
+    return {"servers": await asyncio.to_thread(shell.list_servers), "runner": runner.describe(runner.refresh())}
+
+
+@app.get("/api/servers/{name}/log")
+async def get_server_log(name: str, tail: int = 80):
+    try:
+        return {"name": name, "log": await asyncio.to_thread(shell.server_log, name, tail)}
+    except (ToolError, runner.RunnerError) as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/servers/{name}/stop")
+async def stop_server(name: str):
+    try:
+        where = await asyncio.to_thread(shell.stop_server, name)
+    except (ToolError, runner.RunnerError) as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "name": name, "where": where}
+
+
 # ------------------------------------------------------------------ navegador integrado
 # Uma sessão por conversa: `conv` é o id da conversa ("0" = rascunho da tela inicial).
 
@@ -333,17 +385,41 @@ async def browser_close(conv: str = "0"):
 
 def _conv_dict(c: db.Conversation) -> dict:
     return {"id": c.id, "title": c.title, "updated_at": c.updated_at.isoformat(), "kind": c.kind or "agent",
-            "workspace": c.workspace, "workspace_label": workspace.label(c.workspace)}
+            "workspace": c.workspace, "workspace_label": workspace.label(c.workspace),
+            "pinned": bool(c.pinned), "archived": bool(c.archived)}
 
 
 @app.get("/api/conversations")
-def list_conversations(kind: str | None = None):
-    """Sem `kind`, todas; com `kind`, só as da seção (chat ou agent)."""
+def list_conversations(kind: str | None = None, archived: bool = False):
+    """Sem `kind`, todas; com `kind`, só as da seção (chat ou agent). Fixadas primeiro; arquivadas à parte."""
     with db.session() as s:
-        q = select(db.Conversation).order_by(db.Conversation.updated_at.desc())
+        q = select(db.Conversation).order_by(db.Conversation.pinned.desc(), db.Conversation.updated_at.desc())
+        q = q.where(db.Conversation.archived.is_(True) if archived else db.Conversation.archived.isnot(True))
         if kind:
             q = q.where(db.Conversation.kind == kind)
         return [_conv_dict(c) for c in s.scalars(q).all()]
+
+
+@app.get("/api/conversations/search")
+def search_conversations(q: str, kind: str | None = None, limit: int = 20):
+    """Busca no conteúdo das mensagens; devolve as conversas com um trecho de onde casou."""
+    q = q.strip()
+    if len(q) < 2:
+        return []
+    with db.session() as s:
+        rows = s.execute(select(db.Message.conversation_id, db.Message.content)
+                         .where(db.Message.content.ilike(f"%{q}%"), db.Message.role.in_(("user", "assistant")))
+                         .order_by(db.Message.id.desc()).limit(300)).all()
+        hits: dict[int, str] = {}
+        for cid, content in rows:
+            if cid not in hits:
+                i = max(0, (content or "").lower().find(q.lower()))
+                hits[cid] = (content or "")[max(0, i - 40): i + 90].replace("\n", " ").strip()
+        if not hits:
+            return []
+        convs = s.scalars(select(db.Conversation).where(db.Conversation.id.in_(list(hits)))
+                          .order_by(db.Conversation.updated_at.desc())).all()
+        return [{**_conv_dict(c), "snippet": hits[c.id]} for c in convs if not kind or c.kind == kind][:limit]
 
 
 @app.post("/api/conversations")
@@ -377,6 +453,282 @@ def get_conversation(conv_id: int):
     with db.session() as s:
         c = _get_conv(s, conv_id)
         return {**_conv_dict(c), "messages": [m.to_dict() for m in c.messages]}
+
+
+class BulkBody(BaseModel):
+    ids: list[int]
+    action: str  # archive | unarchive | pin | unpin | delete
+
+
+@app.post("/api/conversations/bulk")
+async def bulk_conversations(body: BulkBody):
+    """Ação em várias conversas de uma vez (seleção múltipla na barra lateral)."""
+    if body.action not in ("archive", "unarchive", "pin", "unpin", "delete"):
+        raise HTTPException(400, "action deve ser archive, unarchive, pin, unpin ou delete")
+    done, skipped, closed = 0, [], []
+    with db.session() as s:
+        for cid in body.ids:
+            c = s.get(db.Conversation, cid)
+            if not c:
+                continue
+            if body.action == "delete":
+                if active_run(cid):
+                    skipped.append(cid)  # não apaga conversa com execução em andamento
+                    continue
+                s.query(db.Checkpoint).filter(db.Checkpoint.conversation_id == cid).delete()
+                s.delete(c)
+                closed.append(cid)
+            elif body.action in ("archive", "unarchive"):
+                c.archived = body.action == "archive"
+            else:
+                c.pinned = body.action == "pin"
+            done += 1
+        s.commit()
+    for cid in closed:
+        await MANAGER.close(str(cid))
+    return {"ok": True, "done": done, "skipped": skipped}
+
+
+class ConvPatch(BaseModel):
+    title: str | None = None
+    pinned: bool | None = None
+    archived: bool | None = None
+
+
+@app.patch("/api/conversations/{conv_id}")
+def patch_conversation(conv_id: int, body: ConvPatch):
+    """Renomear, fixar/desafixar, arquivar/desarquivar."""
+    with db.session() as s:
+        c = _get_conv(s, conv_id)
+        if body.title is not None:
+            c.title = body.title.strip()[:200] or c.title
+        if body.pinned is not None:
+            c.pinned = body.pinned
+        if body.archived is not None:
+            c.archived = body.archived
+        s.commit()
+        return _conv_dict(c)
+
+
+@app.get("/api/conversations/{conv_id}/export")
+def export_conversation(conv_id: int):
+    """A conversa em Markdown (download)."""
+    with db.session() as s:
+        c = _get_conv(s, conv_id)
+        lines = [f"# {c.title}", "", f"Pasta: {workspace.label(c.workspace)}  ·  exportado do Forja", ""]
+        for m in c.messages:
+            if m.role == "user":
+                lines += ["## Usuário", "", m.content or "", ""]
+            elif m.role == "assistant":
+                lines += ["## Forja", "", m.content or ""]
+                for tc in m.tool_calls or []:
+                    lines.append(f"- `{tc['name']}` {json.dumps(tc.get('arguments', {}), ensure_ascii=False)[:300]}")
+                lines.append("")
+            elif m.role == "tool":
+                lines += [f"<details><summary>{m.name} [{m.status}]</summary>", "", "```",
+                          (m.content or "")[:4000], "```", "", "</details>", ""]
+            elif m.role == "event":
+                lines += [f"> {(m.content or '').replace(chr(10), chr(10) + '> ')}", ""]
+    return PlainTextResponse("\n".join(lines), media_type="text/markdown; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="forja-conversa-{conv_id}.md"'})
+
+
+@app.post("/api/conversations/{conv_id}/compact")
+async def compact_now(conv_id: int, body: dict):
+    """Compacta o histórico antigo agora (o mesmo resumo da compactação automática)."""
+    if active_run(conv_id):
+        raise HTTPException(409, "Espere a execução atual terminar")
+    msgs = _load(conv_id)
+    until = compact.split_point(msgs)
+    if until is None:
+        raise HTTPException(409, "Nada para compactar: a conversa só tem os últimos turnos.")
+    try:
+        text = compact.transcript(msgs, until, max_chars=int(config.NUM_CTX * 4 * 0.5))
+        summary = await compact.summarize(body["provider"], body["model"], text, config.NUM_CTX)
+    except (KeyError, llm.LLMError) as e:
+        raise HTTPException(400, f"Falha ao compactar: {e}")
+    if not summary:
+        raise HTTPException(400, "O modelo devolveu um resumo vazio.")
+    m = _save(conv_id, role="event", content=summary, meta={"kind": "summary", "covers_until": until})
+    return m.to_dict()
+
+
+@app.get("/api/conversations/{conv_id}/changes")
+def conversation_changes(conv_id: int):
+    """Arquivos que o agente alterou nesta conversa (write_file/edit_file), com diff do antes → agora."""
+    from .tools import _diff
+    with db.session() as s:
+        rows = list(s.scalars(select(db.Checkpoint).where(db.Checkpoint.conversation_id == conv_id)
+                              .order_by(db.Checkpoint.id)))
+    first: dict[str, db.Checkpoint] = {}
+    for cp in rows:
+        first.setdefault(cp.path, cp)  # o checkpoint mais antigo é o estado original
+    files = []
+    for path, cp in first.items():
+        p = Path(path)
+        label = workspace.to_host(p) or path
+        before = (cp.content or b"").decode("utf-8", "replace") if cp.existed else None
+        try:
+            after = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else None
+        except OSError:
+            after = None
+        if before is None and after is None:
+            continue
+        status = ("created" if before is None else "deleted" if after is None
+                  else "unchanged" if before == after else "modified")
+        d = _diff(before or "", after or "", Path(label).name) if status != "unchanged" else ""
+        body_lines = [l for l in d.splitlines() if not l.startswith(("+++", "---"))]
+        files.append({"path": label, "status": status, "diff": d[:100_000],
+                      "additions": sum(1 for l in body_lines if l.startswith("+")),
+                      "deletions": sum(1 for l in body_lines if l.startswith("-"))})
+    return {"files": files}
+
+
+@app.get("/api/conversations/{conv_id}/skills")
+def conversation_skills(conv_id: int | str):
+    """Comandos `/`: ações do Forja + skills da pasta da conversa (.forja/skills/*.md)."""
+    return {"skills": skills.list_for(_conv_root(conv_id))}
+
+
+class OpenBody(BaseModel):
+    conv: int | str | None = None
+    path: str
+    mode: str = "editor"  # editor | reveal
+
+
+@app.post("/api/open")
+async def open_in_system(body: OpenBody):
+    """Abre um arquivo no editor ou o revela no Explorer/Finder do sistema do usuário (via runner)."""
+    if not runner.online():
+        await asyncio.to_thread(runner.refresh, True)
+    if not runner.online():
+        raise HTTPException(400, "Precisa do forja-runner ligado no seu sistema (tools/forja-picker.cmd).")
+    raw = body.path.strip()
+    if len(raw) > 2 and raw[1] == ":" or raw.startswith("/") and not raw.startswith(("/workspace", "/host")):
+        host = workspace.normalize(raw)
+    else:
+        from .tools import resolve_path
+        try:
+            host = workspace.to_host(resolve_path(_conv_root(body.conv), raw))
+        except ToolError as e:
+            raise HTTPException(400, str(e))
+    if not host:
+        raise HTTPException(400, "Esse caminho não existe no seu sistema.")
+    try:
+        return await asyncio.to_thread(runner.open_path, host, body.mode)
+    except runner.RunnerError as e:
+        raise HTTPException(400, str(e))
+
+
+# ------------------------------------------------------------------ git da pasta da conversa
+
+class CommitBody(BaseModel):
+    provider: str | None = None
+    model: str | None = None
+    message: str | None = None
+    dry: bool = False  # só gerar a mensagem
+
+
+class PrBody(BaseModel):
+    title: str = ""
+    body: str = ""
+
+
+class WorktreeBody(BaseModel):
+    branch: str
+
+
+def _git_root(conv_id: int) -> Path:
+    if active_run(conv_id):
+        raise HTTPException(409, "Espere a execução atual terminar")
+    return _conv_root(conv_id)
+
+
+@app.get("/api/conversations/{conv_id}/git")
+async def git_status(conv_id: int):
+    return await asyncio.to_thread(gitops.status, _conv_root(conv_id))
+
+
+@app.get("/api/conversations/{conv_id}/git/diff")
+async def git_diff(conv_id: int, path: str | None = None):
+    return {"diff": await asyncio.to_thread(gitops.diff, _conv_root(conv_id), path)}
+
+
+@app.post("/api/conversations/{conv_id}/git/commit")
+async def git_commit(conv_id: int, body: CommitBody):
+    root = _git_root(conv_id)
+    try:
+        message = body.message
+        if not message:
+            if not body.provider or not body.model:
+                raise HTTPException(400, "Sem mensagem: informe provider e model para gerar uma.")
+            message = await gitops.generate_message(root, body.provider, body.model)
+        if body.dry:
+            return {"message": message}
+        return await asyncio.to_thread(gitops.commit, root, message)
+    except (ToolError, llm.LLMError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/conversations/{conv_id}/git/pr")
+async def git_pr(conv_id: int, body: PrBody):
+    try:
+        return await asyncio.to_thread(gitops.create_pr, _git_root(conv_id), body.title, body.body)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/conversations/{conv_id}/git/worktree")
+async def git_worktree(conv_id: int, body: WorktreeBody):
+    """Cria um worktree numa branch nova e passa a conversa a trabalhar nele."""
+    root = _git_root(conv_id)
+    try:
+        result = await asyncio.to_thread(gitops.worktree, root, body.branch.strip())
+        workspace.resolve(result["path"])
+    except (ToolError, workspace.WorkspaceError) as e:
+        raise HTTPException(400, str(e))
+    with db.session() as s:
+        c = _get_conv(s, conv_id)
+        c.workspace = result["path"]
+        s.commit()
+        return {**result, "conversation": _conv_dict(c)}
+
+
+# ------------------------------------------------------------------ terminal do usuário
+
+class TermStart(BaseModel):
+    conv: int | str | None = None
+
+
+@app.post("/api/term/start")
+async def term_start(body: TermStart):
+    try:
+        return await asyncio.to_thread(terminal.start, _conv_root(body.conv))
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/term/{tid}/input")
+async def term_input(tid: str, body: dict):
+    try:
+        await asyncio.to_thread(terminal.send, tid, str(body.get("text", "")))
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@app.get("/api/term/{tid}/poll")
+async def term_poll(tid: str, cursor: int = 0):
+    try:
+        return await asyncio.to_thread(terminal.poll, tid, cursor)
+    except ToolError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.delete("/api/term/{tid}")
+async def term_close(tid: str):
+    await asyncio.to_thread(terminal.close, tid)
+    return {"ok": True}
 
 
 @app.put("/api/conversations/{conv_id}/workspace")
@@ -515,6 +867,20 @@ async def live(conv_id: int):  # async: roda no event loop, atômico em relaçã
 @app.get("/api/runs/{run_id}/stream")
 def stream_run(run_id: str, cursor: int = 0):
     return _sse(_get_run(run_id), cursor)
+
+
+@app.post("/api/runs/{run_id}/queue")
+async def queue_message(run_id: str, body: dict):
+    """Mensagem enviada durante a execução: entra como turno novo no próximo passo do agente."""
+    content = str(body.get("content") or "").strip()
+    if not content:
+        raise HTTPException(400, "Mensagem vazia")
+    run = _get_run(run_id)
+    if run.finished:
+        raise HTTPException(409, "A execução já terminou; envie normalmente")
+    run.queue.append(content)
+    await run.publish({"type": "queued", "content": content, "pending": len(run.queue)})
+    return {"ok": True, "pending": len(run.queue)}
 
 
 class ApproveBody(BaseModel):

@@ -2,11 +2,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, streamSSE, uploadFile } from "./api";
 import Sidebar from "./components/Sidebar";
 import BrowserPanel from "./components/BrowserPanel";
+import ServersPanel from "./components/ServersPanel";
+import PlansPanel, { type PlanEntry } from "./components/PlansPanel";
+import ChangesPanel, { type ChangesAction } from "./components/ChangesPanel";
+import TerminalPanel from "./components/TerminalPanel";
 import InfoPanel, { type McpStatus, type ToolInfo } from "./components/InfoPanel";
-import RightPanel, { type RightTab } from "./components/RightPanel";
+import RightPanel, { RightTabsBar, type RightTab } from "./components/RightPanel";
 import SettingsDialog from "./components/Settings";
 import FolderPicker, { folderName } from "./components/FolderPicker";
 import ModelPicker from "./components/ModelPicker";
+import ContextRing from "./components/ContextRing";
 import { LogoMark } from "./components/Logo";
 import {
   EffortMenu,
@@ -29,10 +34,22 @@ import {
   SubagentSteps,
   Thinking,
   ToolBlock,
+  TasksCard,
   type TurnStats,
 } from "./components/MessageView";
-import { ArrowUp, ChevronDown, Edit, Laptop, Paperclip, Refresh, Square, Undo } from "./components/icons";
-import type { Approval, Attachment, BrowserState, Conversation, Message, Settings, Stats, ToolsSent } from "./types";
+import { ArrowUp, ChevronDown, Edit, ExternalLink, FolderOpen, Laptop, Paperclip, Refresh, Square, Undo } from "./components/icons";
+import type { Approval, Attachment, BrowserState, Conversation, Message, RunnerStatus, Settings, Skill, Stats, Task, ToolsSent } from "./types";
+
+/** Notificação do sistema quando a aba não está em foco (execução terminou, aprovação pendente). */
+function notify(title: string, body: string, force = false) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  if (!document.hidden && !force) return;
+  try {
+    new Notification(title, { body: body.slice(0, 160), silent: true });
+  } catch {
+    /* navegador sem suporte */
+  }
+}
 
 type Config = {
   providers: { id: string; name: string }[];
@@ -95,13 +112,12 @@ function aggregate(list: Stats[]): TurnStats {
   };
 }
 
-const fmt = (n: number) => n.toLocaleString("pt-BR");
-
 export default function App() {
   const [config, setConfig] = useState<Config>({ providers: [], num_ctx: 32768 });
   const [showSettings, setShowSettings] = useState(false);
   const [allTools, setAllTools] = useState<ToolInfo[]>([]);
   const [mcp, setMcp] = useState<McpStatus | null>(null);
+  const [runner, setRunner] = useState<RunnerStatus | null>(null);
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [catalogKey, setCatalogKey] = useState(0); // força o seletor de modelo a recarregar
   const [showFolder, setShowFolder] = useState(false);
@@ -119,6 +135,32 @@ export default function App() {
   const [right, setRight] = useState<RightState>(RIGHT_DEFAULT);
   const prevConv = useRef<number | null | undefined>(undefined);
   const [browserOpen, setBrowserOpen] = useState(false);
+  const [serversRunning, setServersRunning] = useState(0);
+  const [liveOutput, setLiveOutput] = useState<Record<string, string>>({}); // saída ao vivo por chamada (run_command)
+  const [liveTasks, setLiveTasks] = useState<Task[] | null>(null); // lista de tarefas do run atual
+  const [queued, setQueued] = useState<string[]>([]); // mensagens na fila (enviadas durante a execução)
+  const [unread, setUnread] = useState<Set<number>>(new Set()); // conversas que terminaram em segundo plano
+  const [changesKey, setChangesKey] = useState(0); // muda quando um turno termina: aba Alterações recarrega
+  const [changesCount, setChangesCount] = useState(0);
+  const [changesAction, setChangesAction] = useState<ChangesAction>(null);
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const conversationsRef = useRef<Conversation[]>([]);
+  // Estatísticas em tempo real da geração atual: tokens contados conforme chegam, relógio a cada 250 ms.
+  const liveGen = useRef<{ t0: number; tFirst: number | null; tokens: number } | null>(null);
+  const [tick, setTick] = useState(0);
+
+  // Badge da aba Instâncias: quantos servidores do agente estão vivos (a aba em si atualiza mais rápido).
+  useEffect(() => {
+    const load = () =>
+      api
+        .get<{ servers: { alive: boolean }[] }>("/servers")
+        .then((r) => setServersRunning(r.servers.filter((s) => s.alive).length))
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, []);
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentId, setCurrentId] = useState<number | null>(null);
@@ -126,6 +168,11 @@ export default function App() {
   const [draft, setDraft] = useState<{ content: string; thinking: string } | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => setTick((x) => x + 1), 250); // relógio da linha de estatísticas ao vivo
+    return () => clearInterval(t);
+  }, [running]);
   const [approvals, setApprovals] = useState<Record<string, Approval>>({});
   const [sent, setSent] = useState<ToolsSent | null>(null);
   const [ctx, setCtx] = useState<{ used: number; max: number | null; estimated: boolean } | null>(null);
@@ -222,7 +269,13 @@ export default function App() {
   }, [messages, draft, approvals]);
 
   function refreshConversations(kind: Section = section) {
-    api.get<Conversation[]>(`/conversations?kind=${kind}`).then(setConversations).catch((e) => setError(e.message));
+    api
+      .get<Conversation[]>(`/conversations?kind=${kind}`)
+      .then((list) => {
+        conversationsRef.current = list;
+        setConversations(list);
+      })
+      .catch((e) => setError(e.message));
   }
 
   function loadCheckpoints(id: number | null) {
@@ -230,11 +283,68 @@ export default function App() {
     api.get<Record<string, string[]>>(`/conversations/${id}/checkpoints`).then(setCheckpoints).catch(() => {});
   }
 
+  function loadChangesCount(id: number | null) {
+    if (id === null) return setChangesCount(0);
+    api
+      .get<{ files: { status: string }[] }>(`/conversations/${id}/changes`)
+      .then((r) => setChangesCount(r.files.filter((f) => f.status !== "unchanged").length))
+      .catch(() => {});
+  }
+
+  // Comandos `/`: ações do Forja + skills da pasta da conversa.
+  useEffect(() => {
+    api
+      .get<{ skills: Skill[] }>(`/conversations/${currentId ?? 0}/skills`)
+      .then((r) => setSkills(r.skills))
+      .catch(() => setSkills([]));
+  }, [currentId]);
+
+  /** Abre um arquivo/pasta da conversa no editor ou no Explorer do seu sistema (precisa do runner). */
+  function openPath(path: string, mode: "editor" | "reveal") {
+    api.post("/open", { conv: currentId ?? "0", path, mode }).catch((e) => setError(e.message));
+  }
+
+  /** Conversa que ficou rodando em segundo plano: avisa quando terminar (badge + notificação). */
+  function watchUntilDone(id: number) {
+    const tick = async () => {
+      const live = await api.get<Live>(`/conversations/${id}/live`).catch(() => null);
+      if (!live) return;
+      if (live.run) return void setTimeout(tick, 5000);
+      setUnread((u) => new Set(u).add(id));
+      notify("Forja terminou", conversationsRef.current.find((c) => c.id === id)?.title ?? "Conversa em segundo plano", true);
+      refreshConversations();
+    };
+    setTimeout(tick, 4000);
+  }
+
+  async function compactNow() {
+    if (currentId === null || running) return;
+    setStatus("Compactando contexto…");
+    try {
+      const m = await api.post<Message>(`/conversations/${currentId}/compact`, { provider: settings.provider, model: settings.model });
+      setMessages((ms) => [...ms, m]);
+      setError("");
+    } catch (e: any) {
+      setError(e.message);
+    }
+    setStatus(null);
+  }
+
+  async function patchConversation(id: number, patch: { title?: string; pinned?: boolean; archived?: boolean }) {
+    try {
+      await api.patch(`/conversations/${id}`, patch);
+      refreshConversations();
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+
   function refreshTools() {
     setCatalogKey((k) => k + 1);
     api.get<Config>("/config").then(setConfig).catch(() => {});
     api.get<ToolInfo[]>("/tools").then(setAllTools).catch(() => {});
     api.get<McpStatus>("/mcp").then(setMcp).catch(() => {});
+    api.get<RunnerStatus>("/runner").then(setRunner).catch(() => {});
   }
 
   async function reloadMcp() {
@@ -252,6 +362,10 @@ export default function App() {
     setStatus(null);
     setApprovals({});
     setSubSteps({});
+    setLiveOutput({});
+    setLiveTasks(null);
+    setQueued([]);
+    liveGen.current = null;
     runId.current = null;
   }
 
@@ -274,20 +388,31 @@ export default function App() {
         resetLive();
         refreshConversations();
         loadCheckpoints(convId);
+        loadChangesCount(convId);
+        setChangesKey((k) => k + 1);
+        notify("Forja terminou", conversationsRef.current.find((c) => c.id === convId)?.title ?? "Resposta pronta");
       }
     }
   }
 
   async function openConversation(id: number) {
+    if (running && currentId !== null && currentId !== id) watchUntilDone(currentId);
     streamCtl.current?.abort();
     setRunning(false);
     resetLive();
     setCtx(null);
     setError("");
     setCurrentId(id);
+    setUnread((u) => {
+      if (!u.has(id)) return u;
+      const n = new Set(u);
+      n.delete(id);
+      return n;
+    });
     const live = await api.get<Live>(`/conversations/${id}/live`);
     setMessages(live.messages);
     loadCheckpoints(id);
+    loadChangesCount(id);
     const kind = (await api.get<{ kind?: string }>(`/conversations/${id}`).catch(() => null))?.kind;
     if (kind && kind !== section) setSection(kind as Section);
     const run = live.run;
@@ -307,6 +432,7 @@ export default function App() {
   }
 
   function newConversation() {
+    if (running && currentId !== null) watchUntilDone(currentId);
     streamCtl.current?.abort();
     setRunning(false);
     resetLive();
@@ -314,6 +440,7 @@ export default function App() {
     setMessages([]);
     setCtx(null);
     setCheckpoints({});
+    setChangesCount(0);
   }
 
   async function deleteConversation(id: number) {
@@ -373,34 +500,56 @@ export default function App() {
       case "status":
         setStatus(ev.text);
         break;
+      case "tool_output": // saída ao vivo de um comando
+        setLiveOutput((o) => ({ ...o, [ev.call_id]: ((o[ev.call_id] ?? "") + ev.text).slice(-20_000) }));
+        break;
+      case "tasks":
+        setLiveTasks(ev.tasks);
+        break;
+      case "queued":
+        setQueued((q) => (q.includes(ev.content) ? q : [...q, ev.content]));
+        break;
       case "message":
         refreshConversations(); // título da conversa nova já existe no servidor
+        if (ev.message?.role === "user") setQueued((q) => q.filter((t) => t !== ev.message.content)); // saiu da fila
       // fallthrough
       case "event":
       case "tool_result":
         setStatus(null);
         setMessages((ms) => [...ms, ev.message]);
-        if (ev.type === "tool_result") setApprovals(({ [ev.message.tool_call_id]: _, ...rest }) => rest);
+        if (ev.type === "tool_result") {
+          setApprovals(({ [ev.message.tool_call_id]: _, ...rest }) => rest);
+          setLiveOutput(({ [ev.message.tool_call_id]: _, ...rest }) => rest);
+        }
         break;
       case "assistant_start":
         setStatus(null);
         setDraft({ content: "", thinking: "" });
+        liveGen.current = { t0: Date.now(), tFirst: null, tokens: 0 };
         break;
       case "token":
-        setDraft((d) => d && { ...d, content: d.content + ev.text });
+      case "thinking": {
+        const g = liveGen.current;
+        if (g) {
+          g.tFirst ??= Date.now();
+          g.tokens += 1; // provedores locais mandam um chunk por token
+        }
+        if (ev.type === "token") setDraft((d) => d && { ...d, content: d.content + ev.text });
+        else setDraft((d) => d && { ...d, thinking: d.thinking + ev.text });
         break;
-      case "thinking":
-        setDraft((d) => d && { ...d, thinking: d.thinking + ev.text });
-        break;
+      }
       case "assistant_end":
         setDraft(null);
+        liveGen.current = null; // a partir daqui valem as estatísticas reais da mensagem (meta.stats)
         setMessages((ms) => [...ms, ev.message]);
         break;
       case "approval_request":
         setApprovals((a) => ({ ...a, [ev.call.id]: { preview: ev.preview, suggest: ev.suggest, tool: ev.call.name } }));
+        notify("Forja pede aprovação", `${ev.call.name}: ${String(ev.call.arguments?.command ?? ev.call.arguments?.path ?? "")}`);
         break;
       case "plan_request":
         setApprovals((a) => ({ ...a, [ev.call.id]: { preview: null, tool: "exit_plan_mode", plan: ev.plan } }));
+        notify("Forja propôs um plano", "Abra a conversa para aprovar ou pedir ajustes.");
         break;
       case "context":
         setCtx(ev);
@@ -423,13 +572,25 @@ export default function App() {
     const base = config.picker_url ?? "http://127.0.0.1:3001";
     const start = (currentId !== null ? conv?.workspace : pendingWs) ?? config.default_workspace ?? "";
     setNativeError("");
-    try {
-      const ping = await fetch(`${base}/ping`, { signal: AbortSignal.timeout(1500) });
-      if (!ping.ok) throw new Error(`o ajudante respondeu HTTP ${ping.status}.`);
-    } catch (e: any) {
-      setNativeError(e?.name === "TimeoutError" || e instanceof TypeError ? "o forja-picker não está rodando." : String(e.message));
-      setShowFolder(true);
-      return;
+    const ping = () => fetch(`${base}/ping`, { signal: AbortSignal.timeout(1500) }).then((r) => r.ok);
+    let online = await ping().catch(() => false);
+    if (!online) {
+      // O navegador não inicia processos: o runner (no seu sistema) sobe o forja-picker por nós.
+      setPicking(true);
+      try {
+        const r = await api.post<{ online: boolean; error?: string }>("/picker/start");
+        for (let i = 0; i < 10 && !online; i++) {
+          online = await ping().catch(() => false);
+          if (!online) await new Promise((res) => setTimeout(res, 500));
+        }
+        if (!online) throw new Error(r.error ?? "o forja-picker foi iniciado mas não respondeu.");
+      } catch (e: any) {
+        setPicking(false);
+        setNativeError(String(e.message));
+        setShowFolder(true);
+        return;
+      }
+      setPicking(false);
     }
     setShowFolder(false);
     setPicking(true);
@@ -527,9 +688,43 @@ export default function App() {
     });
   }
 
+  // Menu `/`: aparece quando o campo começa com "/" e ainda é uma linha só.
+  const slashQuery = input.startsWith("/") && !input.includes("\n") ? input.slice(1).split(" ")[0].toLowerCase() : null;
+  const slashMatches = slashQuery === null ? [] : skills.filter((s) => s.name.toLowerCase().startsWith(slashQuery));
+
+  async function applySkill(s: Skill) {
+    const args = input.slice(1).split(" ").slice(1).join(" ");
+    setInput("");
+    setSlashIndex(0);
+    if (s.kind === "prompt") {
+      setInput((s.prompt ?? "").replace("$ARGUMENTS", args.trim()).trim());
+      return;
+    }
+    if (s.action === "compact") return compactNow();
+    if (s.action === "commit" || s.action === "pr") {
+      setChangesAction(s.action);
+      setRight({ tab: "changes", collapsed: false });
+      return;
+    }
+    if (s.action === "changes") setRight({ tab: "changes", collapsed: false });
+  }
+
   async function send() {
     const content = input.trim();
-    if ((!content && !attachments.length) || running) return;
+    if (slashQuery !== null && slashMatches.length) return applySkill(slashMatches[slashIndex] ?? slashMatches[0]);
+    if (!content && !attachments.length) return;
+    if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
+    if (running) {
+      // Execução em andamento: a mensagem entra na fila e o agente a recebe no próximo passo.
+      if (!runId.current || !content) return;
+      setInput("");
+      setQueued((q) => [...q, content]);
+      await api.post(`/runs/${runId.current}/queue`, { content }).catch((e) => {
+        setQueued((q) => q.filter((t) => t !== content));
+        setError(e.message);
+      });
+      return;
+    }
     if (!settings.model) {
       setError("Escolha um modelo primeiro.");
       return;
@@ -591,6 +786,27 @@ export default function App() {
     return m;
   }, [messages]);
 
+  // Planos do modo Plano nesta conversa (chamadas exit_plan_mode), para a aba Planos.
+  const plans = useMemo<PlanEntry[]>(() => {
+    const out: PlanEntry[] = [];
+    for (const m of messages) {
+      for (const c of m.tool_calls ?? []) {
+        if (c.name !== "exit_plan_mode") continue;
+        const done = results.get(c.id);
+        const plan = (approvals[c.id]?.plan ?? done?.meta?.plan ?? c.arguments.plan ?? "") as string;
+        const status: PlanEntry["status"] = !done
+          ? "pendente"
+          : done.status === "ok"
+            ? "aprovado"
+            : done.status === "rejeitada"
+              ? "ajustes"
+              : "cancelado";
+        out.push({ callId: c.id, plan, status, mode: done?.meta?.approved_mode, order: out.length + 1 });
+      }
+    }
+    return out;
+  }, [messages, results, approvals]);
+
   // Estatísticas por turno (todas as iterações do agente até a próxima mensagem do usuário),
   // exibidas embaixo da última resposta do turno.
   const turns = useMemo(() => {
@@ -644,6 +860,26 @@ export default function App() {
   // O turno atual ainda está rodando: não mostra estatísticas dele até terminar.
   const lastUserIndex = messages.map((m) => m.role).lastIndexOf("user");
 
+  // Linha de estatísticas sempre presente enquanto roda: iterações já concluídas do turno (valores reais do
+  // provider) + a geração em andamento (tokens contados ao vivo, tempo correndo, t/s atual).
+  const liveStats: TurnStats | null = (() => {
+    void tick; // recalcula a cada 250 ms
+    if (!running) return null;
+    const done = messages.slice(lastUserIndex + 1).flatMap((m) => (m.role === "assistant" && m.meta?.stats ? [m.meta.stats as Stats] : []));
+    const base: TurnStats = done.length ? aggregate(done) : { model: settings.model, tokens: 0, seconds: 0, tps: null, estimated: true };
+    const g = liveGen.current;
+    if (!g) return { ...base, model: settings.model || base.model, estimated: true };
+    const now = Date.now();
+    const gen = g.tFirst ? (now - g.tFirst) / 1000 : 0;
+    return {
+      model: settings.model || base.model,
+      tokens: base.tokens + g.tokens,
+      seconds: base.seconds + (now - g.t0) / 1000,
+      tps: gen > 0.3 ? g.tokens / gen : base.tps,
+      estimated: true,
+    };
+  })();
+
   // Uso por modelo (a conversa pode trocar de modelo no meio).
   const usage = useMemo(() => {
     const by = new Map<string, Stats[]>();
@@ -663,9 +899,33 @@ export default function App() {
         onHide={() => setSidebarHidden(true)}
         conversations={conversations}
         current={currentId}
+        unread={unread}
         onSelect={openConversation}
         onNew={newConversation}
+        onNewIn={(ws) => {
+          // Nova conversa já na pasta do grupo: vira a pasta da conversa no primeiro envio.
+          setPendingWs(ws);
+          if (ws) localStorage.setItem("forja.workspace", ws);
+          else localStorage.removeItem("forja.workspace");
+          newConversation();
+        }}
         onDelete={deleteConversation}
+        onBulk={async (ids, action) => {
+          try {
+            const r = await api.post<{ done: number; skipped: number[] }>("/conversations/bulk", { ids, action });
+            if (r.skipped?.length) setError(`${r.skipped.length} conversa(s) em execução não foram apagadas.`);
+            if ((action === "delete" || action === "archive") && currentId !== null && ids.includes(currentId)) newConversation();
+          } catch (e: any) {
+            setError(e.message);
+          }
+          refreshConversations();
+        }}
+        onRename={(id, title) => patchConversation(id, { title })}
+        onPin={(id, pinned) => patchConversation(id, { pinned })}
+        onArchive={(id, archived) => {
+          patchConversation(id, { archived });
+          if (archived && id === currentId) newConversation();
+        }}
         onSettings={() => setShowSettings(true)}
       />
       )}
@@ -673,8 +933,12 @@ export default function App() {
         <SettingsDialog onClose={() => setShowSettings(false)} tools={allTools} mcp={mcp} onChanged={refreshTools} />
       )}
 
-      <main className="flex min-w-0 flex-1 flex-col bg-bg">
-        <header className="flex min-w-0 items-center gap-2 px-4 py-2.5">
+      {/* Área de conteúdo: faixa superior com os botões do painel (como a barra de janela do Claude Desktop),
+          e embaixo o chat com o painel lateral abrindo à direita, logo abaixo dos botões. */}
+      <div className="flex min-w-0 flex-1 flex-col bg-bg">
+        <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
+          {/* Esquerda: título, pasta e atalhos; direita: botões do painel (tudo numa faixa só, como no Claude Desktop). */}
+          <div className="flex min-w-0 flex-1 items-center gap-2">
           {sidebarHidden && (
             <SectionTabs
               value={section}
@@ -700,8 +964,31 @@ export default function App() {
             <ChevronDown className="size-3 shrink-0" />
           </button>
           )}
+          {section === "agent" && runner?.online && (
+            <>
+              <button onClick={() => openPath(".", "editor")} title="Abrir a pasta da conversa no editor" className="rounded-md p-1 text-faint hover:bg-raised hover:text-fg">
+                <ExternalLink className="size-3.5" />
+              </button>
+              <button onClick={() => openPath(".", "reveal")} title="Abrir a pasta no Explorer" className="rounded-md p-1 text-faint hover:bg-raised hover:text-fg">
+                <FolderOpen className="size-3.5" />
+              </button>
+            </>
+          )}
           {picking && <span className="text-xs text-muted">Escolha a pasta na janela do sistema (pode estar atrás do navegador).</span>}
-        </header>
+          </div>
+          <RightTabsBar
+            tab={right.tab}
+            collapsed={right.collapsed}
+            onSelect={(tab) => setRight((r) => (r.collapsed || r.tab !== tab ? { tab, collapsed: false } : { ...r, collapsed: true }))}
+            browserOpen={browserOpen}
+            serversRunning={serversRunning}
+            plansPending={plans.filter((p) => p.status === "pendente").length}
+            plansTotal={plans.length}
+            changesCount={changesCount}
+          />
+        </div>
+        <div className="flex min-h-0 flex-1">
+      <main className="flex min-w-0 flex-1 flex-col bg-bg">
         {showFolder && (
           <FolderPicker
             current={conv ? conv.workspace ?? null : pendingWs}
@@ -798,12 +1085,13 @@ export default function App() {
                   {m.content && <Markdown text={m.content} />}
                   {m.tool_calls?.map((c, k) =>
                     c.name === "exit_plan_mode" ? (
-                      <PlanCard
-                        key={c.id}
-                        plan={(approvals[c.id]?.plan ?? results.get(c.id)?.meta?.plan ?? c.arguments.plan ?? "") as string}
-                        done={results.get(c.id)}
-                        onDecide={(ok, mode, feedback) => decidePlan(c.id, ok, mode, feedback)}
-                      />
+                      <div key={c.id} id={`plan-${c.id}`}>
+                        <PlanCard
+                          plan={(approvals[c.id]?.plan ?? results.get(c.id)?.meta?.plan ?? c.arguments.plan ?? "") as string}
+                          done={results.get(c.id)}
+                          onDecide={(ok, mode, feedback) => decidePlan(c.id, ok, mode, feedback)}
+                        />
+                      </div>
                     ) : (
                     <ToolBlock
                       key={c.id}
@@ -812,6 +1100,8 @@ export default function App() {
                       approval={approvals[c.id]}
                       running={running}
                       queued={m.tool_calls!.slice(0, k).some((p) => !results.has(p.id))}
+                      live={liveOutput[c.id]}
+                      onOpen={runner?.online ? openPath : undefined}
                       onDecide={(ok, always) => decide(c.id, ok, always)}
                     >
                       {c.name === "delegate_task" && (
@@ -877,22 +1167,18 @@ export default function App() {
               </div>
             )}
             {status && !draft && <div className="my-4 animate-pulse text-sm text-muted">{status}</div>}
+            {running && liveStats && (
+              <div className="my-3">
+                <StatsRow s={liveStats} live />
+              </div>
+            )}
+            {running && liveTasks && <TasksCard tasks={liveTasks} live />}
             <div ref={bottom} />
           </div>
         </div>
 
         <div className="px-5 pb-4">
           <div className="mx-auto max-w-3xl">
-            {summary.used != null && (
-              <div className="mb-2 flex flex-wrap justify-center gap-x-8 font-mono text-[13px] text-muted">
-                <span>
-                  Contexto: {fmt(summary.used)}/{summary.max ? fmt(summary.max) : "?"}
-                  {summary.max ? ` (${Math.round((summary.used / summary.max) * 100)}%)` : ""}
-                </span>
-                {summary.out != null && <span>Saída: {fmt(summary.out)}</span>}
-                {summary.avg != null && <span>Média: {summary.avg.toFixed(1)} t/s</span>}
-              </div>
-            )}
             {section === "agent" && <ModeWarning permission={settings.permission} />}
             {error && <div className="mb-2 text-sm text-red-300">{error}</div>}
 
@@ -903,10 +1189,65 @@ export default function App() {
                   {uploading && <span className="text-xs text-muted">enviando…</span>}
                 </div>
               )}
+              {queued.length > 0 && (
+                <div className="mb-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
+                  <span className="text-faint">na fila:</span>
+                  {queued.map((q, i) => (
+                    <span key={i} className="max-w-72 truncate rounded-full bg-raised px-2 py-0.5" title={q}>
+                      {q}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {slashQuery !== null && slashMatches.length > 0 && (
+                <div className="mb-2 max-h-56 overflow-y-auto rounded-xl border border-line bg-bg py-1 text-sm">
+                  {slashMatches.map((s, i) => (
+                    <button
+                      key={s.name}
+                      onMouseEnter={() => setSlashIndex(i)}
+                      onClick={() => applySkill(s)}
+                      className={`flex w-full items-center gap-3 px-3 py-1.5 text-left ${i === slashIndex ? "bg-raised" : "hover:bg-raised/60"}`}
+                    >
+                      <span className="font-mono text-fg">/{s.name}</span>
+                      <span className="truncate text-xs text-muted">{s.description}</span>
+                      <span className="ml-auto shrink-0 text-[10px] text-faint">{s.kind === "action" ? "ação" : s.source ? "skill do projeto" : "prompt"}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <textarea
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => {
+                  setInput(e.target.value);
+                  setSlashIndex(0);
+                }}
+                onPaste={(e) => {
+                  // Colar imagem/arquivo do clipboard vira anexo.
+                  const files = Array.from(e.clipboardData?.files ?? []);
+                  if (files.length) {
+                    e.preventDefault();
+                    addFiles(files);
+                  }
+                }}
                 onKeyDown={(e) => {
+                  if (slashQuery !== null && slashMatches.length) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      return setSlashIndex((i) => (i + 1) % slashMatches.length);
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      return setSlashIndex((i) => (i - 1 + slashMatches.length) % slashMatches.length);
+                    }
+                    if (e.key === "Tab") {
+                      e.preventDefault();
+                      return setInput(`/${slashMatches[slashIndex]?.name ?? slashMatches[0].name} `);
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      return setInput("");
+                    }
+                  }
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     send();
@@ -917,7 +1258,7 @@ export default function App() {
                   }
                 }}
                 rows={Math.min(8, Math.max(2, input.split("\n").length))}
-                placeholder={section === "agent" ? "Peça algo ao agente..." : "Digite uma mensagem..."}
+                placeholder={running ? "Mensagem para o próximo passo do agente (entra na fila)…" : section === "agent" ? "Peça algo ao agente... ( / para comandos )" : "Digite uma mensagem..."}
                 className="w-full resize-none bg-transparent text-[15px] text-fg placeholder:text-faint focus:outline-none"
               />
               <div className="mt-1 flex items-center gap-2">
@@ -940,6 +1281,14 @@ export default function App() {
                   <PermissionMenu value={settings.permission} onChange={(permission) => update({ permission })} />
                 )}
                 <EffortMenu value={settings.effort} onChange={(effort) => update({ effort })} />
+                <ContextRing
+                  used={summary.used}
+                  max={summary.max}
+                  out={summary.out}
+                  avg={summary.avg}
+                  canCompact={currentId !== null && !running}
+                  onCompact={compactNow}
+                />
                 <ModelPicker
                   provider={settings.provider}
                   model={settings.model}
@@ -947,9 +1296,20 @@ export default function App() {
                   onChange={(provider, model) => update({ provider, model })}
                 />
                 {running ? (
-                  <button onClick={stop} title="Parar" className="grid size-9 place-items-center rounded-full bg-raised text-fg hover:bg-[#3a3a3a]">
-                    <Square />
-                  </button>
+                  <>
+                    {input.trim() && (
+                      <button
+                        onClick={send}
+                        title="Enviar para a fila (o agente recebe no próximo passo)"
+                        className="grid size-9 place-items-center rounded-full border border-line text-fg hover:bg-raised"
+                      >
+                        <ArrowUp />
+                      </button>
+                    )}
+                    <button onClick={stop} title="Parar" className="grid size-9 place-items-center rounded-full bg-raised text-fg hover:bg-[#3a3a3a]">
+                      <Square />
+                    </button>
+                  </>
                 ) : (
                   <button
                     onClick={send}
@@ -966,15 +1326,33 @@ export default function App() {
         </div>
       </main>
 
-      <RightPanel
-        tab={right.tab}
-        onTab={(tab) => setRight((r) => ({ ...r, tab }))}
-        collapsed={right.collapsed}
-        onCollapse={(collapsed) => setRight((r) => ({ ...r, collapsed }))}
-        browserOpen={browserOpen}
-      >
+      <RightPanel tab={right.tab} collapsed={right.collapsed} onCollapse={(collapsed) => setRight((r) => ({ ...r, collapsed }))}>
         {right.tab === "browser" ? (
           <BrowserPanel conv={browserKey} onState={(s) => setBrowserOpen(s.open)} />
+        ) : right.tab === "servers" ? (
+          <ServersPanel onCount={setServersRunning} />
+        ) : right.tab === "terminal" ? (
+          <TerminalPanel conv={browserKey} />
+        ) : right.tab === "changes" ? (
+          <ChangesPanel
+            conv={currentId}
+            provider={settings.provider}
+            model={settings.model}
+            refreshKey={changesKey}
+            action={changesAction}
+            onActionDone={() => setChangesAction(null)}
+            onCount={setChangesCount}
+            onOpen={openPath}
+            onConversationChanged={() => {
+              refreshConversations();
+              if (currentId !== null) openConversation(currentId);
+            }}
+          />
+        ) : right.tab === "plans" ? (
+          <PlansPanel
+            plans={plans}
+            onJump={(id) => document.getElementById(`plan-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
+          />
         ) : (
           <InfoPanel
             settings={settings}
@@ -983,6 +1361,7 @@ export default function App() {
             onToolMode={changeToolMode}
             vision={vision}
             onVision={changeVision}
+            runner={runner}
             allTools={allTools}
             sent={sent}
             mcp={mcp}
@@ -991,6 +1370,8 @@ export default function App() {
           />
         )}
       </RightPanel>
+        </div>
+      </div>
     </div>
   );
 }

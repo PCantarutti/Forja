@@ -32,6 +32,15 @@ export const Paperclip = base(<path d="M21 11.5 12.5 20a5 5 0 0 1-7-7l8-8a3.5 3.
 export const Refresh = base(<><path d="M21 12a9 9 0 1 1-2.6-6.4" /><path d="M21 4v5h-5" /></>);
 export const Shield = base(<><path d="M12 3l7 3v6c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6z" /><path d="m9 12 2 2 4-4" /></>);
 export const X = base(<path d="M6 6l12 12M18 6L6 18" />);
+export const GitBranch = base(<><circle cx="6" cy="5" r="2.5" /><circle cx="6" cy="19" r="2.5" /><circle cx="18" cy="8" r="2.5" /><path d="M6 7.5v9M18 10.5c0 3-3 4-6 4s-6 1-6 3" /></>);
+export const Terminal = base(<><path d="m5 7 5 5-5 5" /><path d="M12 17h7" /></>);
+export const Pin = base(<><path d="M9 4h6l-1 6 3 3v1H7v-1l3-3z" /><path d="M12 14v6" /></>);
+export const Archive = base(<><rect x="3" y="4" width="18" height="4" rx="1" /><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4" /></>);
+export const More = base(<><circle cx="5" cy="12" r="1.2" fill="currentColor" /><circle cx="12" cy="12" r="1.2" fill="currentColor" /><circle cx="19" cy="12" r="1.2" fill="currentColor" /></>);
+export const ExternalLink = base(<><path d="M14 4h6v6" /><path d="M20 4 10 14" /><path d="M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6" /></>);
+export const FolderOpen = base(<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1H6.5a2 2 0 0 0-1.9 1.4L3 17z M3 17l1.6-5.6A2 2 0 0 1 6.5 10H21l-2 7a2 2 0 0 1-1.9 1.4H5a2 2 0 0 1-2-1.4z" />);
+export const Download = base(<><path d="M12 4v11m-5-5 5 5 5-5" /><path d="M4 19h16" /></>);
+export const Activity = base(<path d="M3 12h4l3-8 4 16 3-8h4" />);
 export const Globe = base(<><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18" /></>);
 export const Info = base(<><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></>);
 export const PanelRight = base(<><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></>);

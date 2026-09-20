@@ -19,7 +19,34 @@ export type Message = {
   meta: Record<string, any> | null;
 };
 
-export type Conversation = { id: number; title: string; updated_at: string; workspace?: string | null; workspace_label?: string };
+export type Conversation = {
+  id: number;
+  title: string;
+  updated_at: string;
+  workspace?: string | null;
+  workspace_label?: string;
+  pinned?: boolean;
+  archived?: boolean;
+  snippet?: string; // trecho que casou na busca por conteúdo
+};
+
+/** Arquivo alterado pelo agente nesta conversa (checkpoints), com diff do antes para o agora. */
+export type ChangeFile = { path: string; status: "created" | "modified" | "deleted" | "unchanged"; diff: string; additions: number; deletions: number };
+
+export type GitStatus = {
+  repo: boolean;
+  branch?: string;
+  files?: { status: string; path: string; staged: boolean }[];
+  ahead?: number | null;
+  behind?: number | null;
+  remote?: string;
+  has_gh?: boolean;
+  last_commit?: string;
+};
+
+export type Task = { text: string; status: "pending" | "doing" | "done" };
+
+export type Skill = { name: string; kind: "action" | "prompt"; description: string; action?: string; prompt?: string; source?: string };
 
 export type ToolsSent = {
   mode: "chat" | "agent";
@@ -39,7 +66,26 @@ export type ToolsSent = {
   vision_source?: "detectado" | "override" | "desconhecido";
   /** Ferramentas ligadas mas não enviadas porque o modelo não tem a capacidade exigida. */
   blocked?: { name: string; missing: string[] }[];
+  /** forja-runner (sistema do usuário) visto nesta requisição e onde run_command/serve_* executam. */
+  runner?: string;
+  exec_target?: "host" | "container";
 };
+
+/** Servidor iniciado pelo agente com serve_start, no seu sistema ("host") ou no container. */
+export type ServerInfo = {
+  name: string;
+  pid?: number;
+  alive: boolean;
+  exit_code?: number | null;
+  command: string;
+  cwd?: string;
+  log?: string;
+  uptime?: number;
+  where: "host" | "container";
+  error?: string;
+};
+
+export type RunnerStatus = { online: boolean; label: string; url?: string; info?: Record<string, any> | null };
 
 export type BrowserTab = { index: number; url: string; title: string; active: boolean };
 

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import type { Approval, Attachment, Message, Preview, ToolCall } from "../types";
+import type { Approval, Attachment, Message, Preview, Task, ToolCall } from "../types";
 import { Brain, Check, Chevron, Clipboard, Split, Clock, Copy, Cube, Gauge, Shield, Tokens, X } from "./icons";
 
 export function Markdown({ text }: { text: string }) {
@@ -143,14 +143,15 @@ function Chip({ children }: { children: React.ReactNode }) {
 
 export type TurnStats = { model: string; tokens: number; seconds: number; tps: number | null; estimated: boolean };
 
-export function StatsRow({ s }: { s: TurnStats }) {
+export function StatsRow({ s, live }: { s: TurnStats; live?: boolean }) {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-muted">
       <Chip>
         <Cube className="size-3.5" /> {s.model}
       </Chip>
-      <span className="inline-flex items-center gap-1.5" title={s.estimated ? "estimado (chars/4)" : "informado pelo provider"}>
-        <Tokens className="size-3.5" /> {s.estimated ? "~" : ""}
+      {live && <span className="size-1.5 animate-pulse rounded-full bg-sky-400" title="gerando: valores em tempo real" />}
+      <span className="inline-flex items-center gap-1.5" title={live ? "contagem em tempo real (aproximada)" : s.estimated ? "estimado (chars/4)" : "informado pelo provider"}>
+        <Tokens className="size-3.5" /> {s.estimated || live ? "~" : ""}
         {s.tokens.toLocaleString("pt-BR")} tokens
       </span>
       <span className="inline-flex items-center gap-1.5">
@@ -217,16 +218,49 @@ const STATUS: Record<string, [string, string]> = {
   pendente: ["não executada", "text-faint"],
 };
 
+/** Lista de tarefas do agente (update_tasks): o que já foi feito, o que está em andamento. */
+export function TasksCard({ tasks, live }: { tasks: Task[]; live?: boolean }) {
+  if (!tasks.length) return null;
+  const done = tasks.filter((t) => t.status === "done").length;
+  return (
+    <div className={`my-3 rounded-2xl border ${live ? "border-sky-500/40" : "border-line"} bg-surface px-4 py-3 text-sm`}>
+      <div className="mb-2 flex items-center gap-2 text-xs text-muted">
+        <Clipboard className="size-3.5" /> Tarefas · {done}/{tasks.length} concluídas
+        {live && <span className="ml-auto animate-pulse text-sky-300">em andamento</span>}
+      </div>
+      <ul className="space-y-1">
+        {tasks.map((t, i) => (
+          <li key={i} className="flex items-start gap-2">
+            <span className={`mt-0.5 grid size-4 shrink-0 place-items-center rounded border text-[10px] ${
+              t.status === "done" ? "border-emerald-500 bg-emerald-600/80 text-white" : t.status === "doing" ? "border-sky-400 text-sky-300" : "border-line text-transparent"
+            }`}>
+              {t.status === "done" ? "✓" : t.status === "doing" ? "›" : ""}
+            </span>
+            <span className={t.status === "done" ? "text-muted line-through decoration-faint" : t.status === "doing" ? "text-fg" : "text-muted"}>
+              {t.text}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+const FILE_TOOLS = new Set(["write_file", "edit_file", "read_file"]);
+
 export function ToolBlock(props: {
   call: ToolCall;
   result?: Message;
   approval?: Approval;
   running: boolean;
   queued?: boolean; // uma chamada anterior da mesma resposta ainda não terminou
+  live?: string; // saída ao vivo (run_command) enquanto não há resultado
+  onOpen?: (path: string, mode: "editor" | "reveal") => void; // abrir no editor / revelar (via runner)
   onDecide: (approved: boolean, alwaysAllow?: boolean) => void;
   children?: React.ReactNode; // passos de um subagente (delegate_task)
 }) {
   const { call, result, approval, running, queued } = props;
+  const filePath = FILE_TOOLS.has(call.name) && typeof call.arguments.path === "string" ? (call.arguments.path as string) : null;
   const waiting = approval !== undefined && !result;
   const status = result?.status ?? (waiting ? "aguardando" : running ? (queued ? "fila" : "executando") : "pendente");
   const [open, setOpen] = useState(false);
@@ -256,6 +290,11 @@ export function ToolBlock(props: {
         <Chevron className="size-4 shrink-0 text-faint" />
       </button>
 
+      {!result && props.live && (
+        <pre className="max-h-48 overflow-auto border-t border-line bg-[#0d0d0d] px-3 py-2 font-mono text-[11px] whitespace-pre-wrap text-muted">
+          {props.live}
+        </pre>
+      )}
       {result?.meta?.attachments && <ToolImages list={result.meta.attachments} />}
       {props.children && <div className="border-t border-line px-3 py-2">{props.children}</div>}
 
@@ -300,6 +339,16 @@ export function ToolBlock(props: {
 
       {open && (
         <div className="space-y-2 border-t border-line p-4 text-xs">
+          {filePath && props.onOpen && (
+            <div className="flex gap-2">
+              <button onClick={() => props.onOpen!(filePath, "editor")} className="rounded-full border border-line px-3 py-1 text-fg hover:bg-raised">
+                Abrir no editor
+              </button>
+              <button onClick={() => props.onOpen!(filePath, "reveal")} className="rounded-full border border-line px-3 py-1 text-fg hover:bg-raised">
+                Revelar na pasta
+              </button>
+            </div>
+          )}
           <div className="text-faint">Argumentos</div>
           <pre className="max-h-64 overflow-auto rounded-lg bg-[#0d0d0d] p-2.5 font-mono whitespace-pre-wrap text-muted">
             {JSON.stringify(call.arguments, null, 2)}
@@ -331,6 +380,7 @@ const EVENT_STYLE: Record<string, string> = {
 
 export function EventNotice({ m }: { m: Message }) {
   const kind = m.meta?.kind ?? "info";
+  if (kind === "tasks") return <TasksCard tasks={m.meta?.tasks ?? []} />;
   if (kind === "summary")
     return (
       <details className="my-3 rounded-2xl border border-line bg-surface px-4 py-2.5 text-sm text-muted">

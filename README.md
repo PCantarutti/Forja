@@ -42,7 +42,8 @@ Para atualizar depois de mudar o código, rode `docker compose up -d --build` de
 |---|---|---|
 | `list_dir`, `read_file` | Lê a pasta de trabalho | não |
 | `write_file`, `edit_file` | Cria e edita arquivos (card com diff) | conforme o **modo de permissão** |
-| `run_command` | `bash` no container Linux, com cwd em `/workspace` (python, git, node, uv) | **sempre**, mesmo com escrita automática |
+| `run_command` | Comando de shell na pasta da conversa: **no seu sistema** (PowerShell/bash via forja-runner) ou, sem o runner, `bash` no container | **sempre**, mesmo com escrita automática |
+| `serve_start`, `serve_status`, `serve_stop` | Servidor de desenvolvimento em segundo plano (log em arquivo), no seu sistema ou no container | `serve_start` **sempre**; `serve_stop` conforme **Escrita** |
 | `web_search` | Busca via SearXNG local (sem chave, sem conta) | não |
 | `fetch_url` | Baixa uma página e devolve o texto. Bloqueia endereços da rede local. | não |
 | `browser_navigate`, `browser_read`, `browser_console` | Abre uma URL no navegador integrado, lê a página como árvore de acessibilidade (com refs `eN`) e o console | não |
@@ -52,9 +53,39 @@ Para atualizar depois de mudar o código, rode `docker compose up -d --build` de
 | `browser_screenshot` | Screenshot da página: aparece no chat para você; vai ao modelo como imagem **só se ele tiver visão** | não |
 | `mcp__<servidor>__<tool>` | Ferramentas dos servidores MCP configurados | sim, a menos que o servidor marque a ferramenta como somente leitura (`readOnlyHint`) |
 
-O `run_command` roda **dentro do container**, não no Windows. Ele só enxerga `/workspace`, tem timeout (padrão 60s, teto `SHELL_TIMEOUT_MAX`) e, ao estourar o tempo, mata o processo e todos os filhos.
+Com o **forja-runner** ligado (veja abaixo), o `run_command` executa **no seu sistema**, na pasta da conversa, com o shell de lá (PowerShell no Windows, bash no Linux/macOS): `npm install`, venvs e servidores ficam nativos. Sem o runner, ele roda `bash` dentro do container do Forja (enxerga os discos montados em `/host`). Nos dois casos há timeout (padrão 60s, teto `SHELL_TIMEOUT_MAX`) e o processo inteiro é morto ao estourar. O modelo pode forçar com `target='container'` ou `target='host'`.
+
+### forja-runner (comandos e servidores no seu sistema)
+
+`tools/forja_runner.py` (só Python padrão) roda **no seu sistema** e recebe do backend os comandos do agente. No Windows, `tools/forja-picker.cmd` já inicia o picker e o runner juntos; no Linux/macOS, `python3 tools/forja_runner.py &`.
+
+- **Token**: gerado na primeira execução em `config/runner-token`. A pasta `config/` é montada no container, então o backend lê o mesmo arquivo; nada para copiar. Toda chamada exige o token.
+- **Rede**: o container só alcança o host por `host.docker.internal`, por isso o runner escuta em `0.0.0.0:3002` (mude com `FORJA_RUNNER_BIND`/`FORJA_RUNNER_PORT`; no `.env` do Forja, `FORJA_RUNNER_URL`). Mantenha a porta fechada no firewall para redes públicas.
+- **Servidores**: `serve_start(name, command)` sobe o processo em segundo plano com log em arquivo (`%TEMP%orja-serve` ou `/tmp/forja-serve`); `serve_status(name)` mostra o log e se está vivo; `serve_stop(name)` encerra a árvore inteira. Servidores no seu sistema aparecem em `http://localhost:PORTA` para você e em `http://host.docker.internal:PORTA` para o navegador integrado.
+- **Aba Instâncias** (coluna direita): lista os servidores que o agente subiu, no seu sistema ou no container, com log ao vivo e botão **Parar**. O número na aba é quantos estão rodando.
+- **Ambiente no prompt**: o system prompt de cada execução descreve onde os comandos rodam (sistema e shell do usuário, versões de node/python/git, pasta da conversa nos dois mundos, URLs dos servidores). O painel *Info* mostra **Comandos em**.
+- Sem o runner, o prompt avisa o modelo que pacotes instalados no container ficam com binários Linux na sua pasta e sugere ligar o runner.
+
+## Trabalhando como no Claude Desktop
+
+- **Alterações**: aba com os arquivos que o agente mudou nesta conversa (diff do antes para o agora, abrir no editor, revelar na pasta) e o **git** da pasta: branch, arquivos alterados com diff, **Commit** (o modelo escreve a mensagem, você edita e confirma), **Criar PR** (push + `gh pr create`, precisa do GitHub CLI onde os comandos rodam) e **Worktree** (branch nova num worktree irmão; a conversa passa a trabalhar lá).
+- **Terminal**: seu shell na pasta da conversa (PowerShell no Windows via runner, senão bash no container). Sem PTY: comandos comuns funcionam, programas de tela cheia não. Um shell por conversa, vivo enquanto o app estiver aberto.
+- **Saída ao vivo**: `run_command` mostra o que o comando imprime enquanto roda, dentro do card.
+- **Tarefas**: em trabalhos com vários passos o agente mantém uma lista (`update_tasks`) que aparece no chat com o que já foi feito.
+- **Fila de mensagens**: enviar durante a execução não bloqueia: a mensagem entra na fila e o agente a recebe no próximo passo.
+- **Notificações e não lidas**: com a aba fora de foco, o sistema avisa quando termina ou quando há aprovação pendente; conversas que terminaram em segundo plano ganham um ponto azul na lista.
+- **Comandos `/`**: digite `/` no campo. Ações do Forja (`/compactar`, `/commit`, `/pr`, `/alteracoes`) e prompts prontos (`/revisar`, `/testar`, `/explicar`). Crie os seus em `.forja/skills/<nome>.md` na pasta da conversa (cabeçalho opcional `description:`; `$ARGUMENTS` recebe o que vier depois do comando).
+- **Hooks**: `.forja/hooks.json` na pasta da conversa roda comandos depois de uma ferramenta, ex.: `{"post_tool": [{"tools": ["write_file", "edit_file"], "command": "npx prettier --write \"{path}\""}]}`. A saída é anexada ao resultado para o modelo ver.
+- **Compactar agora**: botão `compactar` na linha de contexto (ou `/compactar`).
+- **Colar imagem**: Ctrl+V com uma imagem no clipboard vira anexo.
+- **Abrir no editor / revelar**: nos cards de arquivo e no chip da pasta (precisa do runner).
+- **Conversas**: menu `⋯` em cada uma: renomear, fixar no topo, arquivar, exportar em Markdown, apagar (confirmação inline). A busca da barra lateral procura também no conteúdo das mensagens.
+- **Agrupadas por pasta**: na seção Agente, a barra lateral agrupa as conversas pela pasta de trabalho (grupos recolhíveis; o lápis no cabeçalho do grupo abre uma conversa nova naquela pasta). A busca desfaz o agrupamento.
+- **Seleção múltipla**: botão *Selecionar* na barra lateral; marque conversas (ou uma pasta inteira pelo cabeçalho) e aplique arquivar, desarquivar, fixar, desafixar ou apagar em lote. Conversas em execução não são apagadas.
 
 ## Navegador integrado
+
+Os botões **Info**, **Navegador**, **Terminal**, **Alterações**, **Instâncias** e **Planos** ficam sempre visíveis no topo direito do chat. Clicar abre o painel lateral naquela aba; clicar de novo recolhe. Planos lista o que o agente propôs nesta conversa no modo Plano, com status e atalho para o card no chat. Só a aba Navegador é redimensionável pela borda; as outras têm largura fixa (Planos é mais larga). O painel lembra, por conversa, se estava aberto e em qual aba; conversa nova começa recolhida.
 
 Um Chromium (Playwright, `chromium-headless-shell`) roda dentro do container do backend. O agente o controla pelas ferramentas `browser_*`; a aba **Navegador** da coluna direita mostra a tela ao vivo (screencast) e abre sozinha na primeira chamada. A coluna é redimensionável pela borda e recolhível; recolhida, a sessão continua viva no backend.
 
@@ -124,7 +155,7 @@ Como no Claude Desktop, cada conversa tem a sua pasta. Ela aparece no chip ao la
 
 O Forja roda no Docker e a interface roda no navegador, e nenhum dos dois consegue abrir o Explorer e receber o caminho da pasta. Por isso existe um ajudante pequeno, `tools/forja_picker.py` (só Python padrão), que roda **no seu sistema**. Ele escuta só em `127.0.0.1:3001` e só atende a interface do Forja: pedidos vindos de outros sites são recusados.
 
-- **Windows**: dê dois cliques em `toolsorja-picker.cmd` (roda sem janela). Para abrir junto com o Windows: `Win+R` → `shell:startup` → cole um atalho para esse `.cmd`.
+- **Windows**: dê dois cliques em `tools/forja-picker.cmd` (roda sem janela; inicia o picker e o runner). Se só o runner estiver ligado, o botão *Abrir seletor do sistema* sobe o picker sozinho. Para abrir junto com o Windows: `Win+R` → `shell:startup` → cole um atalho para esse `.cmd`.
 - **Linux**: `python3 tools/forja_picker.py &`. Usa o `zenity` (GNOME) ou o `kdialog` (KDE). Sem eles, usa o Tk (`sudo apt install python3-tk`). Para iniciar no login, crie um serviço de usuário:
 
   ```ini
@@ -236,6 +267,7 @@ Antes de cada chamada, o Forja estima o tamanho do prompt. Se passar de `COMPACT
 | `HOST_MOUNTS` | `C=/host/c` | O que está montado no container, como `prefixo=pasta` (ex.: `C=/host/c`, `/home/voce=/host/home`) |
 | `FORJA_PICKER_URL` | `http://127.0.0.1:3001` | Endereço do forja-picker, visto pelo navegador |
 | `FORJA_PORT` | `3000` | Porta da interface no host |
+| `FORJA_RUNNER_URL` | `http://host.docker.internal:3002` | forja-runner (comandos e servidores no seu sistema). Vazio = sempre no container |
 | `OLLAMA_URL` | `http://host.docker.internal:11434/v1` | Endpoint do Ollama |
 | `LMSTUDIO_URL` | `http://host.docker.internal:1234/v1` | Endpoint do LM Studio |
 | `NUM_CTX` | `32768` | Janela de contexto enviada ao Ollama |
@@ -324,7 +356,8 @@ $env:API_URL="http://127.0.0.1:3000"; npx vite
 ```
 backend/app/
   tools.py       registry de ferramentas + confinamento em /workspace + ferramentas de arquivo
-  shell.py       run_command
+  shell.py       run_command e serve_* (no seu sistema via runner, ou no container)
+  runner.py      cliente do forja-runner
   web.py         web_search (SearXNG) e fetch_url
   browser.py     navegador integrado (Playwright): sessão, screencast, input do usuário e ferramentas browser_*
   mcp_client.py  conexão com servidores MCP (stdio/HTTP) e registro das ferramentas

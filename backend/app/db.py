@@ -21,6 +21,8 @@ class Conversation(Base):
     title: Mapped[str] = mapped_column(String(200), default="Nova conversa")
     kind: Mapped[str] = mapped_column(String(10), default="agent")  # chat | agent (seções separadas)
     workspace: Mapped[str | None] = mapped_column(String(1000), nullable=True)  # pasta do Windows; None = padrão
+    pinned: Mapped[bool] = mapped_column(default=False)    # fixada no topo da lista
+    archived: Mapped[bool] = mapped_column(default=False)  # fora da lista principal
     created_at: Mapped[datetime] = mapped_column(default=_now)
     updated_at: Mapped[datetime] = mapped_column(default=_now)
     messages: Mapped[list["Message"]] = relationship(
@@ -92,6 +94,10 @@ def _migrate() -> None:
         cols = {row[1] for row in c.exec_driver_sql("PRAGMA table_info(conversations)")}
         if "workspace" not in cols:
             c.exec_driver_sql("ALTER TABLE conversations ADD COLUMN workspace VARCHAR(1000)")
+        if "pinned" not in cols:
+            c.exec_driver_sql("ALTER TABLE conversations ADD COLUMN pinned BOOLEAN DEFAULT 0")
+        if "archived" not in cols:
+            c.exec_driver_sql("ALTER TABLE conversations ADD COLUMN archived BOOLEAN DEFAULT 0")
         if "kind" not in cols:
             # Conversas antigas: quem usou ferramenta era Agente; o resto vira Chat.
             c.exec_driver_sql("ALTER TABLE conversations ADD COLUMN kind VARCHAR(10) DEFAULT 'agent'")
