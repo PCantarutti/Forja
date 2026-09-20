@@ -22,6 +22,7 @@ import asyncio
 import base64
 import contextvars
 import json
+import math
 import re
 import time
 from collections import deque
@@ -38,6 +39,7 @@ MIN_VIEWPORT, MAX_VIEWPORT = (320, 240), (3840, 2400)
 NAV_TIMEOUT = 15_000
 ACT_TIMEOUT = 5_000
 JPEG_QUALITY = 75  # screenshot que vai ao modelo
+CAST_JPEG_QUALITY = 85  # espelho ao vivo: texto ainda nítido, frame 3-5x menor que PNG
 MAX_TABS = 8
 SCRATCH = "0"  # sessão do painel quando nenhuma conversa está aberta
 REF_RE = re.compile(r"^(?:ref=)?((?:f\d+)?e\d+)$")  # e12 na página principal; f1e12 dentro de frame
@@ -64,6 +66,7 @@ class Session:
         self._cast_mime = "image/png"
         self._lock = asyncio.Lock()
         self.viewport = dict(VIEWPORT)  # segue o tamanho do painel na UI
+        self.dpr = 1.0  # devicePixelRatio da tela onde o painel está; limita a resolução do espelho
         self.logs: deque[str] = deque(maxlen=200)
         # Espelhamento: último frame + versão; assinantes esperam a versão mudar (lento pula frames).
         self.latest: dict | None = None
@@ -261,10 +264,12 @@ class Session:
             return
         self._cdp = cdp = await self._ctx.new_cdp_session(self.active)
         cdp.on("Page.screencastFrame", lambda ev: asyncio.ensure_future(self._on_frame(cdp, ev)))
-        scale = self._m.scale or 1
+        # Render em N x, mas o frame nunca sai maior do que a tela consegue mostrar: em monitor 1x, um espelho
+        # 2x é 4x mais pixels para decodificar sem ganho nenhum.
+        scale = min(self._m.scale or 1, max(1, math.ceil(self.dpr)))
         params: dict = {"maxWidth": self.viewport["width"] * scale, "maxHeight": self.viewport["height"] * scale}
         if config.BROWSER_STREAM == "jpeg":
-            params.update(format="jpeg", quality=90)
+            params.update(format="jpeg", quality=CAST_JPEG_QUALITY)
             self._cast_mime = "image/jpeg"
         else:
             params["format"] = "png"
@@ -359,13 +364,14 @@ class Session:
         except Exception as e:
             raise ToolError(_err(e)) from e
 
-    async def set_viewport(self, width: int, height: int) -> None:
+    async def set_viewport(self, width: int, height: int, dpr: float = 1.0) -> None:
         """Painel da UI redimensionou: as abas passam a ter exatamente esse tamanho (px de CSS)."""
         w = max(MIN_VIEWPORT[0], min(MAX_VIEWPORT[0], int(width)))
         h = max(MIN_VIEWPORT[1], min(MAX_VIEWPORT[1], int(height)))
-        if (w, h) == (self.viewport["width"], self.viewport["height"]):
+        dpr = max(1.0, min(3.0, float(dpr or 1)))
+        if (w, h, dpr) == (self.viewport["width"], self.viewport["height"], self.dpr):
             return
-        self.viewport = {"width": w, "height": h}
+        self.viewport, self.dpr = {"width": w, "height": h}, dpr
         self.touch()
         if self.open:
             for p in list(self.pages):

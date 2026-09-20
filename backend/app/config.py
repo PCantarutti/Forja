@@ -28,7 +28,7 @@ COMPACT_AT = float(os.getenv("COMPACT_AT", "0.8"))  # fração da janela que dis
 # Navegador integrado
 BROWSER_IDLE_MINUTES = int(os.getenv("BROWSER_IDLE_MINUTES", "30"))  # 0 = nunca fechar sessão ociosa
 BROWSER_SCALE = int(os.getenv("BROWSER_SCALE", "2"))                  # render 1x..3x (vale ao (re)lançar o Chromium)
-BROWSER_STREAM = os.getenv("BROWSER_STREAM", "png")                   # png (sem perda) | jpeg (mais leve)
+BROWSER_STREAM = os.getenv("BROWSER_STREAM", "jpeg")                  # jpeg (leve, padrão) | png (sem perda, 3-5x mais pesado)
 
 # type: ollama (API nativa, aceita num_ctx) | lmstudio (OpenAI + janela do modelo carregado) | openai
 PROVIDERS = {

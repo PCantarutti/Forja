@@ -29,6 +29,9 @@ export default function BrowserPanel(props: { conv: string; onState: (s: Browser
   // Movimento do mouse: no máximo um POST em voo; o último movimento pendente vence (coalescido).
   const moveInFlight = useRef(false);
   const movePending = useRef<{ x: number; y: number } | null>(null);
+  // Roda: idem, somando os deltas que chegaram enquanto o POST anterior estava em voo.
+  const wheelInFlight = useRef(false);
+  const wheelPending = useRef<{ x: number; y: number; delta_x: number; delta_y: number } | null>(null);
 
   /** A página do Chromium tem exatamente o tamanho da área visível (como a janela do Claude Desktop). */
   function syncViewport() {
@@ -39,7 +42,7 @@ export default function BrowserPanel(props: { conv: string; onState: (s: Browser
     if (width < 320 || height < 240) return;
     if (wanted.current?.width === width && wanted.current?.height === height) return;
     wanted.current = { width, height };
-    api.post(`/browser/viewport${q}`, { width, height }).catch(() => {});
+    api.post(`/browser/viewport${q}`, { width, height, dpr: window.devicePixelRatio || 1 }).catch(() => {});
   }
 
   // Troca de conversa: zera o espelho e assina a sessão dela.
@@ -95,7 +98,7 @@ export default function BrowserPanel(props: { conv: string; onState: (s: Browser
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const c = coords(e.clientX, e.clientY);
-      if (c) send({ type: "wheel", ...c, delta_x: e.deltaX, delta_y: e.deltaY });
+      if (c) sendWheel({ ...c, delta_x: e.deltaX, delta_y: e.deltaY });
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
@@ -122,6 +125,22 @@ export default function BrowserPanel(props: { conv: string; onState: (s: Browser
       }
     } finally {
       moveInFlight.current = false;
+    }
+  }
+
+  async function sendWheel(w: { x: number; y: number; delta_x: number; delta_y: number }) {
+    const p = wheelPending.current;
+    wheelPending.current = p ? { ...w, delta_x: p.delta_x + w.delta_x, delta_y: p.delta_y + w.delta_y } : w;
+    if (wheelInFlight.current) return;
+    wheelInFlight.current = true;
+    try {
+      while (wheelPending.current) {
+        const next = wheelPending.current;
+        wheelPending.current = null;
+        await api.post(`/browser/input${q}`, { type: "wheel", ...next }).catch(() => {});
+      }
+    } finally {
+      wheelInFlight.current = false;
     }
   }
 
