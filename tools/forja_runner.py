@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import codecs
 import secrets
 import shutil
 import signal
@@ -285,7 +286,11 @@ def term_start(cwd: str) -> dict:
     proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             **_popen_kwargs())
     tid = secrets.token_hex(6)
-    t = {"proc": proc, "buf": "", "cond": threading.Condition(), "cwd": cwd}
+    # `written` é o total já escrito desde o início, e é ele que vira o cursor do cliente. Com
+    # `len(buf)` o cursor empacava em MAX_TERM_BUFFER assim que o buffer saturava, `len(buf) <=
+    # cursor` virava sempre verdade e o terminal congelava de vez — bastava um log de build.
+    t = {"proc": proc, "buf": "", "written": 0, "cond": threading.Condition(), "cwd": cwd,
+         "lock": threading.Lock(), "decoder": codecs.getincrementaldecoder("utf-8")("replace")}
     _TERMS[tid] = t
     if WINDOWS:  # saída em UTF-8 e sem barra de progresso quebrando o texto
         proc.stdin.write((PS_PREAMBLE + "$ProgressPreference='SilentlyContinue'\n").encode("utf-8"))
@@ -296,8 +301,14 @@ def term_start(cwd: str) -> dict:
             chunk = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(1)
             if not chunk:
                 break
+            # Decodificador incremental: caractere multibyte partido entre duas leituras do pipe
+            # virava U+FFFD com o decode por chunk.
+            texto = t["decoder"].decode(chunk).replace(chr(13) + chr(10), chr(10))
+            if not texto:
+                continue
             with t["cond"]:
-                t["buf"] = (t["buf"] + chunk.decode("utf-8", "replace").replace("\r\n", "\n"))[-MAX_TERM_BUFFER:]
+                t["written"] += len(texto)
+                t["buf"] = (t["buf"] + texto)[-MAX_TERM_BUFFER:]
                 t["cond"].notify_all()
         with t["cond"]:
             t["cond"].notify_all()
@@ -312,8 +323,9 @@ def term_input(tid: str, text: str) -> None:
         raise KeyError(tid)
     if t["proc"].poll() is not None:
         raise ValueError("o shell deste terminal já encerrou")
-    t["proc"].stdin.write((text.rstrip("\n") + "\n").encode("utf-8"))
-    t["proc"].stdin.flush()
+    with t["lock"]:  # dois POST de input não podem intercalar no stdin do shell
+        t["proc"].stdin.write((text.rstrip(chr(10)) + chr(10)).encode("utf-8"))
+        t["proc"].stdin.flush()
 
 
 def term_poll(tid: str, cursor: int) -> dict:
@@ -322,13 +334,16 @@ def term_poll(tid: str, cursor: int) -> dict:
         raise KeyError(tid)
     deadline = time.monotonic() + TERM_POLL_WAIT
     with t["cond"]:
-        while len(t["buf"]) <= cursor and t["proc"].poll() is None:
+        while t["written"] <= cursor and t["proc"].poll() is None:
             left = deadline - time.monotonic()
             if left <= 0:
                 break
             t["cond"].wait(left)
-        text = t["buf"][cursor:] if cursor < len(t["buf"]) else ""
-        return {"text": text, "cursor": len(t["buf"]), "alive": t["proc"].poll() is None}
+        # Cliente atrasado recebe o que sobrou do buffer, não o vazio: perde o miolo de uma saída
+        # enorme, mas o terminal continua vivo — que é o ponto.
+        comeco = t["written"] - len(t["buf"])
+        text = t["buf"][max(0, cursor - comeco):] if cursor < t["written"] else ""
+        return {"text": text, "cursor": t["written"], "alive": t["proc"].poll() is None}
 
 
 def term_close(tid: str) -> None:

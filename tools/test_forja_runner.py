@@ -114,6 +114,31 @@ def test_terminal_session_roundtrip(server, tmp_path):
     assert status == 404
 
 
+def test_terminal_survives_a_full_buffer(monkeypatch, tmp_path):
+    """O cursor é posição absoluta, não índice no buffer.
+
+    Enquanto era `len(buf)`, ele empacava em MAX_TERM_BUFFER assim que a saída passava do teto:
+    `len(buf) <= cursor` virava sempre verdade e o terminal devolvia vazio para sempre. Um log de
+    build matava o terminal, sem mensagem nenhuma.
+    """
+    monkeypatch.setattr(fr, "TERM_POLL_WAIT", 0.05)
+    info = fr.term_start(str(tmp_path))
+    tid = info["id"]
+    try:
+        t = fr._TERMS[tid]
+        with t["cond"]:  # simula a saída já ter estourado o buffer
+            t["written"] = fr.MAX_TERM_BUFFER + 5_000
+            t["buf"] = "x" * fr.MAX_TERM_BUFFER
+        cursor = fr.term_poll(tid, 0)["cursor"]
+        assert cursor == fr.MAX_TERM_BUFFER + 5_000
+        with t["cond"]:
+            t["written"] += len("depois-do-estouro")
+            t["buf"] = (t["buf"] + "depois-do-estouro")[-fr.MAX_TERM_BUFFER:]
+        assert fr.term_poll(tid, cursor)["text"] == "depois-do-estouro"
+    finally:
+        fr.term_close(tid)
+
+
 def test_open_rejects_missing_path(server):
     status, body = call(f"{server}/open", "POST", {"path": "C:/nao/existe/x.txt", "mode": "editor"})
     assert status == 400 and "não existe" in body["error"]
