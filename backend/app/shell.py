@@ -84,10 +84,19 @@ def _host_cwd(cwd: Path) -> str:
 
 # ------------------------------------------------------------------ run_command
 
+def background(root: Path, args: dict) -> str:
+    """Comando demorado (build, suíte de teste) vira processo em segundo plano, o mesmo mecanismo dos
+    servidores: o turno não fica preso e o modelo acompanha com serve_status."""
+    nome = _safe_name(str(args.get("name") or "").strip() or args["command"].split()[0])
+    return serve_start(root, {**args, "name": nome}, kind="Processo")
+
+
 def run_command(root: Path, args: dict) -> str:
     command = args["command"].strip()
     if not command:
         raise ToolError("command vazio.")
+    if args.get("background"):
+        return background(root, args)
     cwd = resolve_path(root, args.get("cwd"))
     timeout = max(1, min(int(args.get("timeout") or 60), config.SHELL_TIMEOUT_MAX))
     target = pick_target(args.get("target"), runner.online(), workspace.to_host(cwd))
@@ -188,7 +197,7 @@ def _url_hint(target: str) -> str:
     return "Servidor roda no container: no navegador integrado use http://localhost:PORTA."
 
 
-def serve_start(root: Path, args: dict) -> str:
+def serve_start(root: Path, args: dict, kind: str = "Servidor") -> str:
     name = _safe_name(str(args.get("name") or "server"))
     command = str(args["command"]).strip()
     if not command:
@@ -208,8 +217,10 @@ def serve_start(root: Path, args: dict) -> str:
             alive = _local_info(name)["alive"]
     except runner.RunnerError as e:
         raise ToolError(str(e)) from e
-    status = "rodando" if alive else "JÁ ENCERROU (veja o log: provável erro)"
-    return (f"Servidor '{name}' iniciado em {_where(target)} (pid {info.get('pid')}), {status}.\n{_url_hint(target)}\n"
+    status = "rodando" if alive else ("JÁ ENCERROU (veja o log: provável erro)" if kind == "Servidor"
+                                      else "JÁ TERMINOU (o log abaixo é o resultado)")
+    dica = f"{_url_hint(target)}\n" if kind == "Servidor" else ""
+    return (f"{kind} '{name}' iniciado em {_where(target)} (pid {info.get('pid')}), {status}.\n{dica}"
             f"Use serve_status(name='{name}') para acompanhar e serve_stop para encerrar.\n--- log ---\n{log or '(vazio ainda)'}")
 
 
@@ -292,11 +303,16 @@ register(Tool(
     "run_command",
     "Executa um comando de shell na pasta da conversa e devolve a saída (veja o bloco Ambiente: sistema do "
     "usuário via forja-runner, ou bash no container). Use para testes, scripts, git, instalar pacotes. "
-    "NÃO use para servidores (fica preso até o timeout): use serve_start. Sem stdin.",
+    "NÃO use para servidores (fica preso até o timeout): use serve_start. Comando demorado: background=true. "
+    "Sem stdin.",
     {"type": "object", "properties": {
         "command": {"type": "string", "description": "Comando (PowerShell no Windows, bash no Linux/macOS/container)"},
         "cwd": {"type": "string", "description": "Subpasta da pasta de trabalho. Padrão: '.'"},
         "timeout": {"type": "integer", "description": f"Segundos (padrão 60, máx {config.SHELL_TIMEOUT_MAX})"},
+        "background": {"type": "boolean",
+                       "description": "Roda em segundo plano e devolve na hora: use para o que passa de ~1 min "
+                                      "(build, suíte de teste longa). Acompanhe com serve_status."},
+        "name": {"type": "string", "description": "Apelido do processo em background, ex.: build, testes"},
         "target": TARGET},
      "required": ["command"]},
     run_command, mutating=True, preview=command_preview, always_ask=True))
