@@ -1309,6 +1309,7 @@ export default function App() {
                         live={running && i > lastUserIndex}
                         forceOpen={seg.items.some((p) => p.kind === "tool" && !!approvals[p.call.id] && !results.has(p.call.id))}
                         renderTool={toolNode}
+                        onOpen={openPath}
                       />
                     ),
                   )}
