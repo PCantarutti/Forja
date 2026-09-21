@@ -27,6 +27,7 @@ async def lifespan(_app):
     # Referência forte das tasks de fundo: o loop só guarda referência fraca, e o coletor de lixo
     # pode levar uma execução no meio. Mesmo motivo de pesquisa/comparar.
     vivas: set = set()
+    checkpoints.podar_antigos()  # desfazer de mais de um mês atrás: o banco não cresce para sempre
     # Espelho em Markdown: gera o que falta (banco anterior ao espelho) e limpa .md órfão.
     print(f"Forja: conversas espelhadas em {mirror.ROOT} ({mirror.sync()} arquivo(s) gerado(s))", flush=True)
     # MCP conecta em background: npx/uvx podem demorar e a API não deve esperar (o painel mostra "connecting").
