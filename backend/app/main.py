@@ -3,9 +3,11 @@ import json
 from contextlib import asynccontextmanager
 
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
+                               StreamingResponse)
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -33,6 +35,36 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="Forja", lifespan=lifespan)
+
+
+# ------------------------------------------------------------------ fronteira da API
+# O compose publica a interface em 0.0.0.0:7001, e o nginx repassa /api para cá. Uma página que o
+# usuário visite no navegador consegue disparar POST simples contra esse endereço — o navegador
+# manda a requisição, só não deixa a página LER a resposta. Como daqui saem execução de shell
+# (/api/term) e abrir arquivo (/api/open), a requisição precisa ter vindo da própria interface.
+#
+# A checagem é `Origin` contra o `Host` do pedido, que é o CSRF clássico: o navegador nunca deixa a
+# página mentir em nenhum dos dois, e isso continua valendo com o Forja aberto de outra máquina da
+# rede, que é um uso legítimo aqui. Requisição sem `Origin` (curl, o próprio runner) passa: quem a
+# faz já está dentro da rede que alcança a porta, e não é esse o vetor.
+#
+# Ver o mesmo no repo Desktop, em cb83369 e 4dc3ebe — lá existe também um token por execução, que
+# o Electron injeta na interface pelo preload. Aqui quem serve a interface é o nginx, que não tem
+# onde guardar esse segredo sem pedir algo do usuário.
+
+
+def mesma_origem(origin: str, host: str) -> bool:
+    """A requisição saiu da própria interface do Forja, e não de outra página aberta no navegador."""
+    alvo = urlparse(origin)
+    return bool(host) and alvo.scheme in ("http", "https") and alvo.netloc == host
+
+
+@app.middleware("http")
+async def fronteira(request, call_next):
+    origin = request.headers.get("origin")
+    if origin and not mesma_origem(origin, request.headers.get("host", "")):
+        return JSONResponse({"detail": "Origem não autorizada"}, status_code=403)
+    return await call_next(request)
 
 
 @app.get("/api/config")

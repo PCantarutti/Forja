@@ -187,6 +187,8 @@ Se o ajudante não estiver rodando, o chip abre o **seletor interno** do Forja: 
 
 **Segurança (igual ao Claude Desktop)**: o `run_command` roda bash no container e **enxerga o disco montado inteiro**. A proteção é a aprovação: ele sempre pede confirmação, exceto nos comandos que você liberou em *Permissões*. Evite regras largas (`*`) e leia o comando antes de aprovar.
 
+**A porta publicada não aceita pedido de qualquer página.** O compose publica a interface em `0.0.0.0:7001` — o que é de propósito, para você abrir o Forja de outro computador da rede —, e isso significa que uma página web que você visite também alcança esse endereço: o navegador manda a requisição, ele só não deixa a página ler a resposta. Como de `/api` saem execução de shell e abrir arquivo, a API recusa qualquer requisição cujo `Origin` não seja a própria interface.
+
 **Outro disco** (ex.: `D:`): em `docker-compose.yml`, acrescente o volume `- D:/:/host/d` no backend e defina `HOST_MOUNTS=C=/host/c,D=/host/d` no `.env`.
 
 **Linux**: monte a sua home (ou outra raiz) e diga o prefixo: volume `- /home/voce:/host/home` e `HOST_MOUNTS=/home/voce=/host/home`. O formato é `prefixo-no-seu-sistema=pasta-no-container`, e vale mais de um separado por vírgula. O mais específico ganha. O `HOST_DRIVE_C` só faz sentido no Windows: no Linux, apague essa linha do compose. Para **não** expor o disco inteiro, troque `HOST_DRIVE_C=C:/` por uma pasta (ex.: `C:/Users/pedro`). Aí o seletor só enxerga o que está dentro dela, mas os caminhos continuam começando em `C:/`.
