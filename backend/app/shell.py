@@ -28,6 +28,8 @@ LOG_DIR = Path(tempfile.gettempdir()) / "forja-serve"
 _LOCAL: dict[str, dict] = {}  # servidores iniciados no container: nome -> {proc, log, command, cwd, started}
 # Saída ao vivo: o agente define um sink por chamada e cada linha do comando vira evento na UI.
 OUTPUT_SINK: contextvars.ContextVar[Callable[[str], None] | None] = contextvars.ContextVar("forja_output_sink", default=None)
+# Conversa do turno atual: fica gravada no processo para a aba Instâncias separar por conversa.
+CONV: contextvars.ContextVar[str] = contextvars.ContextVar("forja_conv", default="")
 
 
 def exec_in(root: Path, command: str, timeout: int = 60) -> tuple[int, str]:
@@ -171,7 +173,8 @@ def _local_start(name: str, command: str, cwd: Path) -> dict:
     fh = open(log, "wb")
     proc = subprocess.Popen(["bash", "-lc", command], cwd=cwd, stdout=fh, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL, start_new_session=True)
-    _LOCAL[name] = {"proc": proc, "log": str(log), "command": command, "cwd": str(cwd), "started": time.time()}
+    _LOCAL[name] = {"proc": proc, "log": str(log), "command": command, "cwd": str(cwd), "started": time.time(),
+                    "conv": CONV.get()}
     return _local_info(name)
 
 
@@ -179,7 +182,8 @@ def _local_info(name: str) -> dict:
     s = _LOCAL[name]
     code = s["proc"].poll()
     return {"name": name, "pid": s["proc"].pid, "alive": code is None, "exit_code": code, "command": s["command"],
-            "cwd": s["cwd"], "log": s["log"], "uptime": int(time.time() - s["started"]), "where": "container"}
+            "cwd": s["cwd"], "log": s["log"], "uptime": int(time.time() - s["started"]), "where": "container",
+            "conv": s.get("conv") or ""}
 
 
 def _local_log(name: str, tail: int) -> str:

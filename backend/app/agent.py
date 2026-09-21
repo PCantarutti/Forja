@@ -582,6 +582,7 @@ def _event(conv_id: int, kind: str, text: str, to_model: bool = False) -> dict:
 
 async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[dict]:
     browser.CURRENT_KEY.set(str(conv_id))  # ferramentas browser_* agem na sessão desta conversa
+    shell.CONV.set(str(conv_id))           # processo de fundo fica marcado com a conversa que o subiu
     yield {"type": "run_started", "run_id": run.id}
 
     with db.session() as s:
