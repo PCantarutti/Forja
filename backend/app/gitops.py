@@ -2,7 +2,7 @@
 
 Os comandos rodam onde o run_command rodaria (sistema do usuário via runner, senão container), na
 pasta da conversa. A mensagem de commit e o corpo do PR vão por arquivo (`.forja/`) para não brigar
-com as aspas do PowerShell.
+com as aspas do PowerShell; o que sobra interpolado passa por `shell.quoter`.
 """
 from __future__ import annotations
 
@@ -67,7 +67,8 @@ def status(root: Path) -> dict:
 
 def diff(root: Path, path: str | None = None) -> str:
     """Diff do working tree (staged + unstaged) contra HEAD; untracked vira 'arquivo novo'."""
-    target = f' -- "{path}"' if path else ""
+    q = shell.quoter(root)
+    target = f" -- {q(path)}" if path else ""
     out = _run(root, f"git diff HEAD{target}", 60)[1]
     if path and not out.strip():
         p = root / path
@@ -112,10 +113,11 @@ def commit(root: Path, message: str) -> dict:
     if not _run(root, "git diff --cached --quiet", 30)[0]:
         raise ToolError("Nada para commitar: a árvore está limpa.")
     rel = _write_forja_file(root, "commit-msg.txt", message)
+    q = shell.quoter(root)
     try:
         # .forja/ pode não estar no .gitignore: não deixa o arquivo da mensagem entrar no commit.
-        _run(root, f'git reset -q -- "{rel}"', 20)
-        out = _ok(root, f'git commit -F "{rel}"', 120)
+        _run(root, f"git reset -q -- {q(rel)}", 20)
+        out = _ok(root, f"git commit -F {q(rel)}", 120)
     finally:
         try:
             (root / rel).unlink()
@@ -137,7 +139,8 @@ def create_pr(root: Path, title: str, body: str) -> dict:
     push = _ok(root, "git push -u origin HEAD", 180)
     rel = _write_forja_file(root, "pr-body.md", body or "")
     try:
-        cmd = f'gh pr create --title "{title.replace(chr(34), chr(39))}" --body-file "{rel}"' if title else "gh pr create --fill"
+        q = shell.quoter(root)
+        cmd = (f"gh pr create --title {q(title)} --body-file {q(rel)}" if title else "gh pr create --fill")
         out = _ok(root, cmd, 120)
     finally:
         try:
@@ -156,12 +159,13 @@ def worktree(root: Path, branch: str) -> dict:
     # `top` vem no formato de onde o git rodou (Windows ou container): traduz para o container para criar o nome.
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", branch).strip("-") or "forja"
     name = f"{top.name}-{slug}"
+    q = shell.quoter(root)
     if str(top)[1:3] == ":/":  # caminho do Windows: cria via git (que roda lá) e traduz depois
         dest_host = f"{top.parent.as_posix()}/{name}"
-        _ok(root, f'git worktree add "{dest_host}" -b "{branch}"', 120)
+        _ok(root, f"git worktree add {q(dest_host)} -b {q(branch)}", 120)
         return {"path": workspace.normalize(dest_host), "branch": branch}
     dest = top.parent / name
-    _ok(root, f'git worktree add "{dest}" -b "{branch}"', 120)
+    _ok(root, f"git worktree add {q(dest)} -b {q(branch)}", 120)
     host = workspace.to_host(dest)
     if not host:
         raise ToolError(f"Worktree criado em {dest}, mas fora das pastas montadas: não dá para usá-lo como pasta da conversa.")

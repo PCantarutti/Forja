@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextvars
 import os
+import shlex
 import signal
 import subprocess
 import tempfile
@@ -47,6 +48,26 @@ def exec_in(root: Path, command: str, timeout: int = 60) -> tuple[int, str]:
     except subprocess.TimeoutExpired:
         return 124, f"Timeout ({timeout}s)"
     return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+
+def quote(value: str, target: str = "container") -> str:
+    """Um valor como argumento literal do shell, sem interpolação e sem virar outro comando.
+
+    A aspa simples não interpola nem no PowerShell nem no bash; o que muda entre eles é só como se
+    escapa a própria aspa simples (o PowerShell dobra, o POSIX fecha e reabre). Por isso o alvo
+    importa: aqui o mesmo comando pode ir para o PowerShell do usuário, pelo runner, ou para o bash
+    do container.
+    """
+    text = str(value)
+    if target == "host" and (runner.current() or {}).get("shell") in ("powershell", "pwsh"):
+        return "'" + text.replace("'", "''") + "'"
+    return shlex.quote(text)
+
+
+def quoter(root: Path):
+    """A função de citação certa para os comandos que vão rodar nesta pasta (ver `quote`)."""
+    alvo = pick_target(None, runner.online(), workspace.to_host(root))
+    return lambda valor: quote(valor, alvo)
 
 
 def _truncate(text: str) -> str:
