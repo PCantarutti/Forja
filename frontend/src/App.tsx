@@ -188,6 +188,8 @@ export default function App() {
   const runId = useRef<string | null>(null);
   const streamCtl = useRef<AbortController | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
+  // Só acompanha o fim da conversa enquanto o usuário estiver no fim: se ele subir, a rolagem fica onde está.
+  const stick = useRef(true);
 
   const update = (p: Partial<Settings>) => setSettings((s) => ({ ...s, ...p }));
 
@@ -277,8 +279,13 @@ export default function App() {
   }, [settings.model]);
 
   useEffect(() => {
-    bottom.current?.scrollIntoView({ block: "end" });
+    if (stick.current) bottom.current?.scrollIntoView({ block: "end" });
   }, [messages, draft, approvals]);
+
+  // Abrir outra conversa volta a colar no fim.
+  useEffect(() => {
+    stick.current = true;
+  }, [currentId]);
 
   function refreshConversations(kind: Section = section) {
     api
@@ -872,7 +879,8 @@ export default function App() {
     // Contexto ocupado após a última resposta = prompt + saída (é o que entra na próxima requisição).
     const used = lastStats ? lastStats.prompt_tokens + lastStats.tokens : (ctx?.used ?? null);
     const max = ctx?.max ?? lastStats?.ctx_max ?? null;
-    return { used, max, out: lastTurn?.tokens ?? null, avg };
+    const models = [...new Set(all.map((s) => s.model).filter(Boolean))];
+    return { used, max, out: lastTurn?.tokens ?? null, avg, models };
   }, [messages, turns, ctx]);
 
   function changeSection(next: Section) {
@@ -1028,6 +1036,10 @@ export default function App() {
 
         <div
           className="flex-1 overflow-y-auto"
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+          }}
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => {
             e.preventDefault();
@@ -1332,6 +1344,8 @@ export default function App() {
                   avg={summary.avg}
                   canCompact={currentId !== null && !running}
                   onCompact={compactNow}
+                  provider={settings.provider}
+                  models={summary.models}
                 />
                 <ModelPicker
                   provider={settings.provider}
@@ -1374,7 +1388,7 @@ export default function App() {
         {right.tab === "browser" ? (
           <BrowserPanel conv={browserKey} onState={(s) => setBrowserOpen(s.open)} />
         ) : right.tab === "servers" ? (
-          <ServersPanel onCount={setServersRunning} />
+          <ServersPanel onCount={setServersRunning} onOpen={openConversation} />
         ) : right.tab === "terminal" ? (
           <TerminalPanel conv={browserKey} />
         ) : right.tab === "changes" ? (
