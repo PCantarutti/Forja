@@ -26,7 +26,8 @@ from .tools import Tool, ToolError, register, resolve_path
 
 MAX_OUTPUT = 20_000
 LOG_DIR = Path(tempfile.gettempdir()) / "forja-serve"
-_LOCAL: dict[str, dict] = {}  # servidores iniciados no container: nome -> {proc, log, command, cwd, started}
+_LOCAL: dict[str, dict] = {}  # servidores iniciados no container: nome -> {proc, log, fh, command, cwd, started}
+_local_lock = threading.Lock()  # stop/clear mexem no dict enquanto list_servers lê, e ambos rodam em thread
 # Saída ao vivo: o agente define um sink por chamada e cada linha do comando vira evento na UI.
 OUTPUT_SINK: contextvars.ContextVar[Callable[[str], None] | None] = contextvars.ContextVar("forja_output_sink", default=None)
 # Conversa do turno atual: fica gravada no processo para a aba Instâncias separar por conversa.
@@ -187,16 +188,39 @@ def _safe_name(name: str) -> str:
 
 def _local_start(name: str, command: str, cwd: Path) -> dict:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    old = _LOCAL.get(name)
-    if old and old["proc"].poll() is None:
-        os.killpg(old["proc"].pid, signal.SIGKILL)  # mesmo nome = reinicia
-    log = LOG_DIR / f"{name}.log"
-    fh = open(log, "wb")
-    proc = subprocess.Popen(["bash", "-lc", command], cwd=cwd, stdout=fh, stderr=subprocess.STDOUT,
-                            stdin=subprocess.DEVNULL, start_new_session=True)
-    _LOCAL[name] = {"proc": proc, "log": str(log), "command": command, "cwd": str(cwd), "started": time.time(),
-                    "conv": CONV.get()}
+    with _local_lock:
+        if name in _LOCAL:
+            _drop_local(_LOCAL.pop(name))  # mesmo nome = reinicia
+        log = LOG_DIR / f"{name}.log"
+        fh = open(log, "wb")  # fechado em _drop_local: sem guardar o handle, vazava um descritor por servidor
+        proc = subprocess.Popen(["bash", "-lc", command], cwd=cwd, stdout=fh, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, start_new_session=True)
+        _LOCAL[name] = {"proc": proc, "log": str(log), "fh": fh, "command": command, "cwd": str(cwd),
+                        "started": time.time(), "conv": CONV.get()}
     return _local_info(name)
+
+
+def _drop_local(s: dict) -> None:
+    """Encerra o processo do container e fecha o arquivo de log dele."""
+    if s["proc"].poll() is None:
+        try:
+            os.killpg(s["proc"].pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        s["fh"].close()
+    except (OSError, KeyError):
+        pass
+
+
+def close_local() -> None:
+    """Encerra o que o agente subiu DENTRO do container. O que roda no host é do runner, e ele vive
+    além do backend: reiniciar o backend não pode derrubar o servidor de desenvolvimento do usuário."""
+    with _local_lock:
+        restantes = list(_LOCAL.values())
+        _LOCAL.clear()
+    for s in restantes:
+        _drop_local(s)
 
 
 def _local_info(name: str) -> dict:
@@ -257,7 +281,8 @@ def list_servers() -> list[dict]:
             entries += [{**s, "where": "host"} for s in runner.servers()]
         except runner.RunnerError as e:
             entries.append({"name": "(runner)", "alive": False, "error": str(e), "where": "host", "command": ""})
-    entries += [_local_info(n) for n in list(_LOCAL)]
+    with _local_lock:  # stop_server e clear_finished mexem no dict; ler fora dava KeyError
+        entries += [_local_info(n) for n in list(_LOCAL)]
     return entries
 
 
@@ -273,10 +298,10 @@ def server_log(name: str, tail: int = 40) -> str:
 def stop_server(name: str) -> str:
     """Encerra pelo nome, onde estiver. Devolve onde estava."""
     name = _safe_name(name)
-    if name in _LOCAL:
-        s = _LOCAL.pop(name)
-        if s["proc"].poll() is None:
-            os.killpg(s["proc"].pid, signal.SIGKILL)
+    with _local_lock:
+        s = _LOCAL.pop(name, None)
+    if s:
+        _drop_local(s)
         return "container"
     if runner.online():
         runner.serve_stop(name)
@@ -303,9 +328,12 @@ def _wait_end(name: str, seconds: int) -> None:
 
 def clear_finished() -> int:
     """Tira da lista os processos que já terminaram. Só a lista: nada é encerrado aqui."""
-    mortos = [n for n, s in list(_LOCAL.items()) if s["proc"].poll() is not None]
-    for n in mortos:
-        _LOCAL.pop(n, None)
+    with _local_lock:
+        mortos = [n for n, s in list(_LOCAL.items()) if s["proc"].poll() is not None]
+        for n in mortos:
+            s = _LOCAL.pop(n, None)
+            if s:
+                _drop_local(s)
     return len(mortos)
 
 

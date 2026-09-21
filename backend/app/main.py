@@ -30,6 +30,8 @@ async def lifespan(_app):
     task = asyncio.create_task(mcp_client.start())
     yield
     task.cancel()
+    shell.close_local()     # servidores que o agente subiu DENTRO do container
+    terminal.close_local()  # shells do container; os do host são do runner e ficam de pé
     await mcp_client.stop()
     await MANAGER.shutdown()
 
@@ -1010,6 +1012,11 @@ def restore_checkpoints(conv_id: int, body: dict):
 
 @app.delete("/api/conversations/{conv_id}")
 async def delete_conversation(conv_id: int):
+    # A execução em andamento continua salvando mensagem nesta conversa: sem a guarda, o próximo
+    # `_save` acha `None` no lugar dela e a execução morre com AttributeError. O caminho em lote
+    # já recusava; este não.
+    if active_run(conv_id):
+        raise HTTPException(409, "Esta conversa tem uma execução em andamento. Pare antes de apagar.")
     with db.session() as s:
         s.delete(_get_conv(s, conv_id))
         s.commit()

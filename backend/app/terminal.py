@@ -91,7 +91,22 @@ class LocalTerm:
 SESSIONS: dict[str, dict] = {}  # id -> {"where": host|container, "local": LocalTerm|None, "remote": id|None, "cwd": str}
 
 
+def _reap() -> None:
+    """Tira da lista os shells do container que já morreram. A UI fecha o dela, recarregar não."""
+    for tid in [t for t, s in list(SESSIONS.items()) if s["local"] and s["local"].proc.poll() is not None]:
+        SESSIONS.pop(tid, None)
+
+
+def close_local() -> None:
+    """Encerra os shells do container. Os do host são do runner e vivem além do backend: reiniciar
+    o backend não pode derrubar o terminal que o usuário deixou aberto."""
+    for tid, s in [(t, s) for t, s in list(SESSIONS.items()) if s["local"]]:
+        SESSIONS.pop(tid, None)
+        s["local"].close()
+
+
 def start(root: Path) -> dict:
+    _reap()
     host = workspace.to_host(root)
     target = shell.pick_target(None, runner.online(), host)
     tid = uuid.uuid4().hex[:12]
