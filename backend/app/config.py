@@ -21,6 +21,9 @@ MCP_CONFIG = Path(os.getenv("MCP_CONFIG", "/config/mcp.json"))
 NUM_CTX = int(os.getenv("NUM_CTX", "32768"))
 MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "25"))
 MAX_FILE_BYTES = int(os.getenv("MAX_FILE_BYTES", "1000000"))
+# Documento de escritório entra pelo caminho do `documentos.py`, que extrai texto em vez de
+# mandar o arquivo inteiro ao modelo: o teto pode ser bem mais folgado que o do texto puro.
+MAX_DOC_BYTES = int(os.getenv("MAX_DOC_BYTES", "25000000"))
 SHELL_TIMEOUT_MAX = int(os.getenv("SHELL_TIMEOUT_MAX", "300"))
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8080")
 COMPACT_AT = float(os.getenv("COMPACT_AT", "0.8"))  # fração da janela que dispara a compactação
