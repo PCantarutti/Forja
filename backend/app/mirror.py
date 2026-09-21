@@ -20,7 +20,8 @@ from pathlib import Path
 from . import config, db, workspace
 
 ROOT = Path(config.DB_PATH).parent / "conversas"  # /data no container, ao lado do banco
-DIRS = {"agent": "forja-code", "chat": "forja-chat", "comparar": "forja-comparacoes"}
+DIRS = {"agent": "forja-code", "chat": "forja-chat", "comparar": "forja-comparacoes",
+        "pesquisa": "forja-pesquisas"}
 
 # Proibidos em nome de arquivo no Windows, mais os de controle.
 _PROIBIDOS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -46,6 +47,11 @@ def markdown(c) -> str:
     for m in c.messages:
         if m.role == "user":
             linhas += ["## Usuário", "", m.content or "", ""]
+        elif m.role == "assistant" and (m.meta or {}).get("pesquisa"):  # pesquisa profunda
+            p = m.meta["pesquisa"]
+            linhas += ["## Relatório", "", m.content or p.get("aviso") or "", "", "### Fontes lidas", ""]
+            linhas += [f"- [{f['titulo'] or f['url']}]({f['url']}) — {f['status']}" for f in p["fontes"]]
+            linhas.append("")
         elif m.role == "assistant" and (m.meta or {}).get("itens"):  # comparação de modelos
             for item in m.meta["itens"]:
                 st = item.get("stats") or {}

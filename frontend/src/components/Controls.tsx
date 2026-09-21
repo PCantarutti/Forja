@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { Balanca, Bubble, Check, Clipboard, Code, Gauge, PanelLeft, Shield, Sliders } from "./icons";
+import { Balanca, Bubble, Check, Clipboard, Code, Gauge, PanelLeft, Search, Shield, Sliders } from "./icons";
 
 export type Permission = "auto" | "manual" | "edits" | "plan" | "bypass";
 export type Effort = "baixo" | "medio" | "alto" | "maximo" | "extremo";
 // "comparar" é o mesmo literal do `kind` da conversa no backend: a barra lateral interpola
 // a seção direto na query de /conversations.
-export type Section = "chat" | "agent" | "comparar";
+export type Section = "chat" | "agent" | "comparar" | "pesquisa";
 
 export const PERMISSIONS: { id: Permission; label: string; hint: string }[] = [
   { id: "auto", label: "Automático", hint: "O Forja decide: edições passam, o resto pergunta" },
@@ -136,7 +136,7 @@ export function EffortMenu({ value, onChange }: { value: Effort; onChange: (v: E
   );
 }
 
-/** Chat | Agente | Comparar, no canto superior esquerdo (com o botão de esconder a barra lateral). */
+/** Chat | Agente | Comparar | Pesquisa, no canto superior esquerdo (com o botão de esconder a barra lateral). */
 export function SectionTabs(props: {
   value: Section;
   onChange: (v: Section) => void;
@@ -157,6 +157,7 @@ export function SectionTabs(props: {
           { id: "chat" as const, icon: <Bubble className="size-4" />, title: "Chat (sem ferramentas)" },
           { id: "agent" as const, icon: <Code className="size-4" />, title: "Agente (ferramentas)" },
           { id: "comparar" as const, icon: <Balanca className="size-4" />, title: "Comparar modelos" },
+          { id: "pesquisa" as const, icon: <Search className="size-4" />, title: "Pesquisa profunda" },
         ]).map((t) => (
           <button
             key={t.id}
