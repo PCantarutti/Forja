@@ -139,6 +139,42 @@ def test_terminal_survives_a_full_buffer(monkeypatch, tmp_path):
         fr.term_close(tid)
 
 
+def test_revelar_cita_o_caminho_e_nao_o_argumento_inteiro(tmp_path, monkeypatch):
+    """Pasta com espaço no nome levava o Explorer para Documentos em vez do arquivo."""
+    if not fr.WINDOWS:
+        pytest.skip("o caminho do Explorer é do Windows")
+    alvo = tmp_path / "pasta com espaco"
+    alvo.mkdir()
+    arquivo = alvo / "relatorio.pdf"
+    arquivo.write_bytes(b"%PDF-1.4")
+    vistos = []
+    monkeypatch.setattr(fr.subprocess, "Popen", lambda cmd, **kw: vistos.append((cmd, kw)))
+
+    fr.open_path(str(arquivo), "reveal")
+    cmd, kw = vistos[0]
+    assert isinstance(cmd, str) and cmd.startswith("explorer /select,")
+    assert not kw.get("shell")
+    assert chr(34) + str(arquivo) + chr(34) in cmd
+
+
+def test_documento_abre_no_programa_do_sistema(tmp_path, monkeypatch):
+    """Abrir um .docx no VS Code mostra XML zipado. Quem abre documento é o Word."""
+    if not fr.WINDOWS:
+        pytest.skip("o caminho do VS Code é do Windows")
+    monkeypatch.setattr(fr.shutil, "which", lambda cmd: "C:/code.cmd")
+    monkeypatch.setattr(fr.subprocess, "Popen", lambda *a, **kw: None)
+    abertos = []
+    monkeypatch.setattr(fr.os, "startfile", lambda p: abertos.append(p), raising=False)
+
+    doc = tmp_path / "relatorio.docx"
+    doc.write_text("x", encoding="utf-8")
+    assert fr.open_path(str(doc), "editor") == "padrão" and abertos
+
+    codigo = tmp_path / "modulo.py"
+    codigo.write_text("x", encoding="utf-8")
+    assert fr.open_path(str(codigo), "editor") == "code"
+
+
 def test_open_rejects_missing_path(server):
     status, body = call(f"{server}/open", "POST", {"path": "C:/nao/existe/x.txt", "mode": "editor"})
     assert status == 400 and "não existe" in body["error"]

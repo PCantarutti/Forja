@@ -31,6 +31,7 @@ import os
 import platform
 import codecs
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
@@ -216,20 +217,39 @@ def serve_stop(name: str) -> dict:
 
 # ------------------------------------------------------------------ abrir no editor / revelar
 
+# Documento e mídia abrem no programa do sistema (Word, Excel, leitor de PDF). O VS Code só faz
+# sentido para o que é texto — abrir um .docx nele mostra XML zipado, que não serve para ninguém.
+DO_SISTEMA = {".docx", ".xlsx", ".xlsm", ".pptx", ".pdf", ".odt", ".ods", ".odp", ".csv",
+              ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".mp4", ".zip"}
+
+
+def quote(value: str) -> str:
+    """Um valor como argumento literal do shell: sem interpolação, sem virar outro comando."""
+    texto = str(value)
+    if WINDOWS:  # a aspa simples não interpola no PowerShell; ela mesma se escapa dobrando
+        return "'" + texto.replace("'", "''") + "'"
+    return shlex.quote(texto)
+
+
 def open_path(path: str, mode: str) -> str:
     if not os.path.exists(path):
         raise ValueError(f"Caminho não existe neste sistema: {path}")
     if mode == "reveal":
         if WINDOWS:
-            subprocess.Popen(["explorer", f"/select,{os.path.normpath(path)}"])
+            # As aspas vão em volta do CAMINHO, não do argumento inteiro: com lista, o Popen citava
+            # "/select,C:/pasta com espaco/x" de uma vez, o Explorer não entendia e abria a pasta
+            # padrão (Documentos). String e sem shell: a linha vai direto para o CreateProcess.
+            alvo = os.path.normpath(path).replace(chr(34), "")
+            subprocess.Popen("explorer /select," + chr(34) + alvo + chr(34))
         elif SYSTEM == "Darwin":
             subprocess.Popen(["open", "-R", path])
         else:
             subprocess.Popen(["xdg-open", path if os.path.isdir(path) else os.path.dirname(path)])
         return "revelado"
-    # editor: VS Code se existir, senão o programa padrão do sistema
-    if shutil.which("code") or (WINDOWS and shutil.which("code.cmd")):
-        subprocess.Popen(shell_argv(f'code "{path}"'), **_popen_kwargs())
+    # editor: VS Code para texto; documento e mídia vão para o programa padrão do sistema
+    if os.path.splitext(path)[1].lower() not in DO_SISTEMA and (
+            shutil.which("code") or (WINDOWS and shutil.which("code.cmd"))):
+        subprocess.Popen(shell_argv("code " + quote(path)), **_popen_kwargs())
         return "code"
     if WINDOWS:
         os.startfile(path)  # type: ignore[attr-defined]
