@@ -228,6 +228,26 @@ Com pelo menos um nível configurado, o agente principal ganha a ferramenta `del
 
 **Quando um nível não roda**: um slot que aponta para o provedor local só vale se o modelo dele for justamente o que está carregado — o Forja sobe um `llama-server` por vez e o llama.cpp ignora o campo `model` do pedido, então pedir outro alias rodaria o modelo errado calado. Nesse caso a delegação cai para a *Nuvem*, e sem ela devolve um erro dizendo o porquê, para o principal fazer sozinho. Falha de conexão no meio também cai para o próximo nível — mas só se o subagente ainda não tiver mexido em arquivo nenhum. O subagente usa as mesmas ferramentas, aprovações, permissões e pasta de trabalho, mas não pode delegar de novo. Os passos dele aparecem **dentro do bloco da delegação**, inclusive os cards de aprovação, com modelo, tokens e tempo. Enquanto ele trabalha, a delegação também aparece na aba **Instâncias** — de qualquer conversa, com nível, modelo, tempo, passos e o que ele está fazendo agora, mais os botões de abrir a conversa e parar o turno. Só o relatório final volta para a conversa, o que economiza o contexto do agente principal. O limite de passos por subagente fica na mesma tela (padrão 15).
 
+### Subagentes do projeto (`.forja/agents/*.md`)
+
+Um arquivo por persona, no mesmo formato das skills: cabeçalho e instruções. O `level` escolhe o slot
+(`rapido`/`capaz`, padrão `rapido`) e `tools` limita as ferramentas — o que não estiver na lista nem
+aparece para ele:
+
+```markdown
+---
+description: Revisa diff atrás de bug, não mexe em nada
+level: capaz
+tools: read_file, search, list_dir, run_command
+---
+Você revisa código. Responda com os problemas reais em ordem de gravidade, com arquivo e linha.
+Não edite nada, não elogie e não comente estilo.
+```
+
+Com o arquivo em `.forja/agents/revisor.md`, o agente principal vê `revisor` na lista de subagentes do
+projeto e chama `delegate_task(agent="revisor", task=...)` — sem persona, continua escolhendo só o
+`level`. São arquivos comuns: entram no git do projeto junto com o código.
+
 ## Memória do projeto (`FORJA.md`)
 
 Um arquivo na raiz da pasta de trabalho que vai junto no system prompt de toda conversa (até 8.000 caracteres). O agente é instruído a atualizá-lo quando aprende algo duradouro do projeto — decisões, convenções, comandos — e você edita em **Configurações › Memória**, onde também dá para trocar o nome do arquivo ou parar de enviar ao modelo. Como é um arquivo comum, entra no git do seu projeto se você quiser.
