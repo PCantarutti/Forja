@@ -168,7 +168,6 @@ async def chat_stream(provider: str, model: str, messages: list[dict], tools: li
     messages = list(messages)
     extra: dict = {}
     await _reasoning(provider, model, effort, extra, messages)
-    _inference(provider, model, extra)  # o ajuste do modelo vale mais que o esforço da conversa
     try:
         if effort == "extremo":  # só o maestro; o subagente roda com 'maximo' e pensa à vontade
             async for ev in _capped(impl, provider, model, messages, tools, num_ctx, extra):
