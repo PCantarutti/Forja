@@ -276,6 +276,14 @@ def _wait_end(name: str, seconds: int) -> None:
         time.sleep(1)
 
 
+def clear_finished() -> int:
+    """Tira da lista os processos que já terminaram. Só a lista: nada é encerrado aqui."""
+    mortos = [n for n, s in list(_LOCAL.items()) if s["proc"].poll() is not None]
+    for n in mortos:
+        _LOCAL.pop(n, None)
+    return len(mortos)
+
+
 def serve_status(root: Path, args: dict) -> str:
     name = args.get("name")
     tail = int(args.get("tail") or 40)
