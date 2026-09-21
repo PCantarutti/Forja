@@ -595,6 +595,11 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
         return
     # forja-runner ligado? Decide onde run_command/serve_* executam e o que o bloco Ambiente diz.
     runner.INFO.set(await asyncio.to_thread(runner.refresh))
+    # Pasta com hooks que ainda não foi liberada: os comandos não rodam, e o usuário precisa saber
+    # disso uma vez — se ficasse calado, ele acharia que o hook dele está funcionando.
+    hooks_aviso = hooks.aviso(workspace.root())
+    if hooks_aviso:
+        yield _event(conv_id, "warning", hooks_aviso)
     # update_tasks roda em thread: publica a lista na UI pelo loop principal.
     main_loop = asyncio.get_running_loop()
 
