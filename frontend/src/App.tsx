@@ -21,7 +21,6 @@ import {
   nextPermission,
   PermissionMenu,
   SectionTabs,
-  type Effort,
   type Permission,
   type Section,
 } from "./components/Controls";
@@ -84,7 +83,6 @@ function loadSettings(): Settings {
   }
 }
 
-const pill = "rounded-full border border-line bg-transparent px-3 py-1 text-xs text-muted hover:bg-raised";
 
 type RightState = { tab: RightTab; collapsed: boolean };
 
