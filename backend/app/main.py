@@ -24,12 +24,17 @@ settings.apply()
 
 @asynccontextmanager
 async def lifespan(_app):
+    # Referência forte das tasks de fundo: o loop só guarda referência fraca, e o coletor de lixo
+    # pode levar uma execução no meio. Mesmo motivo de pesquisa/comparar.
+    vivas: set = set()
     # Espelho em Markdown: gera o que falta (banco anterior ao espelho) e limpa .md órfão.
     print(f"Forja: conversas espelhadas em {mirror.ROOT} ({mirror.sync()} arquivo(s) gerado(s))", flush=True)
     # MCP conecta em background: npx/uvx podem demorar e a API não deve esperar (o painel mostra "connecting").
     task = asyncio.create_task(mcp_client.start())
+    vivas.add(task)
     yield
     task.cancel()
+    await asyncio.gather(*vivas, return_exceptions=True)  # sem isto, "Task exception was never retrieved"
     shell.close_local()     # servidores que o agente subiu DENTRO do container
     terminal.close_local()  # shells do container; os do host são do runner e ficam de pé
     await mcp_client.stop()
