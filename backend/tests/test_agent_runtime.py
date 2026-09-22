@@ -334,3 +334,73 @@ def test_marca_se_o_modelo_enxerga_a_imagem():
     anexo = {"kind": "image", "path": "a.jpg"}
     assert _images(Msg({"attachments": [anexo], "model_sees": True})) == [anexo]
     assert _images(Msg({"attachments": [anexo], "model_sees": False})) == []
+
+
+def test_toda_ferramenta_tem_uma_frase_de_status():
+    """A linha "o que está fazendo agora" tem que nomear o alvo, não a ferramenta.
+
+    Sem esta guarda, ferramenta nova nasce caindo no "Usando <nome>" genérico e ninguém percebe —
+    foi como `read_file`, `run_command` e o navegador inteiro ficaram sem frase até alguém reclamar.
+    Ferramenta de servidor MCP fica de fora: o nome dela nem existe no código do frontend.
+    """
+    import re
+    from pathlib import Path
+
+    from app.tools import REGISTRY
+
+    fonte = Path(__file__).resolve().parents[2] / "frontend" / "src" / "App.tsx"
+    corpo = fonte.read_text(encoding="utf-8")
+    mapa = corpo[corpo.index("const FASE:"):corpo.index("export default function App()")]
+    com_frase = set(re.findall(r"^  ([a-z_]+): \(", mapa, re.M))
+
+    registradas = {n for n, t in REGISTRY.items() if t.source == "builtin"}
+    faltando = sorted(registradas - com_frase)
+    assert not faltando, f"sem frase em FASE (App.tsx): {faltando}"
+    # exit_plan_mode e ask_user vivem fora do REGISTRY mas aparecem como chamada na conversa
+    assert {"exit_plan_mode", "ask_user"} <= com_frase
+
+
+def test_imagem_antiga_nao_reescreve_o_historico_no_local(tmp_path, monkeypatch):
+    """Trocar uma imagem antiga por texto reescreve o histórico NO MEIO, e isso invalida o cache de
+    prompt do servidor local dali para a frente: o turno seguinte a um print custava 11s, depois
+    45s, 82s, 123s, crescendo com o contexto, enquanto qualquer outra ferramenta ficava em 2-3s.
+
+    Com provider local as imagens ficam e o prefixo nunca muda. Na nuvem continuam saindo, porque
+    lá o custo é por imagem em cada requisição.
+    """
+    import io
+
+    from PIL import Image
+
+    from app import agent as ag
+    from app import uploads
+
+    monkeypatch.setattr(uploads.workspace, "root", lambda: tmp_path)
+    (tmp_path / "prints").mkdir()
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(buf, "JPEG")
+
+    msgs, ident = [], 0
+
+    def nova(role, **kw):
+        nonlocal ident
+        ident += 1
+        return Message(id=ident, role=role, content=kw.pop("content", ""), thinking="", status="ok", **kw)
+
+    msgs.append(nova("user", content="olhe a página"))
+    for _ in range(4):  # quatro prints, bem acima do MAX_TOOL_IMAGES
+        msgs.append(nova("assistant", content="vou olhar"))
+        m = nova("tool", content="Screenshot anexado.", name="browser_screenshot", tool_call_id=f"c{ident}")
+        (tmp_path / "prints" / f"a{ident}.jpg").write_bytes(buf.getvalue())
+        m.meta = {"attachments": [{"kind": "image", "path": f"prints/a{ident}.jpg", "name": "browser.jpg",
+                                   "mime": "image/jpeg"}], "model_sees": True}
+        msgs.append(m)
+
+    def imagens(hist):
+        return sum(1 for m in hist if isinstance(m.get("content"), list)
+                   for p in m["content"] if p.get("type") == "image_url")
+
+    nuvem = ag.build_history(msgs, "native", {"vision"}, prefixo_estavel=False)
+    local = ag.build_history(msgs, "native", {"vision"}, prefixo_estavel=True)
+    assert imagens(nuvem) == ag.MAX_TOOL_IMAGES, "na nuvem o teto continua valendo"
+    assert imagens(local) == 4, "no local nenhuma imagem sai: mexer no meio do histórico custa o cache"

@@ -30,6 +30,21 @@ class LLMError(Exception):
         self.status = status
 
 
+LOCAL_TYPES = ("ollama", "lmstudio", "llamacpp")
+
+
+def is_local(provider: str) -> bool:
+    """Servidor local (na máquina do usuário ou no host do container).
+
+    Quem decide se vale reescrever o histórico para poupar contexto: servidor local reaproveita o
+    cache de prompt, e mexer no meio do histórico custa mais caro que os tokens que economiza.
+    """
+    try:
+        return spec(provider)["type"] in LOCAL_TYPES
+    except Exception:
+        return False
+
+
 def spec(provider: str) -> dict:
     if provider not in config.PROVIDERS:
         raise LLMError(f"Provider desconhecido: {provider}")

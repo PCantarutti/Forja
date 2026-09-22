@@ -395,8 +395,16 @@ def system_prompt(via: str, caps: set[str] | None = None, exclude: set[str] | No
                      "browser_console. É o único jeito de ver rolagem, responsividade, JavaScript e erro de "
                      "console. O preview_document é para documento — .docx, .pdf, .xlsx, .pptx.")
         if caps is not None and "vision" in caps:
-            rules.append("- Valide layout com browser_screenshot (você recebe a imagem); estrutura e erros com "
-                         "browser_read e browser_console.")
+            # Print é a ferramenta cara e imprecisa: custa segundos de encoder de visão e mostra menos
+            # sobre estrutura que a árvore de acessibilidade. Sem esta ordem o modelo fotografava
+            # tudo, inclusive para responder o que o browser_read já tinha dito.
+            rules.append("- Conferir página é TEXTO primeiro: browser_read dá a estrutura e os refs, browser_console "
+                         "dá os erros, e os dois são baratos. O browser_screenshot é para o que só se resolve "
+                         "olhando — alinhamento, cor, sobreposição, coisa cortada — e cada print custa segundos "
+                         "seus. Um ou dois por página, não a página toda.")
+            rules.append("- O print é sempre de UMA tela. Para o que está abaixo da dobra: browser_scroll e outro "
+                         "print, ou browser_read, que lê tudo de uma vez. Para um detalhe, browser_screenshot com "
+                         "`selector` fotografa só aquele elemento, que é mais barato e mais fácil de julgar.")
         else:
             rules.append("- Se o usuário pedir um print, chame browser_screenshot: a imagem aparece para ele no chat. "
                          "Você não tem visão e não recebe a imagem, então valide layout pelo browser_read "
@@ -603,7 +611,7 @@ def _join_user(a, b):
 
 def build_history(msgs: list[db.Message], via: str, caps: set[str] | None = None,
                   permission: str = "manual", effort: str = "medio", plan: str | None = None,
-                  chat: bool = False) -> list[dict]:
+                  chat: bool = False, prefixo_estavel: bool = False) -> list[dict]:
     native = via == "native"
     out: list[dict] = [{"role": "system",
                         "content": system_prompt(via, caps, permission=permission, effort=effort, plan=plan,
@@ -614,9 +622,18 @@ def build_history(msgs: list[db.Message], via: str, caps: set[str] | None = None
         msgs = [m for m in msgs if m.id > summary[1]]
     # Imagens devolvidas por ferramentas (screenshot) entram como mensagem "user" com image_url logo
     # depois do bloco de resultados: é o único formato que OpenAI-compatível e Ollama aceitam.
-    # Só as últimas MAX_TOOL_IMAGES vão como imagem; cada uma custa ~1k tokens.
+    #
+    # Quantas vão como imagem é uma escolha entre dois custos que não se parecem:
+    #
+    # - Provider de nuvem cobra por imagem em CADA requisição, então só as últimas MAX_TOOL_IMAGES
+    #   entram e as antigas viram texto.
+    # - Servidor local não cobra nada, mas reaproveita o cache de prompt — e trocar uma imagem antiga
+    #   por texto reescreve o histórico NO MEIO, o que invalida esse cache dali para a frente e obriga
+    #   a reprocessar todo o resto. Medido nos logs de uso: o turno seguinte a um print custava 11s,
+    #   depois 45s, 82s, 123s, crescendo junto com o contexto, enquanto qualquer outra ferramenta
+    #   ficava em 2-3s. Mantendo as imagens, o prefixo nunca muda e sobra só o custo da imagem nova.
     with_images = [m.id for m in msgs if m.role == "tool" and _images(m)]
-    recent = set(with_images[-MAX_TOOL_IMAGES:])
+    recent = set(with_images if prefixo_estavel else with_images[-MAX_TOOL_IMAGES:])
     pending: list[dict] = []
     omitted = 0
 
@@ -841,12 +858,14 @@ async def run_agent(conv_id: int, req: RunRequest, run: Run) -> AsyncIterator[di
         mode_at_start = run.permission
         if run.plan is None:
             run.plan = last_plan(msgs)
-        messages = build_history(msgs, via, caps, run.permission, req.effort, run.plan, chat)
+        messages = build_history(msgs, via, caps, run.permission, req.effort, run.plan, chat,
+                                 prefixo_estavel=llm.is_local(req.provider))
         tools = [t.openai_schema() for t in current_tools()] if via == "native" else None
         if _estimate(messages, tools) > config.COMPACT_AT * teto:
             async for ev in _compact(conv_id, msgs, req, teto):
                 yield ev
-            messages = build_history(_load(conv_id), via, caps, run.permission, req.effort, run.plan, chat)
+            messages = build_history(_load(conv_id), via, caps, run.permission, req.effort, run.plan, chat,
+                                     prefixo_estavel=llm.is_local(req.provider))
 
         content = reasoning = ""
         done: dict = {"tool_calls": [], "prompt_tokens": None, "completion_tokens": None}
