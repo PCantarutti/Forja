@@ -11,3 +11,6 @@ openpyxl==3.1.*
 python-docx==1.2.*
 python-pptx==1.0.*
 pypdfium2==5.13.*
+# OCR de PDF escaneado: o binário vem do apt no Dockerfile (tesseract-ocr-por). No app desktop
+# quem reconhece é o próprio Windows — ver forja-desktop/backend/requirements.txt.
+pytesseract==0.3.*

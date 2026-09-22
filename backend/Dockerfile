@@ -2,9 +2,11 @@ FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 # git/node/uv: para o run_command e para servidores MCP via stdio (npx / uvx).
+# tesseract: OCR de PDF escaneado (ver app/ocr.py). No app desktop quem faz isso é o próprio
+# Windows; aqui é o pacote do apt, ~30 MB com o idioma português.
 # safe.directory: o bind mount do Windows tem outro dono; sem isso o git recusa o repositório.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git nodejs npm curl ca-certificates \
+ && apt-get install -y --no-install-recommends git nodejs npm curl ca-certificates tesseract-ocr tesseract-ocr-por \
  && rm -rf /var/lib/apt/lists/* \
  && pip install --no-cache-dir uv \
  && git config --system safe.directory "*"

@@ -38,6 +38,7 @@ Mudança que só toca os arquivos "comuns" (a maioria) aplica sem conflito. Muda
 | `backend/app/config.py` | `/data`, `/config`, `host.docker.internal` | `%APPDATA%\Forja`, `127.0.0.1` |
 | `backend/app/main.py` | `/api/picker/start`, `/api/runner`; nginx serve a UI | sem esses; FastAPI serve a UI (`FORJA_WEB`) |
 | `backend/app/agent.py` | bloco *Ambiente* fala de runner/container | fala só da máquina do usuário |
+| `backend/requirements.txt` e `backend/Dockerfile` | OCR pelo tesseract do apt (`pytesseract`) | OCR pelo Windows.Media.Ocr (pacotes `winrt-*`) |
 | `backend/app/web.py` | `web_search` via SearXNG do compose | DuckDuckGo quando `SEARXNG_URL` está vazio |
 | `backend/app/gitops.py` | `worktree` traduz caminho | caminho direto |
 | `backend/app/mirror.py` | espelho em `/data/conversas` (volume) | espelho em `%APPDATA%\Forja\conversas` |
