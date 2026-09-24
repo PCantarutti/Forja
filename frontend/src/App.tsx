@@ -10,11 +10,18 @@ import PlansPanel, { type PlanEntry } from "./components/PlansPanel";
 import ChangesPanel, { type ChangesAction } from "./components/ChangesPanel";
 import TerminalPanel from "./components/TerminalPanel";
 import InfoPanel, { type McpStatus, type ToolInfo } from "./components/InfoPanel";
-import RightPanel, { RightTabsBar, type RightTab } from "./components/RightPanel";
+import Tiles, { RightTabsBar, WIDTH, type RightTab } from "./components/RightPanel";
+import { CaixaPrompt, DireitaPrompt, RodapePrompt, campoPrompt, enviarClasse, pararClasse, redondo } from "./components/Composer";
+import { GRADE_VAZIA, abertos, abrir as abrirTile, fechar as fecharTile, soltos, type Grade } from "./components/tiles";
+import { executarNoTerminal } from "./components/TerminalPanel";
 import SettingsDialog from "./components/Settings";
 import FolderPicker, { folderName } from "./components/FolderPicker";
 import ModelPicker from "./components/ModelPicker";
 import ContextRing from "./components/ContextRing";
+import GoalStrip from "./components/GoalStrip";
+import Trajetoria from "./components/Trajetoria";
+import TodosBar from "./components/TodosBar";
+import Confirma from "./components/Confirma";
 import { LogoMark } from "./components/Logo";
 import {
   EffortMenu,
@@ -29,6 +36,7 @@ import {
   Attachments,
   CopyButton,
   EventNotice,
+  NOTA_DO_AGENTE,
   Markdown,
   setFileConv,
   ActivityGroup,
@@ -42,17 +50,29 @@ import {
   ToolDraft,
   ToolBlock,
   TasksCard,
+  aggregate,
+  resultadosDe,
+  turnosDe,
   type TurnStats,
 } from "./components/MessageView";
 import { ArrowUp, ChevronDown, Edit, ExternalLink, FolderOpen, Laptop, Paperclip, Refresh, Square, Undo } from "./components/icons";
-import type { Activity, Approval, Attachment, BrowserState, Conversation, Message, RunnerStatus, Settings, Skill, Stats, Task, ToolCall, ToolsSent } from "./types";
+import type { Activity, Approval, Attachment, BrowserState, Conversation, Draft, MaestroBoard, Message, ModelPhase, RunnerStatus, Settings, Skill, Stats, SubState, Task, ToolCall, ToolsSent } from "./types";
+import MaestroView, { ABAS_MAESTRO, SO_MAESTRO } from "./components/MaestroView";
 
-/** Notificação do sistema quando a aba não está em foco (execução terminou, aprovação pendente). */
-function notify(title: string, body: string, force = false) {
+/** Notificação do sistema quando o Forja não está em foco (execução terminou, aprovação pendente).
+ * "Sem foco", não "minimizada": com a janela só atrás de outro programa, document.hidden é falso e o
+ * aviso não saía. Clicar traz a janela para a frente e, com `abrir`, abre a conversa. */
+function notify(title: string, body: string, force = false, abrir?: () => void) {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
-  if (!document.hidden && !force) return;
+  if (document.hasFocus() && !force) return;
   try {
-    new Notification(title, { body: body.slice(0, 160), silent: true });
+    const n = new Notification(title, { body: body.slice(0, 160), silent: false });
+    n.onclick = () => {
+      (window as any).forja?.focus?.();
+      window.focus();
+      abrir?.();
+      n.close();
+    };
   } catch {
     /* navegador sem suporte */
   }
@@ -63,24 +83,20 @@ type Config = {
   num_ctx: number;
   default_workspace?: string;
   picker_url?: string;
+  min_ctx_maestro?: number;  // janela mínima de modelo local para a Maestro (o seletor barra abaixo)
+  maestro_model?: { provider: string; model: string };  // modelo padrão da Maestro (Configurações)
 };
-type SubState = { status: string; steps: { call: any; result?: Message }[] };
-/** Resposta em andamento. `tool` são os argumentos de uma tool call ainda chegando (write_file de
- *  arquivo grande leva minutos e, sem isto, a tela fica parada como se o modelo tivesse travado). */
-type Draft = {
-  content: string;
-  thinking: string;
-  tool?: { name: string; path?: string; text: string; chars?: number } | null;
-};type Live = {
+type Live = {
   messages: Message[];
   run: {
     run_id: string;
     cursor: number;
     draft: Draft | null;
     sent: ToolsSent | null;
-    approvals: { call: { id: string; name: string; arguments?: any }; preview: any; suggest?: string; parent?: string }[];
+    approvals: { call: { id: string; name: string; arguments?: any }; preview: any; suggest?: string; nota?: string | null; parent?: string }[];
     /** Geração em curso, em segundos decorridos — para remontar o contador de t/s ao reabrir. */
     geracao: { segundos: number; segundos_gerando: number; tokens: number } | null;
+    paused?: boolean;
   } | null;
 };
 
@@ -93,6 +109,7 @@ function loadSettings(): Settings {
   }
 }
 
+const COMPOSER_MAX = 420; // altura máxima do campo de mensagem; a partir daí o texto rola por dentro
 
 // Fila de um: serializa quem lê o estado do servidor, mexe nele e grava de volta. Duas dessas em
 // paralelo leem a mesma coisa e a segunda salva por cima da primeira.
@@ -103,15 +120,30 @@ function enfileirar<T>(fn: () => Promise<T>): Promise<T> {
   return proxima;
 }
 
-type RightState = { tab: RightTab; collapsed: boolean };
+/** Tiles abertos à direita, em colunas (ver components/tiles.ts). */
+// string e não RightTab: na Maestro a grade também tem os blocos do cockpit, a Tarefa e o Modelo.
+type RightState = Grade<string>;
 
-/** Coluna direita: nova conversa sempre recolhida; cada conversa lembra se estava aberta e em qual aba. */
-const RIGHT_DEFAULT: RightState = { tab: "info", collapsed: true };
+/** Nova conversa começa sem tiles; cada conversa lembra os dela, no lugar e no tamanho. */
+const RIGHT_DEFAULT: RightState = GRADE_VAZIA;
 const RIGHT_KEY = "forja.right.byConv";
+
+/** Largura inicial do tile (as abas da Maestro, Tarefa e Modelo, não estão em WIDTH). */
+const larguraDe = (t: string) => WIDTH[t as RightTab] ?? 420;
 
 function loadRightMap(): Record<string, RightState> {
   try {
-    return JSON.parse(localStorage.getItem(RIGHT_KEY) ?? "{}");
+    const map = JSON.parse(localStorage.getItem(RIGHT_KEY) ?? "{}");
+    // formatos anteriores: { tab, collapsed } (uma aba só) e { abertos } (lista)
+    for (const [k, v] of Object.entries<any>(map))
+      if (!Array.isArray(v?.colunas)) {
+        const lista: string[] = Array.isArray(v?.abertos) ? v.abertos : v?.collapsed === false && v.tab ? [v.tab] : [];
+        map[k] = lista.reduce<RightState>((g, t) => abrirTile(g, t, larguraDe(t)), GRADE_VAZIA);
+      }
+    // Aba que deixou de existir (a Trajetória virou alternância do chat) sai do que ficou salvo.
+    for (const [k, v] of Object.entries<RightState>(map))
+      map[k] = abertos(v).filter((t) => !(t in WIDTH)).reduce((g, t) => fecharTile(g, t), v);
+    return map;
   } catch {
     return {};
   }
@@ -123,17 +155,6 @@ function saveRight(convId: number, state: RightState) {
   localStorage.setItem(RIGHT_KEY, JSON.stringify(map));
 }
 
-function aggregate(list: Stats[]): TurnStats {
-  const withTps = list.filter((s) => s.tps);
-  const gen = withTps.reduce((a, s) => a + s.tokens / s.tps!, 0);
-  return {
-    model: list[list.length - 1].model,
-    tokens: list.reduce((a, s) => a + s.tokens, 0),
-    seconds: list.reduce((a, s) => a + s.seconds, 0),
-    tps: gen > 0 ? withTps.reduce((a, s) => a + s.tokens, 0) / gen : null,
-    estimated: list.some((s) => s.estimated),
-  };
-}
 
 /** Frase da espera por ferramenta: "Buscando X" diz mais que "Usando web_search". */
 const TOOL_TAIL = 4000; // cauda dos argumentos guardada na tela; o resto já rolou para fora
@@ -181,6 +202,26 @@ const FASE: Record<string, (a: Record<string, unknown>) => string | undefined> =
   write_file: (a) => `Escrevendo ${arquivo(a.path) ?? "um arquivo"}`,
   edit_file: (a) => `Editando ${arquivo(a.path) ?? "um arquivo"}`,
   list_dir: (a) => `Listando ${trecho(a.path, 40) ?? "a pasta"}`,
+  list_agents: () => "Conferindo os subagentes",
+  lsp: (a) => `Consultando o language server (${String(a.operation ?? "")})`,
+  session_search: (a) => `Procurando em conversas anteriores ${trecho(a.query, 30) ?? ""}`.trim(),
+  session_read: (a) => `Lendo a conversa ${String(a.id ?? "")}`.trim(),
+  terminal_open: (a) => `Abrindo um terminal ${trecho(a.name, 20) ?? ""}`.trim(),
+  terminal_send: (a) => `No terminal: ${trecho(a.command) ?? "enviando"}`,
+  terminal_read: () => "Lendo o terminal",
+  terminal_close: () => "Fechando um terminal",
+  terminal_list: () => "Conferindo os terminais",
+  workflow: (a) => `Orquestrando ${Array.isArray(a.phases) ? a.phases.length : ""} fases de subagentes`.replace("  ", " "),
+  create_goal: () => "Definindo o objetivo",
+  get_goal: () => "Conferindo o objetivo",
+  update_goal: (a) =>
+    ({ complete: "Marcando o objetivo como completo", blocked: "Relatando bloqueio do objetivo",
+       resume: "Retomando o objetivo", pause: "Pausando o objetivo" } as Record<string, string>)[String(a.action)] ??
+    "Atualizando o objetivo",
+  interrupt_agent: (a) => `Parando o subagente ${trecho(a.id, 20) ?? ""}`.trim(),
+  skill: (a) =>`Carregando a skill ${trecho(a.name, 30) ?? ""}`.trim(),
+  glob: (a) =>`Procurando arquivos ${trecho(a.pattern, 36) ?? ""}`.trim(),
+  grep: (a) => (trecho(a.pattern, 36) ? `Procurando “${trecho(a.pattern, 36)}”` : "Procurando no código"),
 
   // shell e servidores
   run_command: (a) =>
@@ -198,6 +239,7 @@ const FASE: Record<string, (a: Record<string, unknown>) => string | undefined> =
   // navegador
   browser_navigate: (a) => `Abrindo ${endereco(a.url) ?? "uma p\u00e1gina"}`,
   browser_read: () => "Lendo a p\u00e1gina",
+  browser_validate: (a) => `Validando ${endereco(a.url) ?? "a p\u00e1gina"}`,
   browser_click: (a) => `Clicando em ${trecho(a.selector, 36) ?? "um elemento"}`,
   browser_type: (a) => `Digitando em ${trecho(a.selector, 30) ?? "um campo"}`,
   browser_upload: (a) => `Enviando ${arquivo(a.path) ?? "um arquivo"} para a p\u00e1gina`,
@@ -232,6 +274,12 @@ const FASE: Record<string, (a: Record<string, unknown>) => string | undefined> =
   image_generate: (a) => `Gerando a imagem “${trecho(a.prompt, 40) ?? "pedida"}”`,
   delegate_task: (a) => `Delegando: ${trecho(a.task, 44) ?? "uma tarefa"}`,
   exit_plan_mode: () => "Montando o plano",
+  // Maestro: sem frase aqui, a linha de status viraria "Usando run_task" e esconderia o alvo.
+  plan_feature: (a) => `Planejando ${trecho(a.title, 34) ?? "a funcionalidade"}`,
+  list_tasks: () => "Conferindo as tarefas",
+  update_task: (a) => `Atualizando ${a.code ?? "a tarefa"}${a.status ? ` para ${a.status}` : ""}`,
+  run_task: (a) => `Despachando ${a.code ?? "a tarefa"} para um Worker`,
+  session_note: () => "Registrando onde a sessão parou",
   ask_user: () => "Preparando perguntas para voc\u00ea",
 };
 
@@ -240,28 +288,44 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [allTools, setAllTools] = useState<ToolInfo[]>([]);
   const [mcp, setMcp] = useState<McpStatus | null>(null);
-  const [runner, setRunner] = useState<RunnerStatus | null>(null);
-  const [settings, setSettings] = useState<Settings>(loadSettings);
+  const [geral, setSettings] = useState<Settings>(loadSettings);
   const [catalogKey, setCatalogKey] = useState(0); // força o seletor de modelo a recarregar
+  const composer = useRef<HTMLTextAreaElement | null>(null);
   const [showFolder, setShowFolder] = useState(false);
   // Chat e Agente são seções separadas (como no Claude): cada uma lista só as suas conversas.
   const [section, setSection] = useState<Section>(() => (localStorage.getItem("forja.section") as Section) || "agent");
+  // Na seção Maestro o modelo é o dela (Configurações › Maestro), não o do chat: trocar um não troca o
+  // outro. Sem modelo da Maestro definido, ela usa o do chat até alguém escolher um no seletor dela.
+  const modeloMaestro = section === "maestro" && config.maestro_model?.model ? config.maestro_model : null;
+  const settings: Settings = modeloMaestro ? { ...geral, ...modeloMaestro } : geral;
+  const [pausado, setPausado] = useState(false);
+  const [runner, setRunner] = useState<RunnerStatus | null>(null);
   const [sidebarHidden, setSidebarHidden] = useState(() => localStorage.getItem("forja.sidebar") === "hidden");
   const [nativeError, setNativeError] = useState("");
   const [picking, setPicking] = useState(false); // diálogo nativo aberto no sistema
   // Pasta escolhida antes de a conversa existir (tela inicial); vira a pasta da conversa no 1º envio.
   const [pendingWs, setPendingWs] = useState<string | null>(() => localStorage.getItem("forja.workspace"));
   const [subSteps, setSubSteps] = useState<Record<string, SubState>>({});
+  const [board, setBoard] = useState<MaestroBoard | null>(null);  // árvore de tarefas do Maestro
+  // Troca de modelo local em curso. Carregar um GGUF leva minutos: sem isto o cockpit parece travado.
+  const [modelPhase, setModelPhase] = useState<ModelPhase | null>(null);
   const [checkpoints, setCheckpoints] = useState<Record<string, string[]>>({});
   const [toolMode, setToolMode] = useState("auto");
   const [vision, setVision] = useState("auto");
   const [right, setRight] = useState<RightState>(RIGHT_DEFAULT);
+  // A grade desta tela: fora da Maestro, sem os blocos e as abas que são só dela.
+  const gradeTela = section === "maestro" ? right : SO_MAESTRO.reduce((g, t) => fecharTile({ ...g, fixos: [] }, t), right);
+  // Abre o tile (já aberto fica onde está; com o máximo aberto, não abre).
+  const abrir = (tab: RightTab) => setRight((r) => abrirTile(r, tab, larguraDe(tab)));
   const [activity, setActivity] = useState<Activity>({ conversations: [], servers: 0 });
   const prevConv = useRef<number | null | undefined>(undefined);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [serversRunning, setServersRunning] = useState(0);
   const [liveOutput, setLiveOutput] = useState<Record<string, string>>({}); // saída ao vivo por chamada (run_command)
   const [liveTasks, setLiveTasks] = useState<Task[] | null>(null); // lista de tarefas do run atual
+  // Alternância Chat | Trajetória: vale só para a página em que foi escolhida. Guardar a chave (seção +
+  // conversa) em vez de "trajetoria" solto faz qualquer navegação voltar ao Chat sem efeito nenhum.
+  const [trajetoriaEm, setTrajetoriaEm] = useState<string | null>(null);
   const [queued, setQueued] = useState<string[]>([]); // mensagens na fila (enviadas durante a execução)
   const [unread, setUnread] = useState<Set<number>>(new Set()); // conversas que terminaram em segundo plano
   const [changesKey, setChangesKey] = useState(0); // muda quando um turno termina: aba Alterações recarrega
@@ -306,13 +370,32 @@ export default function App() {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [editing, setEditing] = useState<{ id: number; text: string } | null>(null);
+  const [rewindAsk, setRewindAsk] = useState<
+    { conv: number; messageId: number; keep: boolean; content: string | null; files: string[] } | null
+  >(null);
   const [uploading, setUploading] = useState(false);
   const runId = useRef<string | null>(null);
   const streamCtl = useRef<AbortController | null>(null);
   // Só acompanha o fim da conversa enquanto o usuário estiver no fim: se ele subir, a rolagem fica onde está.
   const { ref: scroller, fim: fimDoChat, onScroll: seguirFim, colar } = useStickyBottom<HTMLDivElement>([messages, draft, approvals]);
 
-  const update = (p: Partial<Settings>) => setSettings((s) => ({ ...s, ...p }));
+  const update = (p: Partial<Settings>) => {
+    if (section === "maestro" && (p.provider !== undefined || p.model !== undefined)) {
+      const novo = { provider: p.provider ?? settings.provider, model: p.model ?? settings.model };
+      setConfig((c) => ({ ...c, maestro_model: novo }));
+      api.put("/settings", { maestro_model: novo }).catch((e) => setError(e.message));
+      const { provider: _p, model: _m, ...resto } = p;
+      p = resto;
+    }
+    setSettings((s) => ({ ...s, ...p }));
+  };
+
+  /** Pausar: o passo em curso termina (inclusive o do Worker) e o próximo espera o Continuar. */
+  function pausar(sim: boolean) {
+    if (!runId.current) return;
+    setPausado(sim);
+    api.post(`/runs/${runId.current}/pause`, { paused: sim }).catch((e) => setError(e.message));
+  }
 
   /** Trocar o modo no meio da resposta vale já para a próxima ferramenta (e libera o card aberto). */
   function changePermission(permission: Permission) {
@@ -323,8 +406,8 @@ export default function App() {
   }
 
   useEffect(() => {
-    localStorage.setItem("forja.settings", JSON.stringify(settings));
-  }, [settings]);
+    localStorage.setItem("forja.settings", JSON.stringify(geral));
+  }, [geral]);
 
   useEffect(() => {
     localStorage.setItem("forja.section", section);
@@ -411,6 +494,43 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
+  // Avisos que não dependem da conversa aberta na tela: aprovação esperando (inclusive do Worker) e
+  // Maestro que terminou. Vêm da atividade, que cobre todas as conversas; a aberta já avisa pelo stream.
+  const atividadeAnterior = useRef<Activity | null>(null);
+  useEffect(() => {
+    const antes = atividadeAnterior.current;
+    atividadeAnterior.current = activity;
+    if (!antes) return;
+    const conv = (id: number) => conversationsRef.current.find((c) => c.id === id);
+    const abrir = (id: number) => () => openConversation(id);
+    const rodandoAntes = new Map(antes.conversations.filter((c) => c.running).map((c) => [c.id, c]));
+    for (const c of activity.conversations) {
+      const eram = rodandoAntes.get(c.id)?.waiting ?? 0;
+      const alertasAntes = rodandoAntes.get(c.id)?.alertas ?? 0;
+      if ((c.alertas ?? 0) > alertasAntes && c.id !== currentId)
+        notify("Maestro pode estar travada", `${conv(c.id)?.title ?? "Conversa"}: confira e pare se precisar`, true, abrir(c.id));
+      if ((c.waiting ?? 0) > eram && c.id !== currentId) {
+        const maestro = conv(c.id)?.kind === "maestro";
+        notify(maestro ? "Maestro pede aprovação" : "Forja pede aprovação",
+               `${conv(c.id)?.title ?? "Conversa"}: ${c.waiting} esperando você`, true, abrir(c.id));
+      }
+    }
+    const agora = new Set(activity.conversations.filter((c) => c.running).map((c) => c.id));
+    // Turno aberto pelo servidor (aviso de processo em segundo plano que terminou) na conversa da tela:
+    // conecta no stream dele, como no F5.
+    if (currentId && !running && agora.has(currentId) && !rodandoAntes.has(currentId)) openConversation(currentId);
+    for (const id of rodandoAntes.keys()) {
+      if (agora.has(id) || conv(id)?.kind !== "maestro") continue;
+      api.get<MaestroBoard>(`/maestro/${id}/board`).then((b) => {
+        const humano = b.counts?.needs_human ?? 0;
+        notify("Maestro terminou",
+               `${conv(id)?.title ?? "Maestro"}: ${b.done}/${b.total} tarefas concluídas`
+               + (humano ? ` · ${humano} precisa(m) de você` : ""), true, abrir(id));
+      }).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activity]);
+
   // Abrir outra conversa volta a colar no fim.
   useEffect(() => {
     colar();
@@ -470,7 +590,9 @@ export default function App() {
       if (!live) return;
       if (live.run) return void setTimeout(tick, 5000);
       setUnread((u) => new Set(u).add(id));
-      notify("Forja terminou", conversationsRef.current.find((c) => c.id === id)?.title ?? "Conversa em segundo plano", true);
+      // Maestro tem aviso próprio (vigia da atividade, com o resumo das tarefas)
+      if (conversationsRef.current.find((c) => c.id === id)?.kind !== "maestro")
+        notify("Forja terminou", conversationsRef.current.find((c) => c.id === id)?.title ?? "Conversa em segundo plano", true);
       refreshConversations();
     };
     setTimeout(tick, 4000);
@@ -520,6 +642,7 @@ export default function App() {
     setDraft(null);
     setStatus(null);
     setApprovals({});
+    setPausado(false);
     setSubSteps({});
     setLiveOutput({});
     setLiveTasks(null);
@@ -549,7 +672,8 @@ export default function App() {
         loadCheckpoints(convId);
         loadChangesCount(convId);
         setChangesKey((k) => k + 1);
-        notify("Forja terminou", conversationsRef.current.find((c) => c.id === convId)?.title ?? "Resposta pronta");
+        if (conversationsRef.current.find((c) => c.id === convId)?.kind !== "maestro")
+          notify("Forja terminou", conversationsRef.current.find((c) => c.id === convId)?.title ?? "Resposta pronta");
       }
     }
   }
@@ -584,6 +708,7 @@ export default function App() {
     const run = live.run;
     if (run) {
       runId.current = run.run_id;
+      setPausado(!!run.paused);
       // Reconstrói o cronômetro da geração em curso. Ele nasce no `assistant_start`, que já passou
       // para quem está reabrindo, e sem isto a linha de t/s voltava zerada e parada enquanto a
       // resposta continuava chegando. O servidor manda segundos decorridos, não instantes.
@@ -594,7 +719,7 @@ export default function App() {
         : null;
       setDraft(run.draft);
       setSent(run.sent);
-      setApprovals(Object.fromEntries(run.approvals.map((a) => [a.call.id, { preview: a.preview, suggest: a.suggest, tool: a.call.name }])));
+      setApprovals(Object.fromEntries(run.approvals.map((a) => [a.call.id, { preview: a.preview, suggest: a.suggest, nota: a.nota, tool: a.call.name }])));
       // Aprovação pedida por um subagente: recria o passo dentro do bloco da delegação.
       const subs: Record<string, SubState> = {};
       for (const a of run.approvals.filter((a) => a.parent)) {
@@ -648,12 +773,44 @@ export default function App() {
         return all;
       });
       if (ev.type === "tool_result") setApprovals(({ [ev.message.tool_call_id]: _, ...rest }) => rest);
-      if (ev.type === "sub_status") setSubSteps((all) => ({ ...all, [pid]: { steps: all[pid]?.steps ?? [], status: ev.text } }));
-      if (ev.type === "approval_request")
-        setApprovals((a) => ({ ...a, [ev.call.id]: { preview: ev.preview, suggest: ev.suggest, tool: ev.call.name } }));
+      if (ev.type === "sub_status") setSubSteps((all) => ({ ...all, [pid]: { ...all[pid], steps: all[pid]?.steps ?? [], status: ev.text } }));
+      // Conversa do Worker de contrato: a coluna Worker do Maestro desenha com o mesmo conversaDe do chat.
+      setSubSteps((all) => {
+        const cur = all[pid] ?? { status: "", steps: [] };
+        const msgs = cur.mensagens ?? [];
+        const d = cur.draft ?? null;
+        const com = (x: Partial<SubState>) => ({ ...all, [pid]: { ...cur, ...x } });
+        switch (ev.type) {
+          case "sub_assistant_start":
+            return com({ draft: { content: "", thinking: "", tool: null } });
+          case "sub_token":
+            return d ? com({ draft: { ...d, content: d.content + ev.text } }) : all;
+          case "sub_thinking":
+            return d ? com({ draft: { ...d, thinking: d.thinking + ev.text } }) : all;
+          case "sub_tool_token":
+            return d
+              ? com({ draft: { ...d, tool: { name: ev.name || d.tool?.name || "", text: ((d.tool?.text ?? "") + ev.text).slice(-TOOL_TAIL) } } })
+              : all;
+          case "sub_message":
+            return com({
+              mensagens: [...msgs.filter((m) => m.id !== ev.message.id), ev.message],
+              draft: ev.message.role === "assistant" ? null : d,
+            });
+          case "tool_result":  // só os resultados numerados pertencem à conversa gravada do Worker
+            return ev.message.id != null ? com({ mensagens: [...msgs, ev.message] }) : all;
+          default:
+            return all;
+        }
+      });
+      if (ev.type === "tool_output")  // saída ao vivo de comando do Worker, no bloco dele
+        setLiveOutput((o) => ({ ...o, [ev.call_id]: ((o[ev.call_id] ?? "") + ev.text).slice(-20_000) }));
+      if (ev.type === "approval_request") {
+        setApprovals((a) => ({ ...a, [ev.call.id]: { preview: ev.preview, suggest: ev.suggest, nota: ev.nota, tool: ev.call.name } }));
+        notify("Worker pede aprovação", `${ev.call.name}: ${String(ev.call.arguments?.command ?? ev.call.arguments?.path ?? "")}`, true);
+      }
       if (ev.type === "tool_call" && typeof ev.call?.name === "string" && ev.call.name.startsWith("browser_")) {
         setBrowserOpen(true);
-        setRight({ tab: "browser", collapsed: false });
+        abrir("browser");
       }
       return;
     }
@@ -665,7 +822,7 @@ export default function App() {
         // O agente foi ao navegador: mostra a aba Navegador para o usuário acompanhar ao vivo.
         if (typeof ev.call?.name === "string" && ev.call.name.startsWith("browser_")) {
           setBrowserOpen(true);
-          setRight({ tab: "browser", collapsed: false });
+          abrir("browser");
         }
         break;
       case "tools_sent":
@@ -679,6 +836,22 @@ export default function App() {
         break;
       case "tasks":
         setLiveTasks(ev.tasks);
+        break;
+      case "board":
+        setBoard(ev.board);
+        break;
+      case "paused":
+        setPausado(!!ev.paused);
+        break;
+      case "alerta":  // "a Maestro pode estar travada": o sistema não para sozinho, avisa você
+        notify("Maestro pode estar travada", ev.text, true);
+        break;
+      case "task_update":
+        // Só marca que mudou; o board inteiro vem no evento "board" ou no próximo polling.
+        break;
+      case "model":
+        // "ready"/"unloaded" são o fim da troca: o indicador some em vez de ficar preso na tela.
+        setModelPhase(ev.phase === "ready" || ev.phase === "unloaded" || ev.phase === "cleared" ? null : (ev as ModelPhase));
         break;
       case "title": // o modelo resumiu um título melhor no fim do turno
         refreshConversations();
@@ -743,16 +916,16 @@ export default function App() {
         setMessages((ms) => [...ms, ev.message]);
         break;
       case "approval_request":
-        setApprovals((a) => ({ ...a, [ev.call.id]: { preview: ev.preview, suggest: ev.suggest, tool: ev.call.name } }));
-        notify("Forja pede aprovação", `${ev.call.name}: ${String(ev.call.arguments?.command ?? ev.call.arguments?.path ?? "")}`);
+        setApprovals((a) => ({ ...a, [ev.call.id]: { preview: ev.preview, suggest: ev.suggest, nota: ev.nota, tool: ev.call.name } }));
+        notify("Forja pede aprovação", `${ev.call.name}: ${String(ev.call.arguments?.command ?? ev.call.arguments?.path ?? "")}`, true);
         break;
       case "plan_request":
         setApprovals((a) => ({ ...a, [ev.call.id]: { preview: null, tool: "exit_plan_mode", plan: ev.plan } }));
-        notify("Forja propôs um plano", "Abra a conversa para aprovar ou pedir ajustes.");
+        notify("Forja propôs um plano", "Abra a conversa para aprovar ou pedir ajustes.", true);
         break;
       case "question_request":
         setApprovals((a) => ({ ...a, [ev.call.id]: { preview: null, tool: "ask_user", questions: ev.questions } }));
-        notify("Forja tem uma pergunta", String(ev.question ?? ""));
+        notify("Forja tem uma pergunta", String(ev.question ?? ""), true);
         break;
       case "context":
         setCtx(ev);
@@ -769,6 +942,17 @@ export default function App() {
     refreshConversations();
     return c.id;
   }
+
+  // O campo cresce com o texto até COMPOSER_MAX e, daí em diante, rola por dentro (como o Claude Desktop).
+  // Contar "\n" não serve: uma linha longa quebra na tela e continuaria de duas linhas de altura.
+  useEffect(() => {
+    const el = composer.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const teto = Math.min(COMPOSER_MAX, Math.round(window.innerHeight * 0.45));
+    el.style.height = `${Math.min(el.scrollHeight, teto)}px`;
+    el.style.overflowY = el.scrollHeight > teto ? "auto" : "hidden";
+  }, [input, attachments.length]);
 
   /** Seletor de pasta do sistema (Explorer no Windows) via forja-picker; sem ele, o seletor interno. */
   async function chooseFolder() {
@@ -822,10 +1006,8 @@ export default function App() {
     }
   }
 
-  async function undoTurn(turnId: number, files: string[]) {
+  async function undoTurn(turnId: number) {
     if (currentId === null) return;
-    const lista = files.map((f) => "• " + f).join("\n");
-    if (!confirm(`Desfazer as alterações feitas pelo agente a partir desta mensagem?\n\n${lista}\n\nMudanças feitas por comandos (run_command) não são desfeitas.`)) return;
     try {
       await api.post(`/conversations/${currentId}/checkpoints/restore`, { turn_id: turnId });
     } catch (e: any) {
@@ -859,20 +1041,18 @@ export default function App() {
   }
 
   /** Reenvia a partir de uma mensagem: apaga o que vem depois e roda de novo. */
-  async function rewindAndRun(messageId: number, keep: boolean, content: string | null) {
+  async function rewindAndRun(messageId: number, keep: boolean, content: string | null, restore?: boolean) {
     if (currentId === null || running) return;
     setError("");
-    // Turnos que vão sumir e alteraram arquivos: pergunta se desfaz os arquivos também.
+    setRewindAsk(null);
+    // Turnos que vão sumir e alteraram arquivos: pergunta na tela (confirm() não funciona no
+    // Electron, ver Confirma.tsx) se desfaz os arquivos também, e só roda depois da resposta.
     const changed = Object.entries(checkpoints)
       .filter(([turn]) => Number(turn) >= messageId)
       .flatMap(([, files]) => files);
-    const restore_files =
-      changed.length > 0 &&
-      confirm(
-        `O agente alterou ${changed.length} arquivo(s) a partir desta mensagem:\n\n${[...new Set(changed)]
-          .map((f) => "• " + f)
-          .join("\n")}\n\nOK = desfazer essas alterações também · Cancelar = manter os arquivos como estão`,
-      );
+    if (changed.length && restore === undefined)
+      return setRewindAsk({ conv: currentId, messageId, keep, content, files: [...new Set(changed)] });
+    const restore_files = !!restore;
     try {
       const r = await api.post<{ messages: Message[] }>(`/conversations/${currentId}/rewind`, {
         message_id: messageId,
@@ -891,8 +1071,8 @@ export default function App() {
         content,
         provider: settings.provider,
         model: settings.model,
-        permission: section === "agent" ? settings.permission : "manual",
-        effort: settings.effort,
+        permission: section === "agent" || section === "maestro" ? settings.permission : "manual",
+        effort: section === "maestro" && settings.effort === "extremo" ? "maximo" : settings.effort,
       }),
     });
   }
@@ -920,32 +1100,47 @@ export default function App() {
     return () => clearTimeout(t);
   }, [mentionQuery, currentId]);
 
-  /** Escolher no menu troca o `@trecho` pelo caminho: o agente lê o arquivo se precisar. */
+  /** Escolher no menu troca o `@trecho` pelo caminho: o agente lê o arquivo se precisar. Conversa entra
+   *  como `@conversa:ID`, que o backend resolve (sessoes.mencionadas). */
   function applyMention(path: string) {
     setInput((v) => v.replace(/@\S*$/, `${path} `));
     setMentionHits([]);
+    // Clicar no menu tira o foco do campo; sem isto o próximo texto digitado ia para o começo.
+    requestAnimationFrame(() => {
+      const t = composer.current;
+      if (!t) return;
+      t.focus();
+      t.selectionStart = t.selectionEnd = t.value.length;
+    });
   }
+  // Conversas citáveis por @: título que casa com o que foi digitado depois do @ (da mesma seção).
+  const conversasCitaveis =
+    mentionQuery && mentionQuery.length >= 2
+      ? conversations
+          .filter((c) => c.id !== currentId && c.title.toLowerCase().includes(mentionQuery.toLowerCase()))
+          .slice(0, 4)
+      : [];
 
-  async function applySkill(s: Skill) {
+  async function applySkill(s: Skill): Promise<void> {
     const args = input.slice(1).split(" ").slice(1).join(" ");
     setInput("");
     setSlashIndex(0);
     if (s.kind === "prompt") {
-      setInput((s.prompt ?? "").replace("$ARGUMENTS", args.trim()).trim());
-      return;
+      // Vai como o usuário escreveu; o backend anexa a skill inteira para o modelo (skills.invocada).
+      return send(`/${s.name} ${args}`.trim(), true);
     }
     if (s.action === "compact") return compactNow();
     if (s.action === "commit" || s.action === "pr") {
       setChangesAction(s.action);
-      setRight({ tab: "changes", collapsed: false });
+      abrir("changes");
       return;
     }
-    if (s.action === "changes") setRight({ tab: "changes", collapsed: false });
+    if (s.action === "changes") abrir("changes");
   }
 
-  async function send() {
-    const content = input.trim();
-    if (slashQuery !== null && slashMatches.length) return applySkill(slashMatches[slashIndex] ?? slashMatches[0]);
+  async function send(texto?: string, skill = false): Promise<void> {
+    const content = (texto ?? input).trim();
+    if (!skill && slashQuery !== null && slashMatches.length) return applySkill(slashMatches[slashIndex] ?? slashMatches[0]);
     if (!content && !attachments.length) return;
     colar();  // mandar mensagem é dizer "quero ver o que vem agora": volta para o fim da conversa
     if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
@@ -981,8 +1176,8 @@ export default function App() {
         content,
         provider: settings.provider,
         model: settings.model,
-        permission: section === "agent" ? settings.permission : "manual",
-        effort: settings.effort,
+        permission: section === "agent" || section === "maestro" ? settings.permission : "manual",
+        effort: section === "maestro" && settings.effort === "extremo" ? "maximo" : settings.effort,
         attachments: files,
       }),
     });
@@ -1021,7 +1216,6 @@ export default function App() {
       .catch((e) => setError(e.message));
   }
 
-  /** Decisão sobre um plano: aprovar (com o modo de execução) ou pedir mudanças. */
   async function decidePlan(callId: string, approved: boolean, mode?: string, feedback?: string) {
     if (!runId.current) return;
     setApprovals((a) => ({ ...a, [callId]: { ...a[callId], sent: true } }));
@@ -1030,18 +1224,33 @@ export default function App() {
       .catch((e) => setError(e.message));
   }
 
-  const results = useMemo(() => {
-    const m = new Map<string, Message>();
-    for (const msg of messages) if (msg.role === "tool" && msg.tool_call_id) m.set(msg.tool_call_id, msg);
-    return m;
-  }, [messages]);
+  const results = useMemo(() => resultadosDe(messages), [messages]);
 
   const segments = useMemo(() => groupActivity(messages), [messages]);
+  const paginaAtual = `${section}:${currentId ?? "nova"}`;
+  // Mudou de página (outra conversa, outra seção): a escolha é esquecida, e voltar abre no Chat.
+  const [paginaVista, setPaginaVista] = useState(paginaAtual);
+  if (paginaVista !== paginaAtual) {
+    setPaginaVista(paginaAtual);
+    setTrajetoriaEm(null);
+  }
+  const vista: "chat" | "trajetoria" = trajetoriaEm === paginaAtual ? "trajetoria" : "chat";
+  const setVista = (v: "chat" | "trajetoria") => setTrajetoriaEm(v === "trajetoria" ? paginaAtual : null);
+  // Tarefas da barra acima do campo: a do turno em andamento, ou a última que a conversa registrou.
+  const tarefasAtuais = useMemo<Task[]>(() => {
+    if (running && liveTasks) return liveTasks;
+    const ultima = [...messages].reverse().find((m) => m.role === "event" && m.meta?.kind === "tasks");
+    return (ultima?.meta?.tasks as Task[] | undefined) ?? [];
+  }, [messages, running, liveTasks]);
 
   // Instâncias desta conversa (delegações) + processos vivos, para o indicador embaixo da resposta.
   const daConversa = activity.conversations.find((c) => c.id === currentId);
   const instancias = (daConversa?.subagents ?? 0) + (daConversa?.servers ?? 0);
-  const lastAssistantIndex = messages.reduce((acc, m, i) => (m.role === "assistant" ? i : acc), -1);
+  const plural = (n: number, um: string, varios: string) => (n ? `${n} ${n > 1 ? varios : um}` : "");
+  const rotuloInstancias = [
+    plural(daConversa?.subagents ?? 0, "agente em segundo plano", "agentes em segundo plano"),
+    plural(daConversa?.servers ?? 0, "processo rodando", "processos rodando"),
+  ].filter(Boolean).join(" · ");
 
   // Planos do modo Plano nesta conversa (chamadas exit_plan_mode), para a aba Planos.
   const plans = useMemo<PlanEntry[]>(() => {
@@ -1066,32 +1275,7 @@ export default function App() {
 
   // Estatísticas por turno (todas as iterações do agente até a próxima mensagem do usuário),
   // exibidas embaixo da última resposta do turno.
-  const turns = useMemo(() => {
-    const out = new Map<number, { stats: TurnStats | null; text: string; userId: number | null }>();
-    let acc: Stats[] = [];
-    let text: string[] = [];
-    let last = -1;
-    let userId: number | null = null;
-    const flush = () => {
-      if (last >= 0) out.set(last, { stats: acc.length ? aggregate(acc) : null, text: text.join("\n\n"), userId });
-      acc = [];
-      text = [];
-      last = -1;
-    };
-    messages.forEach((m, i) => {
-      if (m.role === "user") {
-        flush();
-        userId = m.id;
-      }
-      else if (m.role === "assistant") {
-        last = i;
-        if (m.meta?.stats) acc.push(m.meta.stats);
-        if (m.content) text.push(m.content);
-      }
-    });
-    flush();
-    return out;
-  }, [messages]);
+  const turns = useMemo(() => turnosDe(messages), [messages]);
 
   // Linha acima do input: contexto atual, saída do último turno e média de t/s da conversa.
   const summary = useMemo(() => {
@@ -1103,7 +1287,17 @@ export default function App() {
     const used = lastStats ? lastStats.prompt_tokens + lastStats.tokens : (ctx?.used ?? null);
     const max = ctx?.max ?? lastStats?.ctx_max ?? null;
     const models = [...new Set(all.map((s) => s.model).filter(Boolean))];
-    return { used, max, out: lastTurn?.tokens ?? null, avg, models };
+    // Painel de sessão como o do dsh: turnos, passos, tokens somados e acerto de cache do servidor.
+    const comCache = all.filter((s) => s.cached != null);
+    const promptComCache = comCache.reduce((n, s) => n + s.prompt_tokens, 0);
+    const sessao = {
+      turnos: messages.filter((m) => m.role === "user").length,
+      passos: all.length,
+      tokens: all.reduce((n, s) => n + s.prompt_tokens + s.tokens, 0),
+      cache: promptComCache ? comCache.reduce((n, s) => n + (s.cached ?? 0), 0) / promptComCache : null,
+    };
+    const partes = (ctx as { partes?: Stats["partes"] } | null)?.partes ?? lastStats?.partes ?? null;
+    return { used, max, out: lastTurn?.tokens ?? null, avg, models, sessao, partes };
   }, [messages, turns, ctx]);
 
   function changeSection(next: Section) {
@@ -1203,6 +1397,541 @@ export default function App() {
     return [...by].map(([model, list]) => ({ ...aggregate(list), model }));
   }, [messages]);
 
+  // O mesmo composer serve o chat, o agente e o cockpit do Maestro: modos, esforço, anexos, `/` e
+  // `@`, anel de contexto e seletor de modelo ficam idênticos porque são literalmente o mesmo bloco.
+  // Agente e Maestro agem numa pasta de trabalho: os dois têm seletor de pasta, modos de permissão,
+  // aviso de modo e Shift+Tab. Uma condição só, para os dois não divergirem de novo.
+  const agentica = section === "agent" || section === "maestro";
+  // A conversa desenhada como no chat. Função de uma lista de mensagens, e não bloco fixo, porque o
+  // cockpit do Maestro desenha a do Worker com ela também: o mesmo "Raciocinou ›", os mesmos blocos
+  // de ferramenta com diff, a mesma linha de tokens e t/s — igual por construção, não por imitação.
+  // `readonly` (Worker): sem editar, desfazer nem regenerar, que são ações da conversa do usuário.
+  const conversaDe = (
+    msgs: Message[],
+    o: { draft?: Draft | null; status?: string | null; stats?: TurnStats | null; fase?: string; vivo?: boolean; readonly?: boolean } = {},
+  ) => {
+    const proprio = msgs === messages;
+    const res = proprio ? results : resultadosDe(msgs);
+    const seg = proprio ? segments : groupActivity(msgs);
+    const tur = proprio ? turns : turnosDe(msgs);
+    const lu = msgs.map((m) => m.role).lastIndexOf("user");
+    const la = msgs.reduce((acc, m, i) => (m.role === "assistant" ? i : acc), -1);
+    const vivo = o.vivo ?? running;
+    const so = !!o.readonly;
+    return (
+      <>
+            {msgs.map((m, i) => {
+              if (m.role === "user")
+                return (
+                  <div key={m.id} className="group my-6 flex flex-col items-end">
+                    {!so && editing?.id === m.id ? (
+                      <div className="w-full rounded-3xl border border-line bg-surface p-3">
+                        <textarea
+                          autoFocus
+                          rows={Math.min(10, editing.text.split("\n").length + 1)}
+                          value={editing.text}
+                          onChange={(e) => setEditing({ id: m.id, text: e.target.value })}
+                          className="w-full resize-none bg-transparent text-[15px] text-fg focus:outline-none"
+                        />
+                        <div className="mt-2 flex justify-end gap-2">
+                          <button onClick={() => setEditing(null)} className="rounded-full border border-line px-4 py-1.5 text-sm text-fg hover:bg-raised">
+                            Cancelar
+                          </button>
+                          <button
+                            onClick={() => {
+                              const text = editing.text.trim();
+                              setEditing(null);
+                              if (text) rewindAndRun(m.id, false, text);
+                            }}
+                            className="rounded-full bg-fg px-4 py-1.5 text-sm font-medium text-black hover:bg-white"
+                          >
+                            Enviar de novo
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        {!!m.content && (
+                          <div className="max-w-[85%] rounded-3xl bg-raised px-5 py-2.5 whitespace-pre-wrap">{m.content}</div>
+                        )}
+                        <Attachments list={m.meta?.attachments ?? []} />
+                        {!so && <div className="mt-1 flex opacity-0 transition group-hover:opacity-100">
+                          <CopyButton text={m.content} />
+                          <button
+                            title="Editar e enviar de novo"
+                            disabled={vivo}
+                            onClick={() => setEditing({ id: m.id, text: m.content })}
+                            className="rounded-md p-1.5 text-faint hover:bg-raised hover:text-fg disabled:opacity-30"
+                          >
+                            <Edit />
+                          </button>
+                        </div>}
+                      </>
+                    )}
+                  </div>
+                );
+              if (m.role === "event")
+                return String(m.meta?.kind ?? "") in NOTA_DO_AGENTE || m.meta?.kind === "tasks" ? null : <EventNotice key={m.id} m={m} />; // essas vão no bloco de atividade
+              if (m.role !== "assistant") return null;
+              const turn = tur.get(i);
+              const showTurn = turn && !(vivo && i > lu);
+              const toolNode = (c: ToolCall, queued: boolean) => (
+                <ToolBlock
+                  call={c}
+                  result={res.get(c.id)}
+                  approval={approvals[c.id]}
+                  running={vivo}
+                  queued={queued}
+                  live={liveOutput[c.id]}
+                  hideImages
+                  onOpen={runner?.online ? openPath : undefined}
+                  onDecide={(ok, always) => decide(c.id, ok, always)}
+                >
+                  {c.name === "delegate_task" && (
+                    <SubagentSteps
+                      info={res.get(c.id)?.meta?.sub}
+                      status={subSteps[c.id]?.status}
+                      steps={
+                        subSteps[c.id]?.steps ??
+                        (res.get(c.id)?.meta?.sub?.steps ?? []).map((st: any) => ({
+                          call: { id: st.id, name: st.name, arguments: st.arguments },
+                          result: { ...st, content: st.result, tool_call_id: st.id } as Message,
+                        }))
+                      }
+                      approvals={approvals}
+                      running={vivo}
+                      onDecide={decide}
+                    />
+                  )}
+                </ToolBlock>
+              );
+              return (
+                <div key={m.id} className="my-4">
+                  {(seg.get(i) ?? []).map((seg, si) =>
+                    seg.kind === "text" ? (
+                      <Markdown key={si} text={m.content} />
+                    ) : seg.kind === "plan" ? (
+                      <div key={si} id={`plan-${seg.call.id}`}>
+                        <PlanCard
+                          plan={(approvals[seg.call.id]?.plan ?? res.get(seg.call.id)?.meta?.plan ?? seg.call.arguments.plan ?? "") as string}
+                          done={res.get(seg.call.id)}
+                          onDecide={(ok, mode, feedback) => decidePlan(seg.call.id, ok, mode, feedback)}
+                        />
+                      </div>
+                    ) : seg.kind === "question" ? (
+                      <QuestionCard
+                        key={si}
+                        questions={approvals[seg.call.id]?.questions ?? askQuestions(seg.call.arguments)}
+                        done={res.get(seg.call.id)}
+                        onAnswer={(a) => decideAnswer(seg.call.id, a)}
+                      />
+                    ) : (
+                      <ActivityGroup
+                        key={si}
+                        items={seg.items}
+                        results={res}
+                        live={vivo && i > lu}
+                        forceOpen={seg.items.some((p) => p.kind === "tool" && !!approvals[p.call.id] && !res.has(p.call.id))}
+                        renderTool={toolNode}
+                        onOpen={runner?.online ? openPath : undefined}
+                      />
+                    ),
+                  )}
+                  {showTurn && (
+                    <div className="mt-4 space-y-1.5">
+                      {turn.stats && (
+                        <StatsRow
+                          s={turn.stats}
+                          instances={i === la ? (so ? 0 : instancias) : 0}
+                          instancesLabel={rotuloInstancias}
+                          onInstances={() => abrir("servers")}
+                        />
+                      )}
+                      {!so && <div className="flex items-center">
+                        <CopyButton text={turn.text} />
+                        {turn.userId !== null && checkpoints[String(turn.userId)] && (
+                          <Confirma
+                            titulo={"Arquivos alterados neste turno:\n" + checkpoints[String(turn.userId)].join("\n")}
+                            desabilitado={vivo}
+                            onSim={() => void undoTurn(turn.userId!)}
+                            pergunta="Desfazer daqui em diante? run_command não volta"
+                            className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-faint hover:bg-raised hover:text-fg disabled:opacity-30"
+                            rotulo={<>
+                              <Undo className="size-3.5" /> desfazer {checkpoints[String(turn.userId)].length} arquivo
+                              {checkpoints[String(turn.userId)].length > 1 ? "s" : ""}
+                            </>}
+                          />
+                        )}
+                        {i > lu && lu >= 0 && (
+                          <button
+                            title="Gerar outra resposta"
+                            disabled={vivo}
+                            onClick={() => rewindAndRun(msgs[lu].id, true, null)}
+                            className="rounded-md p-1.5 text-faint hover:bg-raised hover:text-fg disabled:opacity-30"
+                          >
+                            <Refresh />
+                          </button>
+                        )}
+                      </div>}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {!so && rewindAsk?.conv === currentId && (
+              <div className="my-4 rounded-2xl border border-line bg-surface p-3 text-sm">
+                <p className="text-amber-300">
+                  O agente alterou {rewindAsk.files.length} arquivo(s) a partir desta mensagem. Desfazer essas alterações também?
+                </p>
+                <ul className="my-2 max-h-40 overflow-y-auto font-mono text-xs text-muted">
+                  {rewindAsk.files.map((f) => <li key={f}>• {f}</li>)}
+                </ul>
+                <div className="flex gap-2">
+                  <button className="rounded-full border border-line px-3 py-1 text-fg hover:bg-raised"
+                          onClick={() => rewindAndRun(rewindAsk.messageId, rewindAsk.keep, rewindAsk.content, true)}>
+                    Desfazer os arquivos
+                  </button>
+                  <button className="rounded-full border border-line px-3 py-1 text-fg hover:bg-raised"
+                          onClick={() => rewindAndRun(rewindAsk.messageId, rewindAsk.keep, rewindAsk.content, false)}>
+                    Manter os arquivos
+                  </button>
+                  <button className="px-3 py-1 text-muted hover:text-fg" onClick={() => setRewindAsk(null)}>
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            )}
+            {o.draft && (
+              <div className="my-4">
+                <Thinking text={o.draft.thinking} live={!o.draft.content && !o.draft.tool} />
+                {o.draft.tool && <ToolDraft tool={o.draft.tool} />}
+                {o.draft.content ? (
+                  <Markdown text={o.draft.content} />
+                ) : (
+                  !o.draft.thinking && !o.draft.tool && <div className="animate-pulse text-faint">●</div>
+                )}
+              </div>
+            )}
+            {o.status && !o.draft && <div className="my-4 animate-pulse text-sm text-muted">{o.status}</div>}
+            {o.stats && (
+              <div className="my-3">
+                <StatsRow
+                  s={o.stats}
+                  live={vivo}
+                  phase={o.fase}
+                  instances={(so ? 0 : instancias)}
+                  instancesLabel={rotuloInstancias}
+                  onInstances={() => abrir("servers")}
+                />
+              </div>
+            )}
+      </>
+    );
+  };
+
+  // Conteúdo de cada aba do painel direito. Função e não bloco fixo porque o cockpit do Maestro
+  // mostra as mesmas abas na doca dele: um lugar só monta Info, Planos, Instâncias...
+  const painelDe = (tab: RightTab) =>
+    tab === "browser" ? (
+      <BrowserPanel conv={browserKey} onState={(s) => setBrowserOpen(s.open)} />
+    ) : tab === "servers" ? (
+      <ServersPanel onCount={setServersRunning} onOpen={openConversation} current={currentId} />
+    ) : tab === "terminal" ? (
+      <TerminalPanel conv={browserKey} />
+    ) : tab === "changes" ? (
+      <ChangesPanel
+        conv={currentId}
+        provider={settings.provider}
+        model={settings.model}
+        refreshKey={changesKey}
+        action={changesAction}
+        onActionDone={() => setChangesAction(null)}
+        onCount={setChangesCount}
+        onOpen={openPath}
+        onConversationChanged={() => {
+          refreshConversations();
+          if (currentId !== null) openConversation(currentId);
+        }}
+      />
+    ) : tab === "plans" ? (
+      <PlansPanel
+        plans={plans}
+        onJump={(id) => document.getElementById(`plan-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
+      />
+    ) : (
+      <InfoPanel
+        settings={settings}
+        section={section}
+        toolMode={toolMode}
+        onToolMode={changeToolMode}
+        vision={vision}
+        onVision={changeVision}
+        runner={runner}
+        allTools={allTools}
+        sent={sent}
+        mcp={mcp}
+        onReloadMcp={reloadMcp}
+        usage={usage}
+      />
+    );
+  // A conversa inteira (rolagem com cola no fim, soltar arquivos, estado vazio): o cockpit do
+  // Maestro mostra esta mesma na coluna da Maestro.
+  const conversaBlock = (
+  <>
+  {showFolder && (
+    <FolderPicker
+      current={conv ? conv.workspace ?? null : pendingWs}
+      onPick={pickFolder}
+      onClose={() => setShowFolder(false)}
+      nativeError={nativeError}
+      onNative={chooseFolder}
+    />
+  )}
+
+  {vista === "trajetoria" && section !== "maestro" ? (
+    <Trajetoria messages={messages} />
+  ) : (
+  <div
+    ref={scroller}
+    className="flex-1 overflow-y-auto"
+    onScroll={seguirFim}
+    onDragOver={(e) => e.preventDefault()}
+    onDrop={(e) => {
+      e.preventDefault();
+      if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+    }}
+  >
+    <div className="mx-auto max-w-3xl px-5 py-6">
+      {!messages.length && !draft && (
+        <div className="mt-[22vh]">
+          <LogoMark className="mb-4 size-14 text-fg" title="Forja" />
+          <div className="text-3xl font-semibold">Olá!</div>
+          <div className="text-3xl text-faint">Como posso ajudar hoje?</div>
+          <div className="mt-4 text-sm text-muted">
+            {section === "agent" ? (
+              <>
+                Agente: lê e escreve em <span className="font-mono text-fg">{wsLabel}</span>
+              </>
+            ) : section === "maestro" ? (
+              <>
+                Maestro: diga o objetivo; ela planeja, delega aos Workers e valida em{" "}
+                <span className="font-mono text-fg">{wsLabel}</span>
+              </>
+            ) : (
+              "Chat: conversa com busca na web, sem acesso a arquivos."
+            )}
+          </div>
+        </div>
+      )}
+
+      {conversaDe(messages, { draft, status, stats: running ? liveStats : null, fase })}
+      <div ref={fimDoChat} />
+    </div>
+  </div>
+  )}
+  </>
+  );
+  const composerBlock = (
+  <div className="px-5 pb-4">
+    <div className="mx-auto max-w-3xl">
+      {agentica && <ModeWarning permission={settings.permission} />}
+      {error && <div className="mb-2 text-sm text-red-300">{error}</div>}
+
+      <CaixaPrompt>
+        {(attachments.length > 0 || uploading) && (
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <Attachments list={attachments} onRemove={(a) => setAttachments((l) => l.filter((x) => x !== a))} />
+            {uploading && <span className="text-xs text-muted">enviando…</span>}
+          </div>
+        )}
+        {section === "agent" && <GoalStrip convId={currentId} refreshKey={messages.length} />}
+        <TodosBar tasks={tarefasAtuais} live={running} />
+        {queued.length > 0 && (
+          <div className="mb-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
+            <span className="text-faint">na fila:</span>
+            {queued.map((q, i) => (
+              <span key={i} className="max-w-72 truncate rounded-full bg-raised px-2 py-0.5" title={q}>
+                {q}
+              </span>
+            ))}
+          </div>
+        )}
+        {(mentionHits.length > 0 || conversasCitaveis.length > 0) && (
+          <div className="mb-2 max-h-56 overflow-y-auto rounded-xl border border-line bg-bg py-1 text-sm">
+            {conversasCitaveis.map((c) => (
+              <button
+                key={`conv-${c.id}`}
+                onClick={() => applyMention(`@conversa:${c.id}`)}
+                title="Cita esta conversa: o conteúdo dela vai junto para o agente, como referência"
+                className="flex w-full items-center gap-3 px-3 py-1.5 text-left hover:bg-raised/60"
+              >
+                <span className="shrink-0 text-xs text-faint">conversa</span>
+                <span className="truncate text-fg">{c.title}</span>
+              </button>
+            ))}
+            {mentionHits.map((f, i) => (
+              <button
+                key={f}
+                onMouseEnter={() => setMentionIndex(i)}
+                onClick={() => applyMention(f)}
+                className={`flex w-full items-center gap-3 px-3 py-1.5 text-left ${i === mentionIndex ? "bg-raised" : "hover:bg-raised/60"}`}
+              >
+                <span className="truncate font-mono text-fg">{f}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {slashQuery !== null && slashMatches.length > 0 && (
+          <div className="mb-2 max-h-56 overflow-y-auto rounded-xl border border-line bg-bg py-1 text-sm">
+            {slashMatches.map((s, i) => (
+              <button
+                key={s.name}
+                onMouseEnter={() => setSlashIndex(i)}
+                onClick={() => applySkill(s)}
+                className={`flex w-full items-center gap-3 px-3 py-1.5 text-left ${i === slashIndex ? "bg-raised" : "hover:bg-raised/60"}`}
+              >
+                <span className="font-mono text-fg">/{s.name}</span>
+                <span className="truncate text-xs text-muted">{s.description}</span>
+                <span className="ml-auto shrink-0 text-[10px] text-faint">{s.kind === "action" ? "ação" : s.source ? "skill do projeto" : "prompt"}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        <textarea
+          value={input}
+          onChange={(e) => {
+            setInput(e.target.value);
+            setSlashIndex(0);
+          }}
+          onPaste={(e) => {
+            // Colar imagem/arquivo do clipboard vira anexo.
+            const files = Array.from(e.clipboardData?.files ?? []);
+            if (files.length) {
+              e.preventDefault();
+              addFiles(files);
+            }
+          }}
+          onKeyDown={(e) => {
+            if (mentionHits.length) {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                return setMentionIndex((i) => (i + 1) % mentionHits.length);
+              }
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                return setMentionIndex((i) => (i - 1 + mentionHits.length) % mentionHits.length);
+              }
+              if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                e.preventDefault();
+                return applyMention(mentionHits[mentionIndex] ?? mentionHits[0]);
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                return setMentionHits([]);
+              }
+            }
+            if (slashQuery !== null && slashMatches.length) {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                return setSlashIndex((i) => (i + 1) % slashMatches.length);
+              }
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                return setSlashIndex((i) => (i - 1 + slashMatches.length) % slashMatches.length);
+              }
+              if (e.key === "Tab") {
+                e.preventDefault();
+                return setInput(`/${slashMatches[slashIndex]?.name ?? slashMatches[0].name} `);
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                return setInput("");
+              }
+            }
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              send();
+            }
+            if (e.key === "Tab" && e.shiftKey && agentica) {
+              e.preventDefault();
+              changePermission(nextPermission(settings.permission, running));
+            }
+          }}
+          ref={composer}
+          rows={2}
+          placeholder={running ? "Mensagem para o próximo passo do agente (entra na fila)…" : section === "maestro" ? "Qual é o objetivo? A Maestro planeja e delega ( / para comandos, @ para arquivos )" : section === "agent" ? "Peça algo ao agente... ( / para comandos, @ para arquivos )" : "Digite uma mensagem..."}
+          className={campoPrompt}
+        />
+        <RodapePrompt>
+          <label title="Anexar arquivos ou imagens" className={redondo}>
+            <Paperclip className="size-4" />
+            <input
+              type="file"
+              multiple
+              hidden
+              onChange={(e) => {
+                if (e.target.files?.length) addFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+          </label>
+          {agentica && (
+            <PermissionMenu value={settings.permission} onChange={changePermission} running={running} />
+          )}
+          <EffortMenu value={settings.effort} onChange={(effort) => update({ effort })} semExtremo={section === "maestro"} />
+          <ContextRing
+            used={summary.used}
+            max={summary.max}
+            out={summary.out}
+            avg={summary.avg}
+            partes={summary.partes}
+            sessao={summary.sessao}
+            canCompact={currentId !== null && !running}
+            onCompact={compactNow}
+            provider={settings.provider}
+            models={summary.models}
+          />
+          <DireitaPrompt>
+          <ModelPicker
+            provider={settings.provider}
+            model={settings.model}
+            refreshKey={catalogKey}
+            minCtx={section === "maestro" ? config.min_ctx_maestro : undefined}
+            autoFallback={section !== "maestro"}
+            onChange={(provider, model) => update({ provider, model })}
+          />
+          {running ? (
+            <>
+              {input.trim() && (
+                <button
+                  onClick={() => send()}
+                  title="Enviar para a fila (o agente recebe no próximo passo)"
+                  className="grid size-9 place-items-center rounded-full border border-line text-fg hover:bg-raised"
+                >
+                  <ArrowUp />
+                </button>
+              )}
+              <button onClick={stop} title="Parar" className={pararClasse}>
+                <Square />
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => send()}
+              disabled={!input.trim() && !attachments.length}
+              title="Enviar"
+              className={enviarClasse}
+            >
+              <ArrowUp />
+            </button>
+          )}
+          </DireitaPrompt>
+        </RodapePrompt>
+      </CaixaPrompt>
+    </div>
+  </div>
+  );
+
   return (
     <div className="flex h-full">
       {!sidebarHidden && (
@@ -1240,7 +1969,10 @@ export default function App() {
           patchConversation(id, { archived });
           if (archived && id === currentId) newConversation();
         }}
-        onSettings={() => setShowSettings(true)}
+        onSettings={() => {
+          setTrajetoriaEm(null); // voltar das Configurações abre no Chat
+          setShowSettings(true);
+        }}
       />
       )}
       {showSettings && (
@@ -1250,22 +1982,26 @@ export default function App() {
       {/* Área de conteúdo: faixa superior com os botões do painel (como a barra de janela do Claude Desktop),
           e embaixo o chat com o painel lateral abrindo à direita, logo abaixo dos botões. */}
       <div className="flex min-w-0 flex-1 flex-col bg-bg">
-        <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
+        <div className="arrasta livre-controles flex h-12 shrink-0 items-center gap-2 px-3">
           {/* Esquerda: título, pasta e atalhos; direita: botões do painel (tudo numa faixa só, como no Claude Desktop). */}
           <div className="flex min-w-0 flex-1 items-center gap-2">
           {sidebarHidden && (
-            <SectionTabs
-              value={section}
-              onChange={changeSection}
-              sidebarHidden={sidebarHidden}
-              onToggleSidebar={() => setSidebarHidden(false)}
-            />
+            // Ocupa a largura da barra lateral (w-64) menos o px-3 e o gap-2 desta faixa: o título fica
+            // no mesmo x com a barra aberta ou fechada.
+            <div className="w-[calc(16rem-0.5rem)] shrink-0">
+              <SectionTabs
+                value={section}
+                onChange={changeSection}
+                sidebarHidden={sidebarHidden}
+                onToggleSidebar={() => setSidebarHidden(false)}
+              />
+            </div>
           )}
           <Laptop className="size-4 shrink-0 text-muted" />
           <span className="truncate text-sm font-medium text-fg" title={conv?.title}>
             {conv?.title ?? "Nova conversa"}
           </span>
-          {section === "agent" && (
+          {agentica && (
           <button
             onClick={chooseFolder}
             disabled={running || picking}
@@ -1278,7 +2014,7 @@ export default function App() {
             <ChevronDown className="size-3 shrink-0" />
           </button>
           )}
-          {section === "agent" && runner?.online && (
+          {agentica && runner?.online && (
             <>
               <button onClick={() => openPath(".", "editor")} title="Abrir a pasta da conversa no editor" className="rounded-md p-1 text-faint hover:bg-raised hover:text-fg">
                 <ExternalLink className="size-3.5" />
@@ -1288,22 +2024,80 @@ export default function App() {
               </button>
             </>
           )}
+          {agentica && section !== "maestro" && currentId !== null && (
+            <div className="ml-1 flex shrink-0 items-center rounded-md border border-line p-0.5 text-xs" role="tablist" aria-label="Visão da conversa">
+              {(["chat", "trajetoria"] as const).map((v) => (
+                <button key={v} role="tab" aria-selected={vista === v} onClick={() => setVista(v)}
+                  className={`rounded px-2 py-0.5 ${vista === v ? "bg-raised text-fg" : "text-muted hover:text-fg"}`}>
+                  {v === "chat" ? "Chat" : "Trajetória"}
+                </button>
+              ))}
+            </div>
+          )}
           {picking && <span className="text-xs text-muted">Escolha a pasta na janela do sistema (pode estar atrás do navegador).</span>}
           </div>
           <RightTabsBar
-            tab={right.tab}
-            collapsed={right.collapsed}
-            onSelect={(tab) => setRight((r) => (r.collapsed || r.tab !== tab ? { tab, collapsed: false } : { ...r, collapsed: true }))}
+            abertos={soltos(gradeTela)}
+            onSelect={(tab) => setRight((r) => (abertos(r).includes(tab) ? fecharTile(r, tab) : abrirTile(r, tab, larguraDe(tab))))}
+            extras={section === "maestro" ? ABAS_MAESTRO : undefined}
             browserOpen={browserOpen}
-            serversRunning={serversRunning}
+            serversRunning={Math.max(serversRunning, activity.servers)}
             plansPending={plans.filter((p) => p.status === "pendente").length}
             plansTotal={plans.length}
             changesCount={changesCount}
           />
         </div>
-        <div className="flex min-h-0 flex-1">
-      <main className="flex min-w-0 flex-1 flex-col bg-bg">
-        {section === "pesquisa" ? (
+        <Tiles
+          soPrincipal={section === "maestro"}
+          grade={gradeTela}
+          onGrade={setRight}
+          painel={(t) => painelDe(t as RightTab)}
+        >
+        {section === "maestro" ? (
+          <MaestroView
+            convId={currentId}
+            messages={messages}
+            draft={draft}
+            running={running}
+            approvals={approvals}
+            subSteps={subSteps}
+            board={board}
+            onBoard={setBoard}
+            modelPhase={modelPhase}
+            provider={settings.provider}
+            model={settings.model}
+            conversa={conversaBlock}
+            renderConversa={conversaDe}
+            composer={composerBlock}
+            grade={right}
+            onGrade={setRight}
+            painel={painelDe}
+            onDecide={decide}
+            pausado={pausado}
+            onPausar={pausar}
+            onPedir={(texto) => send(texto)}
+            onTestarWorker={(id, nome, spec) => {
+              // O Comparar lê isto ao abrir: teste pronto da especialidade e o modelo atual já na lista.
+              try {
+                localStorage.setItem("forja.comparar.preset", JSON.stringify({ id, nome, spec }));
+              } catch {
+                /* sem storage: abre o Comparar vazio */
+              }
+              changeSection("comparar");
+            }}
+            onNovaSessao={async () => {
+              // Contexto limpo, com cópia do trabalho aberto; a lista fica nesta conversa para consulta.
+              if (currentId === null) return;
+              try {
+                const r = await api.post<{ id: number }>(`/maestro/${currentId}/nova-sessao`, {});
+                await refreshConversations();
+                openConversation(r.id);
+              } catch (e: any) {
+                setError(e.message);
+              }
+            }}
+          />
+        ) : section === "pesquisa" ? (
           <PesquisaView
             conv={currentId}
             ensureConversation={ensureConversation}
@@ -1329,460 +2123,25 @@ export default function App() {
             model={settings.model}
             onError={setError}
             onConversationChanged={refreshConversations}
+            onAbrirNoNavegador={(url) => {
+              // a página do teste abre no navegador integrado desta conversa, com o painel à vista
+              abrir("browser");
+              // aba própria para cada página testada; testar de novo volta para ela (não duplica)
+              api.post(`/browser/abrir?conv=${browserKey}`, { url }).catch((e) => setError(e.message));
+            }}
+            onRodarNoTerminal={(comando) => {
+              abrir("terminal");
+              executarNoTerminal(browserKey, comando).catch((e) => setError(e.message));
+            }}
           />
         ) : (
         <>
-        {showFolder && (
-          <FolderPicker
-            current={conv ? conv.workspace ?? null : pendingWs}
-            onPick={pickFolder}
-            onClose={() => setShowFolder(false)}
-            nativeError={nativeError}
-            onNative={chooseFolder}
-          />
-        )}
+        {conversaBlock}
 
-        <div
-          ref={scroller}
-          className="flex-1 overflow-y-auto"
-          onScroll={seguirFim}
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => {
-            e.preventDefault();
-            if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
-          }}
-        >
-          <div className="mx-auto max-w-3xl px-5 py-6">
-            {!messages.length && !draft && (
-              <div className="mt-[22vh]">
-                <LogoMark className="mb-4 size-14 text-fg" title="Forja" />
-                <div className="text-3xl font-semibold">Olá!</div>
-                <div className="text-3xl text-faint">Como posso ajudar hoje?</div>
-                <div className="mt-4 text-sm text-muted">
-                  {section === "agent" ? (
-                    <>
-                      Agente: lê e escreve em <span className="font-mono text-fg">{wsLabel}</span>
-                    </>
-                  ) : (
-                    "Chat: conversa com busca na web, sem acesso a arquivos."
-                  )}
-                </div>
-              </div>
-            )}
-
-            {messages.map((m, i) => {
-              if (m.role === "user")
-                return (
-                  <div key={m.id} className="group my-6 flex flex-col items-end">
-                    {editing?.id === m.id ? (
-                      <div className="w-full rounded-3xl border border-line bg-surface p-3">
-                        <textarea
-                          autoFocus
-                          rows={Math.min(10, editing.text.split("\n").length + 1)}
-                          value={editing.text}
-                          onChange={(e) => setEditing({ id: m.id, text: e.target.value })}
-                          className="w-full resize-none bg-transparent text-[15px] text-fg focus:outline-none"
-                        />
-                        <div className="mt-2 flex justify-end gap-2">
-                          <button onClick={() => setEditing(null)} className="rounded-full border border-line px-4 py-1.5 text-sm text-fg hover:bg-raised">
-                            Cancelar
-                          </button>
-                          <button
-                            onClick={() => {
-                              const text = editing.text.trim();
-                              setEditing(null);
-                              if (text) rewindAndRun(m.id, false, text);
-                            }}
-                            className="rounded-full bg-fg px-4 py-1.5 text-sm font-medium text-black hover:bg-white"
-                          >
-                            Enviar de novo
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <>
-                        {!!m.content && (
-                          <div className="max-w-[85%] rounded-3xl bg-raised px-5 py-2.5 whitespace-pre-wrap">{m.content}</div>
-                        )}
-                        <Attachments list={m.meta?.attachments ?? []} />
-                        <div className="mt-1 flex opacity-0 transition group-hover:opacity-100">
-                          <CopyButton text={m.content} />
-                          <button
-                            title="Editar e enviar de novo"
-                            disabled={running}
-                            onClick={() => setEditing({ id: m.id, text: m.content })}
-                            className="rounded-md p-1.5 text-faint hover:bg-raised hover:text-fg disabled:opacity-30"
-                          >
-                            <Edit />
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                );
-              if (m.role === "event") return <EventNotice key={m.id} m={m} />;
-              if (m.role !== "assistant") return null;
-              const turn = turns.get(i);
-              const showTurn = turn && !(running && i > lastUserIndex);
-              const toolNode = (c: ToolCall, queued: boolean) => (
-                <ToolBlock
-                  call={c}
-                  result={results.get(c.id)}
-                  approval={approvals[c.id]}
-                  running={running}
-                  queued={queued}
-                  live={liveOutput[c.id]}
-                  hideImages
-                  onOpen={runner?.online ? openPath : undefined}
-                  onDecide={(ok, always) => decide(c.id, ok, always)}
-                >
-                  {c.name === "delegate_task" && (
-                    <SubagentSteps
-                      info={results.get(c.id)?.meta?.sub}
-                      status={subSteps[c.id]?.status}
-                      steps={
-                        subSteps[c.id]?.steps ??
-                        (results.get(c.id)?.meta?.sub?.steps ?? []).map((st: any) => ({
-                          call: { id: st.id, name: st.name, arguments: st.arguments },
-                          result: { ...st, content: st.result, tool_call_id: st.id } as Message,
-                        }))
-                      }
-                      approvals={approvals}
-                      running={running}
-                      onDecide={decide}
-                    />
-                  )}
-                </ToolBlock>
-              );
-              return (
-                <div key={m.id} className="my-4">
-                  {(segments.get(i) ?? []).map((seg, si) =>
-                    seg.kind === "text" ? (
-                      <Markdown key={si} text={m.content} />
-                    ) : seg.kind === "plan" ? (
-                      <div key={si} id={`plan-${seg.call.id}`}>
-                        <PlanCard
-                          plan={(approvals[seg.call.id]?.plan ?? results.get(seg.call.id)?.meta?.plan ?? seg.call.arguments.plan ?? "") as string}
-                          done={results.get(seg.call.id)}
-                          onDecide={(ok, mode, feedback) => decidePlan(seg.call.id, ok, mode, feedback)}
-                        />
-                      </div>
-                    ) : seg.kind === "question" ? (
-                      <QuestionCard
-                        key={si}
-                        questions={approvals[seg.call.id]?.questions ?? askQuestions(seg.call.arguments)}
-                        done={results.get(seg.call.id)}
-                        onAnswer={(a) => decideAnswer(seg.call.id, a)}
-                      />
-                    ) : (
-                      <ActivityGroup
-                        key={si}
-                        items={seg.items}
-                        results={results}
-                        live={running && i > lastUserIndex}
-                        forceOpen={seg.items.some((p) => p.kind === "tool" && !!approvals[p.call.id] && !results.has(p.call.id))}
-                        renderTool={toolNode}
-                        onOpen={openPath}
-                      />
-                    ),
-                  )}
-                  {showTurn && (
-                    <div className="mt-4 space-y-1.5">
-                      {turn.stats && (
-                        <StatsRow
-                          s={turn.stats}
-                          instances={i === lastAssistantIndex ? instancias : 0}
-                          onInstances={() => setRight({ tab: "servers", collapsed: false })}
-                        />
-                      )}
-                      <div className="flex items-center">
-                        <CopyButton text={turn.text} />
-                        {turn.userId !== null && checkpoints[String(turn.userId)] && (
-                          <button
-                            title={"Arquivos alterados neste turno:\n" + checkpoints[String(turn.userId)].join("\n")}
-                            disabled={running}
-                            onClick={() => undoTurn(turn.userId!, checkpoints[String(turn.userId)])}
-                            className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-faint hover:bg-raised hover:text-fg disabled:opacity-30"
-                          >
-                            <Undo className="size-3.5" /> desfazer {checkpoints[String(turn.userId)].length} arquivo
-                            {checkpoints[String(turn.userId)].length > 1 ? "s" : ""}
-                          </button>
-                        )}
-                        {i > lastUserIndex && lastUserIndex >= 0 && (
-                          <button
-                            title="Gerar outra resposta"
-                            disabled={running}
-                            onClick={() => rewindAndRun(messages[lastUserIndex].id, true, null)}
-                            className="rounded-md p-1.5 text-faint hover:bg-raised hover:text-fg disabled:opacity-30"
-                          >
-                            <Refresh />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-
-            {draft && (
-              <div className="my-4">
-                <Thinking text={draft.thinking} live={!draft.content && !draft.tool} />
-                {draft.tool && <ToolDraft tool={draft.tool} />}
-                {draft.content ? (
-                  <Markdown text={draft.content} />
-                ) : (
-                  !draft.thinking && !draft.tool && <div className="animate-pulse text-faint">●</div>
-                )}
-              </div>
-            )}
-            {status && !draft && <div className="my-4 animate-pulse text-sm text-muted">{status}</div>}
-            {running && liveStats && (
-              <div className="my-3">
-                <StatsRow
-                  s={liveStats}
-                  live
-                  phase={fase}
-                  instances={instancias}
-                  onInstances={() => setRight({ tab: "servers", collapsed: false })}
-                />
-              </div>
-            )}
-            {running && liveTasks && <TasksCard tasks={liveTasks} live />}
-            <div ref={fimDoChat} />
-          </div>
-        </div>
-
-        <div className="px-5 pb-4">
-          <div className="mx-auto max-w-3xl">
-            {section === "agent" && <ModeWarning permission={settings.permission} />}
-            {error && <div className="mb-2 text-sm text-red-300">{error}</div>}
-
-            <div className="rounded-3xl border border-line bg-surface px-4 pt-3 pb-2.5 focus-within:border-[#454545]">
-              {(attachments.length > 0 || uploading) && (
-                <div className="mb-1 flex flex-wrap items-center gap-2">
-                  <Attachments list={attachments} onRemove={(a) => setAttachments((l) => l.filter((x) => x !== a))} />
-                  {uploading && <span className="text-xs text-muted">enviando…</span>}
-                </div>
-              )}
-              {queued.length > 0 && (
-                <div className="mb-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
-                  <span className="text-faint">na fila:</span>
-                  {queued.map((q, i) => (
-                    <span key={i} className="max-w-72 truncate rounded-full bg-raised px-2 py-0.5" title={q}>
-                      {q}
-                    </span>
-                  ))}
-                </div>
-              )}
-              {mentionHits.length > 0 && (
-                <div className="mb-2 max-h-56 overflow-y-auto rounded-xl border border-line bg-bg py-1 text-sm">
-                  {mentionHits.map((f, i) => (
-                    <button
-                      key={f}
-                      onMouseEnter={() => setMentionIndex(i)}
-                      onClick={() => applyMention(f)}
-                      className={`flex w-full items-center gap-3 px-3 py-1.5 text-left ${i === mentionIndex ? "bg-raised" : "hover:bg-raised/60"}`}
-                    >
-                      <span className="truncate font-mono text-fg">{f}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-              {slashQuery !== null && slashMatches.length > 0 && (
-                <div className="mb-2 max-h-56 overflow-y-auto rounded-xl border border-line bg-bg py-1 text-sm">
-                  {slashMatches.map((s, i) => (
-                    <button
-                      key={s.name}
-                      onMouseEnter={() => setSlashIndex(i)}
-                      onClick={() => applySkill(s)}
-                      className={`flex w-full items-center gap-3 px-3 py-1.5 text-left ${i === slashIndex ? "bg-raised" : "hover:bg-raised/60"}`}
-                    >
-                      <span className="font-mono text-fg">/{s.name}</span>
-                      <span className="truncate text-xs text-muted">{s.description}</span>
-                      <span className="ml-auto shrink-0 text-[10px] text-faint">{s.kind === "action" ? "ação" : s.source ? "skill do projeto" : "prompt"}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-              <textarea
-                value={input}
-                onChange={(e) => {
-                  setInput(e.target.value);
-                  setSlashIndex(0);
-                }}
-                onPaste={(e) => {
-                  // Colar imagem/arquivo do clipboard vira anexo.
-                  const files = Array.from(e.clipboardData?.files ?? []);
-                  if (files.length) {
-                    e.preventDefault();
-                    addFiles(files);
-                  }
-                }}
-                onKeyDown={(e) => {
-                  if (mentionHits.length) {
-                    if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      return setMentionIndex((i) => (i + 1) % mentionHits.length);
-                    }
-                    if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      return setMentionIndex((i) => (i - 1 + mentionHits.length) % mentionHits.length);
-                    }
-                    if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
-                      e.preventDefault();
-                      return applyMention(mentionHits[mentionIndex] ?? mentionHits[0]);
-                    }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      return setMentionHits([]);
-                    }
-                  }
-                  if (slashQuery !== null && slashMatches.length) {
-                    if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      return setSlashIndex((i) => (i + 1) % slashMatches.length);
-                    }
-                    if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      return setSlashIndex((i) => (i - 1 + slashMatches.length) % slashMatches.length);
-                    }
-                    if (e.key === "Tab") {
-                      e.preventDefault();
-                      return setInput(`/${slashMatches[slashIndex]?.name ?? slashMatches[0].name} `);
-                    }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      return setInput("");
-                    }
-                  }
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    send();
-                  }
-                  if (e.key === "Tab" && e.shiftKey && section === "agent") {
-                    e.preventDefault();
-                    changePermission(nextPermission(settings.permission, running));
-                  }
-                }}
-                rows={Math.min(8, Math.max(2, input.split("\n").length))}
-                placeholder={running ? "Mensagem para o próximo passo do agente (entra na fila)…" : section === "agent" ? "Peça algo ao agente... ( / para comandos, @ para arquivos )" : "Digite uma mensagem..."}
-                className="w-full resize-none bg-transparent text-[15px] text-fg placeholder:text-faint focus:outline-none"
-              />
-              <div className="mt-1 flex items-center gap-2">
-                <label
-                  title="Anexar arquivos ou imagens"
-                  className="grid size-8 cursor-pointer place-items-center rounded-full border border-line text-muted hover:bg-raised hover:text-fg"
-                >
-                  <Paperclip className="size-4" />
-                  <input
-                    type="file"
-                    multiple
-                    hidden
-                    onChange={(e) => {
-                      if (e.target.files?.length) addFiles(e.target.files);
-                      e.target.value = "";
-                    }}
-                  />
-                </label>
-                {section === "agent" && (
-                  <PermissionMenu value={settings.permission} onChange={changePermission} running={running} />
-                )}
-                <EffortMenu value={settings.effort} onChange={(effort) => update({ effort })} />
-                <ContextRing
-                  used={summary.used}
-                  max={summary.max}
-                  out={summary.out}
-                  avg={summary.avg}
-                  canCompact={currentId !== null && !running}
-                  onCompact={compactNow}
-                  provider={settings.provider}
-                  models={summary.models}
-                />
-                <ModelPicker
-                  provider={settings.provider}
-                  model={settings.model}
-                  refreshKey={catalogKey}
-                  onChange={(provider, model) => update({ provider, model })}
-                />
-                {running ? (
-                  <>
-                    {input.trim() && (
-                      <button
-                        onClick={send}
-                        title="Enviar para a fila (o agente recebe no próximo passo)"
-                        className="grid size-9 place-items-center rounded-full border border-line text-fg hover:bg-raised"
-                      >
-                        <ArrowUp />
-                      </button>
-                    )}
-                    <button onClick={stop} title="Parar" className="grid size-9 place-items-center rounded-full bg-raised text-fg hover:bg-[#3a3a3a]">
-                      <Square />
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    onClick={send}
-                    disabled={!input.trim() && !attachments.length}
-                    title="Enviar"
-                    className="grid size-9 place-items-center rounded-full bg-fg text-black hover:bg-white disabled:bg-raised disabled:text-faint"
-                  >
-                    <ArrowUp />
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
+        {composerBlock}
         </>
         )}
-      </main>
-
-      <RightPanel tab={right.tab} collapsed={right.collapsed} onCollapse={(collapsed) => setRight((r) => ({ ...r, collapsed }))}>
-        {right.tab === "browser" ? (
-          <BrowserPanel conv={browserKey} onState={(s) => setBrowserOpen(s.open)} />
-        ) : right.tab === "servers" ? (
-          <ServersPanel onCount={setServersRunning} onOpen={openConversation} current={currentId} />
-        ) : right.tab === "terminal" ? (
-          <TerminalPanel conv={browserKey} />
-        ) : right.tab === "changes" ? (
-          <ChangesPanel
-            conv={currentId}
-            provider={settings.provider}
-            model={settings.model}
-            refreshKey={changesKey}
-            action={changesAction}
-            onActionDone={() => setChangesAction(null)}
-            onCount={setChangesCount}
-            onOpen={openPath}
-            onConversationChanged={() => {
-              refreshConversations();
-              if (currentId !== null) openConversation(currentId);
-            }}
-          />
-        ) : right.tab === "plans" ? (
-          <PlansPanel
-            plans={plans}
-            onJump={(id) => document.getElementById(`plan-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}
-          />
-        ) : (
-          <InfoPanel
-            settings={settings}
-            section={section}
-            toolMode={toolMode}
-            onToolMode={changeToolMode}
-            vision={vision}
-            onVision={changeVision}
-            runner={runner}
-            allTools={allTools}
-            sent={sent}
-            mcp={mcp}
-            onReloadMcp={reloadMcp}
-            usage={usage}
-          />
-        )}
-      </RightPanel>
-        </div>
+        </Tiles>
       </div>
     </div>
   );

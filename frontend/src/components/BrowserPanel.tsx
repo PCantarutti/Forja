@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, streamSSE } from "../api";
-import type { BrowserState } from "../types";
+import type { BrowserState, ServerInfo } from "../types";
 import { ArrowLeft, ArrowRight, Refresh, X } from "./icons";
 
 const EMPTY: BrowserState = { open: false, url: "", title: "", width: 1280, height: 800, scale: 1, tabs: [] };
@@ -11,6 +11,9 @@ const KEYS: Record<string, string> = { " ": "Space" };
  * Clique, teclado, roda, barra de URL, abas e upload vão para o backend, que repassa ao Chromium.
  * A sessão continua viva no backend quando esta aba não está montada; só o stream de frames fecha.
  */
+/** Aba nova (a URL-marcador da view nativa, ou about:blank): mostra a tela inicial do painel no lugar. */
+const emBranco = (url?: string) => !url || url.startsWith("about:blank");
+
 export default function BrowserPanel(props: { conv: string; onState: (s: BrowserState) => void }) {
   const { conv } = props;
   const q = `?conv=${encodeURIComponent(conv)}`;
@@ -65,11 +68,11 @@ export default function BrowserPanel(props: { conv: string; onState: (s: Browser
       setConnected(true);
       if (ev.type === "frame") {
         setFrame(`data:${ev.mime ?? "image/jpeg"};base64,${ev.data}`);
-        if (!editing.current) setUrlInput(ev.url);
+        if (!editing.current) setUrlInput(emBranco(ev.url) ? "" : ev.url);
       } else if (ev.type === "state") {
         setState(ev);
         onState.current(ev);
-        if (!editing.current) setUrlInput(ev.url);
+        if (!editing.current) setUrlInput(emBranco(ev.url) ? "" : ev.url);
         if (!ev.open) setFrame(null);
         // Sessão (re)aberta com outro tamanho: manda o tamanho do painel.
         if (ev.open && (!wanted.current || ev.width !== wanted.current.width || ev.height !== wanted.current.height)) {
@@ -116,6 +119,8 @@ export default function BrowserPanel(props: { conv: string; onState: (s: Browser
       clearTimeout(t);
     };
   }, [conv]);
+
+  const abaBranca = state.open && emBranco(state.url);
 
   // React registra "wheel" como passive: preventDefault só funciona com listener nativo.
   // Com as dependências certas: sem elas o listener era removido e registrado de novo a cada
@@ -237,7 +242,7 @@ export default function BrowserPanel(props: { conv: string; onState: (s: Browser
               t.active ? "border-line bg-surface text-fg" : "border-transparent text-muted hover:bg-raised/60 hover:text-fg"
             }`}
           >
-            <span className="truncate">{t.title || t.url.replace(/^https?:\/\//, "") || "nova aba"}</span>
+            <span className="truncate">{emBranco(t.url) ? "Nova aba" : t.title || t.url.replace(/^https?:\/\//, "")}</span>
             <button
               title="Fechar aba"
               onClick={(e) => {
@@ -312,7 +317,7 @@ export default function BrowserPanel(props: { conv: string; onState: (s: Browser
         }}
         className="min-h-0 flex-1 overflow-hidden bg-black outline-none focus:ring-1 focus:ring-sky-500/60 focus:ring-inset"
       >
-        {frame ? (
+        {frame && !abaBranca ? (
           <img
             ref={img}
             src={frame}
@@ -340,13 +345,16 @@ export default function BrowserPanel(props: { conv: string; onState: (s: Browser
           />
         ) : (
           <div className="p-4 text-muted">
-            {state.open
+            {abaBranca
+              ? "Aba nova. Digite uma URL acima ou abra um servidor abaixo."
+              : state.open
               ? "Aguardando a primeira tela…"
               : connected
                 ? conv === "0"
                   ? "Nenhuma sessão neste rascunho. Digite uma URL acima; cada conversa tem o próprio navegador."
                   : "Esta conversa não tem navegador aberto. Digite uma URL acima ou peça ao agente para abrir uma página."
                 : "Conectando ao navegador…"}
+            <ServidoresRodando onAbrir={(url) => call("navigate", { url })} />
           </div>
         )}
       </div>
@@ -355,6 +363,54 @@ export default function BrowserPanel(props: { conv: string; onState: (s: Browser
           ? `viewport ${state.width}×${state.height} (segue o painel) · render ${state.scale ?? 1}x · ${tabs.length} aba${tabs.length === 1 ? "" : "s"} · clique na tela para focar e digitar`
           : "sessão fechada"}
       </div>
+    </div>
+  );
+}
+
+
+/** `& "C:\...\python.exe" -m http.server` → `python -m http.server`: o caminho inteiro fica no title. */
+const comandoCurto = (cmd: string) =>
+  cmd.replace(/^&\s*/, "").replace(/"[^"]*[\\/]([^"\\/]+?)(?:\.exe)?"/gi, "$1");
+
+/** Servidores de desenvolvimento no ar (os do serve_start, de qualquer conversa) para abrir com um
+ *  clique, sem decorar a porta. Só os que já anunciaram o endereço no log. */
+function ServidoresRodando(props: { onAbrir: (url: string) => void }) {
+  const [servidores, setServidores] = useState<ServerInfo[]>([]);
+  useEffect(() => {
+    let vivo = true;
+    const ler = () =>
+      api.get<{ servers: ServerInfo[] }>("/servers")
+        .then((r) => vivo && setServidores(r.servers.filter((x) => x.alive && x.url)))
+        .catch(() => {});
+    ler();
+    const t = setInterval(ler, 4000);
+    return () => {
+      vivo = false;
+      clearInterval(t);
+    };
+  }, []);
+  if (!servidores.length) return null;
+  return (
+    <div className="mx-auto mt-6 flex max-w-lg flex-col gap-2">
+      <p className="text-center text-xs text-faint">Servidores rodando: clique para abrir aqui.</p>
+      {servidores.map((x) => (
+        <div key={x.name} className="flex items-center gap-3 rounded-xl border border-line bg-panel px-3 py-2">
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] text-faint">
+              {x.url!.replace(/^https?:\/\//, "")}
+              {x.cwd ? ` · ${x.cwd.split(/[\\/]/).filter(Boolean).pop()}` : ""}
+            </div>
+            <div className="truncate font-mono text-xs text-fg" title={x.command}>{comandoCurto(x.command)}</div>
+          </div>
+          <button
+            className="shrink-0 rounded-lg bg-raised px-3 py-1 text-xs text-fg hover:bg-line"
+            // o navegador integrado roda no container: servidor do host só é alcançado por host.docker.internal
+            onClick={() => props.onAbrir(x.where === "host" ? x.url!.replace(/\/\/(localhost|127\.0\.0\.1):/, "//host.docker.internal:") : x.url!)}
+          >
+            Abrir
+          </button>
+        </div>
+      ))}
     </div>
   );
 }

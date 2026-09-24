@@ -407,3 +407,48 @@ def test_imagem_antiga_nao_reescreve_o_historico_no_local(tmp_path, monkeypatch)
     local = ag.build_history(msgs, "native", {"vision"}, prefixo_estavel=True)
     assert imagens(nuvem) == ag.MAX_TOOL_IMAGES, "na nuvem o teto continua valendo"
     assert imagens(local) == 4, "no local nenhuma imagem sai: mexer no meio do histórico custa o cache"
+
+
+def test_raciocinio_antigo_fica_no_contexto_do_local(tmp_path, monkeypatch):
+    """Deixar o raciocínio cair quando chega uma mensagem nova do usuário reescreve o histórico lá
+    na segunda mensagem, e o servidor local reprocessa o contexto inteiro. Medido em uso: 165s,
+    183s e 205s no primeiro turno depois de uma mensagem, contra 3s de mediana nos outros passos.
+
+    Na nuvem continua caindo: lá o custo é por token enviado, e o cache não é nosso.
+    """
+    from app import agent as ag
+
+    msgs, ident = [], 0
+
+    def nova(role, **kw):
+        nonlocal ident
+        ident += 1
+        return Message(id=ident, role=role, content=kw.pop("content", ""),
+                       thinking=kw.pop("thinking", ""), status="ok", **kw)
+
+    # O raciocínio só volta em mensagem que CHAMOU ferramenta, que é o passo do laço do agente.
+    chamada = [{"id": "c1", "name": "list_dir", "arguments": {}}]
+    msgs.append(nova("user", content="primeira pergunta"))
+    msgs.append(nova("assistant", content="", thinking="pensei no turno antigo", tool_calls=chamada))
+    msgs.append(nova("tool", content="ok", name="list_dir", tool_call_id="c1"))
+    msgs.append(nova("user", content="segunda pergunta"))
+    msgs.append(nova("assistant", content="", thinking="pensei no turno de agora", tool_calls=chamada))
+
+    def raciocinios(hist):
+        return [m.get("reasoning_content") for m in hist if m.get("reasoning_content")]
+
+    nuvem = ag.build_history(msgs, "native", reasoning_back=True, prefixo_estavel=False)
+    local = ag.build_history(msgs, "native", reasoning_back=True, prefixo_estavel=True)
+    assert raciocinios(nuvem) == ["pensei no turno de agora"]
+    assert raciocinios(local) == ["pensei no turno antigo", "pensei no turno de agora"]
+
+
+def test_turno_so_de_raciocinio_leva_lembrete(monkeypatch, tmp_path):
+    """Modelo pensante com prompt grande monta o plano todo dentro do <think> e não emite nada.
+    Sem lembrete o turno acabava em silêncio: caixa de raciocínio na tela e nenhuma resposta."""
+    from app import agent
+
+    assert "raciocínio" in agent.nudge_text("native", mudo=True)
+    assert "chamou nenhuma ferramenta" in agent.nudge_text("native", mudo=False)
+    # o texto muda conforme o modo de tool calling
+    assert "<tool_call>" in agent.nudge_text("prompt", mudo=True)

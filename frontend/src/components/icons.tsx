@@ -35,6 +35,7 @@ export const Paperclip = base(<path d="M21 11.5 12.5 20a5 5 0 0 1-7-7l8-8a3.5 3.
 export const Refresh = base(<><path d="M21 12a9 9 0 1 1-2.6-6.4" /><path d="M21 4v5h-5" /></>);
 export const Shield = base(<><path d="M12 3l7 3v6c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6z" /><path d="m9 12 2 2 4-4" /></>);
 export const X = base(<path d="M6 6l12 12M18 6L6 18" />);
+export const Plus = base(<path d="M12 5v14M5 12h14" />);
 export const GitBranch = base(<><circle cx="6" cy="5" r="2.5" /><circle cx="6" cy="19" r="2.5" /><circle cx="18" cy="8" r="2.5" /><path d="M6 7.5v9M18 10.5c0 3-3 4-6 4s-6 1-6 3" /></>);
 export const Terminal = base(<><path d="m5 7 5 5-5 5" /><path d="M12 17h7" /></>);
 export const Pin = base(<><path d="M9 4h6l-1 6 3 3v1H7v-1l3-3z" /><path d="M12 14v6" /></>);
@@ -59,3 +60,7 @@ export const PanelLeft = base(<><rect x="3" y="4" width="18" height="16" rx="2" 
 export const Sliders = base(<><path d="M4 8h10M18 8h2M4 16h4M12 16h8" /><circle cx="16" cy="8" r="2" /><circle cx="10" cy="16" r="2" /></>);
 export const Clipboard = base(<><rect x="6" y="4" width="12" height="16" rx="2" /><path d="M9 4h6v3H9z" /><path d="M9 11h6M9 15h4" /></>);
 export const Wrench = base(<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z" />);
+export const Cpu = base(<><rect x="7" y="7" width="10" height="10" rx="1.5" /><rect x="4" y="4" width="16" height="16" rx="2.5" /><path d="M9 1.5v2.5M15 1.5v2.5M9 20v2.5M15 20v2.5M1.5 9H4M1.5 15H4M20 9h2.5M20 15h2.5" /></>);
+export const Image = base(<><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="8.5" cy="10" r="1.5" /><path d="m4 17 5-5 4 4 3-3 4 4" /></>);
+export const Recolher = base(<path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7" />);
+export const Expandir = base(<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />);

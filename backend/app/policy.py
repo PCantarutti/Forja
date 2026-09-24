@@ -43,9 +43,21 @@ SAFE_SUBCOMMANDS = {
     "python": set(), "python3": set(), "node": set(),  # tratados abaixo (só -m pytest / --version etc.)
 }
 SAFE_PYTHON_ARGS = {"-m", "--version", "-V", "-c"}
+# Cmdlets e utilitários do Windows que só leem (o run_command roda no PowerShell). Minúsculos: o
+# PowerShell não diferencia caixa. Escrita (Set-Content, Out-File, Remove-Item...) fica de fora.
+SAFE_WINDOWS = {
+    "get-date", "get-content", "gc", "type", "test-path", "select-string", "sls", "findstr",
+    "get-childitem", "gci", "dir", "get-location", "gl", "get-item", "gi", "get-itemproperty",
+    "select-object", "select", "where-object", "where", "measure-object", "measure", "sort-object",
+    "format-table", "ft", "format-list", "fl", "get-command", "gcm", "resolve-path", "split-path",
+    "join-path", "get-filehash", "write-output", "write-host",
+}
 DANGEROUS = re.compile(r"(^|\s)(rm|rmdir|mv|dd|mkfs|chmod|chown|sudo|su|kill|pkill|shutdown|reboot|"
                        r"curl|wget|nc|ssh|scp|apt|apt-get|yum|brew|systemctl)(\s|$)")
 REDIRECT = re.compile(r"[>]|(^|\s)tee(\s|$)")
+# Redirecionamento que não grava arquivo: juntar um fluxo no outro (2>&1) ou jogar no nulo.
+SEM_ARQUIVO = re.compile(r"\d?>&\d|\d?>\s*(/dev/null|nul|\$null)(?=$|[\s;&|)])", re.I)
+GIT_CONFIG_LEITURA = {"--get", "--get-all", "--list", "-l", "--show-origin"}
 # Comandos que destroem dados ou mexem no sistema: nem o modo Ignorar permissões deixa passar calado.
 # Casa no início de qualquer trecho (depois de ; && || | ( ` $( ), então `$(rm -rf x)` também é pego.
 DESTRUCTIVE = re.compile(
@@ -68,13 +80,33 @@ DESTRUCTIVE_EXTRA = re.compile(
 SPLIT = re.compile(r"&&|\|\||;|\|")
 
 
+def partes(command: str) -> list[str]:
+    """Os comandos de uma linha, separados por ; && || | FORA de aspas. Dividir pelo regex puro
+    cortava `python -c "import a; a.b()"` no meio das aspas, e o trecho sem fechar aspas virava
+    "comando desconhecido" — pedia aprovação no modo Automático para algo que é um comando só."""
+    out, atual, aspas, i = [], "", "", 0
+    while i < len(command):
+        ch = command[i]
+        if aspas:
+            aspas = "" if ch == aspas else aspas
+        elif ch in "\"'":
+            aspas = ch
+        elif m := SPLIT.match(command, i):
+            out.append(atual)
+            atual, i = "", m.end()
+            continue
+        atual += ch
+        i += 1
+    return [*out, atual]
+
+
 def chained(command: str) -> bool:
     """Mais de um comando na mesma string: separador, subshell, crase ou quebra de linha.
 
     Uma regra de auto-aprovação vale para UM comando, não para o que vier grudado nele:
     o glob casa prefixo, então `pytest*` sozinho liberaria `pytest -q; Remove-Item -Recurse C:/`.
     """
-    return (len(command.splitlines()) > 1 or len(SPLIT.split(command)) > 1
+    return (len(command.splitlines()) > 1 or len(partes(command)) > 1
             or "$(" in command or "`" in command)
 
 
@@ -92,23 +124,31 @@ def destructive_args(args: dict) -> bool:
 def safe_command(command: str) -> bool:
     """True se TODOS os trechos do comando forem leitura/teste conhecidos."""
     command = (command or "").strip()
-    if not command or REDIRECT.search(command) or DANGEROUS.search(command) or "$(" in command or "`" in command:
+    if not command or REDIRECT.search(SEM_ARQUIVO.sub(" ", command)) or DANGEROUS.search(command) or "$(" in command or "`" in command:
         return False
-    for part in SPLIT.split(command):
+    for part in partes(command):
         try:
-            words = shlex.split(part)
+            # posix=False: no Windows a barra invertida é separador de pasta, não escape
+            words = [w.strip("\"'") for w in shlex.split(part, posix=False)]
         except ValueError:
             return False
         if not words:
             return False
-        base = words[0].rsplit("/", 1)[-1]
-        if base in SAFE_COMMANDS:
+        base = words[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+        if base in SAFE_COMMANDS or base in SAFE_WINDOWS:
+            continue
+        if len(words) == 2 and words[1] in ("--version", "-V"):  # só imprime a versão
             continue
         if base in ("python", "python3", "node"):
             if len(words) > 1 and words[1] in SAFE_PYTHON_ARGS and (len(words) < 3 or words[2] in
                                                                     ("pytest", "unittest", "pip", "json.tool")):
                 continue
             return False
+        # `git config chave` e `git config --get/--list` leem; `git config chave valor` grava.
+        if base == "git" and words[1:2] == ["config"] and (
+                len(words) == 3 and not words[2].startswith("-") or
+                len(words) >= 3 and words[2] in GIT_CONFIG_LEITURA and len(words) <= 4):
+            continue
         subs = SAFE_SUBCOMMANDS.get(base)
         if subs and len(words) > 1 and words[1] in subs:
             continue
@@ -117,6 +157,8 @@ def safe_command(command: str) -> bool:
 
 
 WILDCARD = re.compile("[*?[]")
+# Ferramentas cujo `command` é um comando de shell: regras, leitura segura e destrutivo valem igual.
+SHELLS = ("run_command", "terminal_send")
 
 
 def _rule(name: str, args: dict) -> tuple[str, bool] | None:
@@ -129,7 +171,7 @@ def _rule(name: str, args: dict) -> tuple[str, bool] | None:
     for pattern in config.AUTO_APPROVE_TOOLS:
         if fnmatch(name, pattern):
             return f"ferramenta {pattern}", False
-    if name == "run_command":
+    if name in SHELLS:
         command = str(args.get("command") or "").strip()
         if chained(command):  # regra libera um comando, não o que vier grudado nele
             return None
@@ -164,7 +206,7 @@ def decide(tool, args: dict, mode: str) -> tuple[bool, str | None]:
     # esperando clique — uma sessão de teste passou 40 minutos travada num `python -m http.server`.
     # `safe_command` exige que TODOS os trechos encadeados sejam leitura conhecida, e recusa
     # redirecionamento e substituição de comando; escrita, rede e instalação seguem perguntando.
-    if mode == "auto" and tool.name == "run_command" and safe_command(str(args.get("command") or "")):
+    if mode == "auto" and tool.name in SHELLS and safe_command(str(args.get("command") or "")):
         return False, "modo Automático: comando só de leitura"
     if tool.always_ask:  # shell e browser_eval só passam por regra explícita ou bypass
         return True, None
@@ -181,7 +223,7 @@ def decide(tool, args: dict, mode: str) -> tuple[bool, str | None]:
 
 def suggest(name: str, args: dict) -> str:
     """Sugestão de regra para o botão 'sempre permitir' do card de aprovação."""
-    if name != "run_command":
+    if name not in SHELLS:
         return name
     first = str(args.get("command") or "").strip().split()
     if not first:

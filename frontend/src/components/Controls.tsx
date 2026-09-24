@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { Balanca, Bubble, Check, Clipboard, Code, Gauge, PanelLeft, Search, Shield, Sliders, X } from "./icons";
+import { Balanca, Bubble, Check, Clipboard, Code, Gauge, PanelLeft, Search, Shield, Sliders, Split, X } from "./icons";
 
 export type Permission = "auto" | "manual" | "edits" | "plan" | "bypass";
 export type Effort = "baixo" | "medio" | "alto" | "maximo" | "extremo";
 // "comparar" é o mesmo literal do `kind` da conversa no backend: a barra lateral interpola
 // a seção direto na query de /conversations.
-export type Section = "chat" | "agent" | "comparar" | "pesquisa";
+export type Section = "chat" | "agent" | "maestro" | "comparar" | "pesquisa";
 
 export const PERMISSIONS: { id: Permission; label: string; hint: string }[] = [
   { id: "auto", label: "Automático", hint: "O Forja decide: edições passam, o resto pergunta" },
@@ -31,7 +31,7 @@ export const nextPermission = (p: Permission, running = false): Permission => {
 };
 
 /** Menu que abre para cima, no rodapé do campo de mensagem (como no Claude). */
-function Menu<T extends string>(props: {
+export function Menu<T extends string>(props: {
   title: string;
   items: { id: T; label: string; hint: string }[];
   value: T;
@@ -119,12 +119,18 @@ export function PermissionMenu({
   );
 }
 
-export function EffortMenu({ value, onChange }: { value: Effort; onChange: (v: Effort) => void }) {
+export function EffortMenu({ value, onChange, semExtremo }: {
+  value: Effort;
+  onChange: (v: Effort) => void;
+  // No Maestro o "Extremo" não existe: ele é o modo em que o principal só delega, e a tela do
+  // Maestro já é isso — com contrato, tentativa e verificação.
+  semExtremo?: boolean;
+}) {
   return (
     <Menu
       title="Esforço"
-      items={EFFORTS}
-      value={value}
+      items={semExtremo ? EFFORTS.filter((e) => e.id !== "extremo") : EFFORTS}
+      value={semExtremo && value === "extremo" ? "maximo" : value}
       onChange={onChange}
       button={(label) => (
         <>
@@ -136,7 +142,7 @@ export function EffortMenu({ value, onChange }: { value: Effort; onChange: (v: E
   );
 }
 
-/** Chat | Agente | Comparar | Pesquisa, no canto superior esquerdo (com o botão de esconder a barra lateral). */
+/** Chat | Agente | Maestro | Comparar | Pesquisa, no canto superior esquerdo (com o botão de esconder a barra lateral). */
 export function SectionTabs(props: {
   value: Section;
   onChange: (v: Section) => void;
@@ -156,6 +162,7 @@ export function SectionTabs(props: {
         {([
           { id: "chat" as const, icon: <Bubble className="size-4" />, title: "Chat (busca na web)" },
           { id: "agent" as const, icon: <Code className="size-4" />, title: "Agente (ferramentas)" },
+          { id: "maestro" as const, icon: <Split className="size-4" />, title: "Maestro (planeja e delega a Workers)" },
           { id: "comparar" as const, icon: <Balanca className="size-4" />, title: "Comparar modelos" },
           { id: "pesquisa" as const, icon: <Search className="size-4" />, title: "Pesquisa profunda" },
         ]).map((t) => (

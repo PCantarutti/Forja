@@ -25,9 +25,10 @@ TIMEOUT = httpx.Timeout(connect=10, read=600, write=60, pool=10)
 
 
 class LLMError(Exception):
-    def __init__(self, message: str, status: int | None = None):
+    def __init__(self, message: str, status: int | None = None, retry_after: float | None = None):
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after  # segundos pedidos pelo provedor (cabeçalho Retry-After)
 
 
 LOCAL_TYPES = ("ollama", "lmstudio", "llamacpp")
@@ -98,9 +99,13 @@ async def context_limit(provider: str, model: str, num_ctx: int) -> int | None:
     return None
 
 
-def _raise_for(provider: str, status: int, body: bytes) -> None:
+def _raise_for(provider: str, status: int, body: bytes, cabecalhos=None) -> None:
     text = body.decode("utf-8", "replace")[:1000]
-    raise LLMError(f"{provider} respondeu HTTP {status}: {text}", status)
+    try:  # só o formato em segundos; a data HTTP é rara em API de modelo e cai na espera normal
+        espera = float((cabecalhos or {}).get("retry-after") or "") or None
+    except ValueError:
+        espera = None
+    raise LLMError(f"{provider} respondeu HTTP {status}: {text}", status, espera)
 
 
 # Esforço -> raciocínio do modelo. Só mandamos quando o modelo entende, senão o servidor recusa.
@@ -187,12 +192,17 @@ async def _openai_stream(provider, model, messages, tools, num_ctx, extra: dict 
                   "stream_options": {"include_usage": True}, **(extra or {})}
     if tools:
         body["tools"] = tools
+        # No llama-server o padrão é false: o modelo só consegue chamar UMA ferramenta por resposta.
+        # Sem isto a Maestro nunca despachava duas tarefas juntas (e o agente lia um arquivo por vez),
+        # mesmo com max_workers > 1. A OpenAI já liga por padrão; outros compatíveis ficam como estão.
+        if config.PROVIDERS.get(provider, {}).get("type") == "llamacpp":
+            body.setdefault("parallel_tool_calls", True)
     calls: dict[int, dict] = {}
-    prompt_tokens = completion_tokens = None
+    prompt_tokens = completion_tokens = cached_tokens = None
     async with httpx.AsyncClient(timeout=TIMEOUT, headers=headers(provider)) as c:
         async with c.stream("POST", f"{base_url(provider)}/chat/completions", json=body) as r:
             if r.status_code >= 400:
-                _raise_for(provider, r.status_code, await r.aread())
+                _raise_for(provider, r.status_code, await r.aread(), r.headers)
             async for line in r.aiter_lines():
                 if not line.startswith("data:"):
                     continue
@@ -203,6 +213,13 @@ async def _openai_stream(provider, model, messages, tools, num_ctx, extra: dict 
                 if chunk.get("usage"):
                     prompt_tokens = chunk["usage"].get("prompt_tokens")
                     completion_tokens = chunk["usage"].get("completion_tokens")
+                    cached_tokens = (chunk["usage"].get("prompt_tokens_details") or {}).get("cached_tokens",
+                                                                                              cached_tokens)
+                if chunk.get("timings"):  # llama-server: quanto do prompt veio do cache (cache_n) e quanto processou
+                    t = chunk["timings"]
+                    if t.get("cache_n") is not None:
+                        cached_tokens = t["cache_n"]
+                        prompt_tokens = prompt_tokens or (t["cache_n"] + (t.get("prompt_n") or 0))
                 if chunk.get("error"):
                     raise LLMError(str(chunk["error"]))
                 for choice in chunk.get("choices", []):
@@ -230,7 +247,8 @@ async def _openai_stream(provider, model, messages, tools, num_ctx, extra: dict 
         except json.JSONDecodeError:
             args = {"__raw__": acc["arguments"]}
         out.append({"id": acc["id"] or _new_id(), "name": acc["name"], "arguments": args})
-    yield "done", {"tool_calls": out, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+    yield "done", {"tool_calls": out, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                   "cached_tokens": cached_tokens}
 
 
 # ------------------------------------------------------------------ Ollama nativo
@@ -254,6 +272,8 @@ def _to_ollama(messages: list[dict]) -> list[dict]:
     out = []
     for m in messages:
         m = dict(m)
+        if m.get("reasoning_content"):  # no /api/chat o campo chama `thinking`
+            m["thinking"] = m.pop("reasoning_content")
         if not isinstance(m.get("content"), str):
             m["content"], images = _split_parts(m["content"])
             if images:
@@ -282,7 +302,7 @@ async def _ollama_stream(provider, model, messages, tools, num_ctx, extra: dict 
     async with httpx.AsyncClient(timeout=TIMEOUT, headers=headers(provider)) as c:
         async with c.stream("POST", f"{host}/api/chat", json=body) as r:
             if r.status_code >= 400:
-                _raise_for(provider, r.status_code, await r.aread())
+                _raise_for(provider, r.status_code, await r.aread(), r.headers)
             async for line in r.aiter_lines():
                 if not line.strip():
                     continue
@@ -378,9 +398,9 @@ async def capabilities(provider: str, model: str) -> set[str] | None:
     LM Studio: GET /api/v0/models/{id} devolve `type` in llm | vlm | embeddings.
     """
     key = (provider, model)
+    kind, host = spec(provider)["type"], base_url(provider).removesuffix("/v1")
     if key in _CAPS:
         return _CAPS[key]
-    kind, host = spec(provider)["type"], base_url(provider).removesuffix("/v1")
     caps = None
     try:
         async with httpx.AsyncClient(timeout=5, headers=headers(provider)) as c:

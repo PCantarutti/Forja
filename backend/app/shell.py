@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextvars
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -112,7 +113,60 @@ def background(root: Path, args: dict) -> str:
     """Comando demorado (build, suíte de teste) vira processo em segundo plano, o mesmo mecanismo dos
     servidores: o turno não fica preso e o modelo acompanha com serve_status."""
     nome = _safe_name(str(args.get("name") or "").strip() or args["command"].split()[0])
-    return serve_start(root, {**args, "name": nome}, kind="Processo")
+    texto = serve_start(root, {**args, "name": nome}, kind="Processo")
+    if nome in _LOCAL and _local_info(nome)["alive"]:  # já terminou dentro da espera do serve_start: o resultado está no texto
+        _vigia(nome)
+    return texto
+
+
+def _primeiro_plano(command: str, cwd: Path, timeout: int, sink, nome: str) -> tuple[int | None, str]:
+    """Roda gravando num log. Terminou no prazo: (exit code, saída). Não terminou: (None, saída até
+    aqui) e o processo SEGUE vivo, registrado como processo em segundo plano `nome`.
+
+    Do DeepSeek Harness: comando que passa do timeout não é morto, vira job. Matar jogava fora um
+    build ou uma instalação quase pronta, e o modelo rodava tudo de novo com timeout maior.
+    """
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log = LOG_DIR / f"fg-{nome}-{time.time_ns()}.log"
+    fh = open(log, "wb")
+    proc = subprocess.Popen(["bash", "-lc", command], cwd=cwd, stdout=fh, stderr=subprocess.STDOUT,
+                            stdin=subprocess.DEVNULL, start_new_session=True)
+    lidos, resto, pedacos = 0, b"", []
+    limite = time.monotonic() + timeout
+
+    def puxa() -> None:
+        nonlocal lidos, resto
+        with open(log, "rb") as f:
+            f.seek(lidos)
+            novo = f.read()
+        lidos += len(novo)
+        *linhas, resto = (resto + novo).split(b"\n")
+        for raw in linhas:
+            linha = (raw + b"\n").decode("utf-8", "replace")
+            pedacos.append(linha)
+            if sink:
+                sink(linha)
+
+    while proc.poll() is None and time.monotonic() < limite:
+        time.sleep(0.2)
+        puxa()
+    puxa()
+    if proc.poll() is None:  # passou do prazo: vira processo de fundo, com o mesmo log
+        with _local_lock:
+            if nome in _LOCAL:
+                _drop_local(_LOCAL.pop(nome))
+            _LOCAL[nome] = {"proc": proc, "log": str(log), "fh": fh, "command": command, "cwd": str(cwd),
+                              "started": time.time() - timeout, "conv": CONV.get(), "kind": "Processo"}
+        _vigia(nome)
+        return None, "".join(pedacos)
+    fh.close()
+    if resto:
+        pedacos.append(resto.decode("utf-8", "replace"))
+    try:
+        log.unlink()
+    except OSError:
+        pass
+    return proc.returncode, "".join(pedacos)
 
 
 def run_command(root: Path, args: dict) -> str:
@@ -121,6 +175,10 @@ def run_command(root: Path, args: dict) -> str:
         raise ToolError("command vazio.")
     if args.get("background"):
         return background(root, args)
+    if parece_servidor(command):
+        # Esperaria o timeout inteiro e voltaria como erro (no StockFlow, 180 s por tentativa).
+        raise ToolError("Esse comando sobe um servidor que não termina. Use serve_start (ele reaproveita "
+                        "um servidor igual que já esteja rodando) e serve_status para ver o que está de pé.")
     cwd = resolve_path(root, args.get("cwd"))
     timeout = max(1, min(int(args.get("timeout") or 60), config.SHELL_TIMEOUT_MAX))
     target = pick_target(args.get("target"), runner.online(), workspace.to_host(cwd))
@@ -135,38 +193,47 @@ def run_command(root: Path, args: dict) -> str:
         if r.get("exit_code") != 0:
             raise ToolError(body)
         return body
-    # Sessão própria para matar o grupo inteiro (bash + filhos) no timeout. Saída lida linha a linha
-    # para a UI mostrar ao vivo.
-    p = subprocess.Popen(["bash", "-lc", command], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                         stdin=subprocess.DEVNULL, text=True, errors="replace", start_new_session=True)
-    timed_out = threading.Event()
-
-    def _kill():
-        timed_out.set()
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-
-    timer = threading.Timer(timeout, _kill)
-    timer.start()
-    chunks: list[str] = []
-    try:
-        assert p.stdout
-        for line in p.stdout:
-            chunks.append(line)
-            if sink:
-                sink(line)
-        p.wait()
-    finally:
-        timer.cancel()
-    out = "".join(chunks)
-    if timed_out.is_set():
-        raise ToolError(f"Timeout: o comando passou de {timeout}s e foi encerrado.\nSaída parcial:\n{_truncate(out)}")
-    body = f"exit code: {p.returncode}\n{_truncate(out) or '(sem saída)'}"
-    if p.returncode != 0:
+    # ponytail: só no container o comando que passa do timeout vira processo de fundo; no host o
+    # runner ainda mata no timeout (precisaria de um run_stream que devolva o job vivo).
+    nome = _safe_name(str(args.get("name") or "").strip() or command.split()[0])
+    code, out = _primeiro_plano(command, cwd, timeout, sink, nome)
+    if code is None:
+        return (f"[ainda rodando após {timeout}s; movido para o processo em segundo plano '{nome}']\n"
+                "O comando continua rodando. Você recebe um aviso quando ele terminar; enquanto isso siga com o "
+                f"que não depende dele. serve_status(name='{nome}') mostra o log, serve_stop encerra.\n"
+                f"Saída até aqui:\n{_truncate(out) or '(sem saída)'}")
+    body = f"exit code: {code}\n{_truncate(out) or '(sem saída)'}"
+    if code != 0:
         raise ToolError(body)
     return body
+
+
+# ------------------------------------------------------------------ aviso de término
+# Quem ligou o comando recebe um aviso quando ele termina (DeepSeek Harness: background job notice),
+# sem precisar ficar consultando. O agente define o destino por execução.
+AO_TERMINAR: contextvars.ContextVar[Callable[[str], None] | None] = contextvars.ContextVar(
+    "forja_ao_terminar", default=None)
+
+
+def _vigia(nome: str) -> None:
+    destino = AO_TERMINAR.get()
+    if destino is None:
+        return
+    with _local_lock:
+        s = _LOCAL.get(nome)
+    if not s:
+        return
+    proc = s["proc"]
+
+    def espera() -> None:
+        code = proc.wait()
+        with _local_lock:
+            if _LOCAL.get(nome, {}).get("proc") is not proc:  # reiniciado ou encerrado por serve_stop
+                return
+        destino(f"O processo em segundo plano '{nome}' terminou [código de saída: {code}]. "
+                f"Leia o resultado com serve_status(name='{nome}').")
+
+    threading.Thread(target=espera, daemon=True, name=f"vigia-{nome}").start()
 
 
 def command_preview(root: Path, args: dict) -> dict:
@@ -204,7 +271,10 @@ def _drop_local(s: dict) -> None:
     """Encerra o processo do container e fecha o arquivo de log dele."""
     if s["proc"].poll() is None:
         try:
-            os.killpg(s["proc"].pid, signal.SIGKILL)
+            if hasattr(os, "killpg"):
+                os.killpg(s["proc"].pid, signal.SIGKILL)
+            else:  # testes rodando no Windows
+                s["proc"].kill()
         except (ProcessLookupError, PermissionError):
             pass
     try:
@@ -228,7 +298,7 @@ def _local_info(name: str) -> dict:
     code = s["proc"].poll()
     return {"name": name, "pid": s["proc"].pid, "alive": code is None, "exit_code": code, "command": s["command"],
             "cwd": s["cwd"], "log": s["log"], "uptime": int(time.time() - s["started"]), "where": "container",
-            "conv": s.get("conv") or ""}
+            "conv": s.get("conv") or "", "url": url_do_log(name) if code is None else ""}
 
 
 def _local_log(name: str, tail: int) -> str:
@@ -237,6 +307,31 @@ def _local_log(name: str, tail: int) -> str:
     except OSError:
         return ""
     return "\n".join(lines[-max(1, min(int(tail or 40), 500)):])
+
+
+# Comando que sobe servidor de desenvolvimento e não termina. Rodado por run_command (ou como comando
+# de verificação de tarefa) ele só acaba no timeout, e a tarefa vira falha sem ter falhado.
+SERVIDOR_DEV = re.compile(
+    r"(?:^|[;&|]\s*)(?:npm\s+(?:run\s+)?(?:dev|start|serve|preview)|pnpm\s+(?:run\s+)?(?:dev|start)|"
+    r"yarn\s+(?:run\s+)?(?:dev|start)|npx\s+(?:vite|next\s+dev|serve)\b(?!\s+build)|vite(?:\s+(?!build)|\s*$)|"
+    r"next\s+dev|python\d?\s+-m\s+http\.server|flask\s+run|uvicorn\s|php\s+-S)", re.I)
+# sem ) ] > aspas e vírgula no fim: o http.server anuncia "(http://127.0.0.1:8000/) ..."
+URL_NO_LOG = re.compile(r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+[^\s)\]>'\",]*")
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def parece_servidor(command: str) -> bool:
+    return bool(SERVIDOR_DEV.search(command or ""))
+
+
+def url_do_log(name: str) -> str:
+    """URL que o servidor anunciou ("Local: http://localhost:5174/"). '' se ainda não anunciou."""
+    try:
+        log = _local_log(name, 200) if name in _LOCAL else server_log(name, 200)
+    except (ToolError, runner.RunnerError):
+        return ""
+    achadas = URL_NO_LOG.findall(ANSI.sub("", log))
+    return achadas[-1].rstrip("/") if achadas else ""
 
 
 def _url_hint(target: str) -> str:
@@ -253,6 +348,16 @@ def serve_start(root: Path, args: dict, kind: str = "Servidor") -> str:
         raise ToolError("command vazio.")
     cwd = resolve_path(root, args.get("cwd"))
     target = pick_target(args.get("target"), runner.online(), workspace.to_host(cwd))
+    # O mesmo servidor já está de pé (mesmo comando, mesma pasta): reaproveita. Subir outro só criava
+    # instâncias em portas novas (5173, 5174, 5175...) e deixava o navegador apontando para a velha.
+    pastas = {str(cwd), workspace.to_host(cwd) or ""}
+    vivos = [e["name"] for e in list_servers() if e.get("alive") and e.get("command") == command
+             and e.get("cwd") in pastas]
+    if vivos and not args.get("restart") and kind == "Servidor":
+        url = url_do_log(vivos[0])
+        return (f"{kind} '{vivos[0]}' já está rodando esse comando nesta pasta"
+                + (f", em {url}" if url else "") + ". Reaproveitei; nada foi reiniciado. "
+                "Para reiniciar (mudou configuração, travou), chame serve_start com restart=true.")
     try:
         if target == "host":
             info = runner.serve_start(name, command, _host_cwd(cwd))
@@ -269,6 +374,9 @@ def serve_start(root: Path, args: dict, kind: str = "Servidor") -> str:
     status = "rodando" if alive else ("JÁ ENCERROU (veja o log: provável erro)" if kind == "Servidor"
                                       else "JÁ TERMINOU (o log abaixo é o resultado)")
     dica = f"{_url_hint(target)}\n" if kind == "Servidor" else ""
+    url = url_do_log(name) if kind == "Servidor" and alive else ""
+    if url:
+        dica += f"Endereço anunciado no log: {url}\n"
     return (f"{kind} '{name}' iniciado em {_where(target)} (pid {info.get('pid')}), {status}.\n{dica}"
             f"Use serve_status(name='{name}') para acompanhar e serve_stop para encerrar.\n--- log ---\n{log or '(vazio ainda)'}")
 
@@ -396,7 +504,7 @@ register(Tool(
         "name": {"type": "string", "description": "Apelido do processo em background, ex.: build, testes"},
         "target": TARGET},
      "required": ["command"]},
-    run_command, mutating=True, preview=command_preview, always_ask=True))
+    run_command, mutating=True, preview=command_preview, always_ask=True, timeout=None))  # o tempo dele é o `timeout` do comando
 register(Tool(
     "serve_start",
     "Inicia um servidor de desenvolvimento em segundo plano (ex.: npm run dev, uvicorn, php artisan serve) e "
@@ -419,7 +527,7 @@ register(Tool(
         "wait": {"type": "integer",
                  "description": f"Espera até N segundos (máx {WAIT_MAX}) o processo terminar. Precisa de name."}},
      "required": []},
-    serve_status, poll=True))
+    serve_status, poll=True, timeout=None))
 register(Tool(
     "serve_stop", "Encerra um servidor iniciado por serve_start.",
     {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},

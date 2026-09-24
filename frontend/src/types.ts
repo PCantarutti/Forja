@@ -17,6 +17,7 @@ export type AskQuestion = {
 export type Approval = {
   preview: Preview | null;
   suggest?: string;
+  nota?: string | null; // por que pediu: revisor automático ou hook do projeto
   tool?: string;
   plan?: string; // exit_plan_mode
   questions?: AskQuestion[]; // ask_user
@@ -25,8 +26,9 @@ export type Approval = {
 
 /** O que está rodando agora: turno do agente e delegações por conversa, e processos vivos. */
 export type Activity = {
-  conversations: { id: number; running: boolean; subagents: number; servers: number }[];
+  conversations: { id: number; running: boolean; subagents: number; servers: number; waiting?: number; paused?: boolean; alertas?: number }[];
   servers: number;
+  local?: boolean;  // modelo local carregado no llama-server
 };
 
 export type Attachment = { path: string; name: string; size: number; mime: string; kind: "image" | "text" | "file" };
@@ -39,14 +41,16 @@ export type Message = {
   tool_calls: ToolCall[] | null;
   tool_call_id: string | null;
   name: string | null;
-  status: "ok" | "erro" | "rejeitada" | "cancelada" | null;
+  status: "ok" | "erro" | "rejeitada" | "cancelada" | "running" | "pronto" | "cancelado" | "interrompido" | null;
   meta: Record<string, any> | null;
+  created_at?: string | null;
 };
 
 export type Conversation = {
   id: number;
   title: string;
   updated_at: string;
+  kind?: "chat" | "agent" | "maestro" | "imagem" | "comparar" | "pesquisa";
   workspace?: string | null;
   workspace_label?: string;
   pinned?: boolean;
@@ -135,7 +139,8 @@ export type ServerInfo = {
   log?: string;
   uptime?: number;
   conv?: string; // conversa que subiu o processo, para a aba separar por conversa
-  where: "host" | "container";
+  url?: string; // endereço que o servidor anunciou no log (vazio até anunciar)
+  where: "local" | "host" | "container"; // no Desktop é sempre "local": tudo roda na sua máquina
   error?: string;
 };
 
@@ -171,6 +176,8 @@ export type Stats = {
   seconds: number;
   tps: number | null;
   ctx_max: number | null;
+  cached?: number | null;  // tokens do prompt que vieram do cache do servidor (llama.cpp: cache_n)
+  partes?: { sistema: number; ferramentas: number; mensagens: number };  // estimativa por tipo
 };
 
 // ------------------------------------------------------------------ comparar modelos
@@ -245,3 +252,437 @@ export type PesquisaEstado = {
 
 export type PesquisaFormato = "auto" | "produto" | "comparar" | "guia" | "checagem";
 export type PesquisaProfundidade = "rapida" | "normal" | "funda" | "personalizado";
+
+// ------------------------------------------------------------------ IA local (llama.cpp / sd.cpp)
+
+/** Parâmetros de carga do llama-server. Zero/padrão = deixa o llama.cpp decidir. */
+export type LlamaParams = {
+  ctx: number;
+  ngl: number;
+  threads: number;
+  batch: number;
+  ubatch: number;
+  parallel: number;
+  flash_attn: boolean;
+  cache_type_k: string;
+  cache_type_v: string;
+  kv_unified: boolean;
+  no_kv_offload: boolean;
+  mlock: boolean;
+  mmap: boolean;
+  seed: number;
+  rope_freq_base: number;
+  rope_freq_scale: number;
+  ctx_checkpoints: number;
+  n_cpu_moe: number;
+  n_expert: number;
+  mmproj: string;
+  fit: boolean; // deixa o llama.cpp ajustar o que não couber
+};
+
+export type LocalModel = {
+  path: string;
+  name: string;
+  size: number;
+  mtime: number;
+  shards: number; // > 1 = modelo dividido em vários arquivos
+  folder: string;
+  kind: "chat" | "image";
+  params?: ImageParams; // só nos modelos de imagem: ajustes próprios daquele modelo
+  req?: ImageReq | null; // GGUF só-unet (Qwen-Image, Flux): arquivos que ele precisa à parte
+  falta?: string[]; // chaves de `req.precisa` sem arquivo configurado
+  falta_edicao?: string[]; // idem, contando o que a edição (-r) pede a mais
+  previa_auto?: "proj" | "tae" | "vae"; // o modo que a prévia automática usa neste modelo
+};
+
+/** Ajustes que um modelo de imagem pode ter por conta própria. */
+export type ImageParams = {
+  steps: number;
+  cfg: number;
+  width: number;
+  height: number;
+  sampler: string;
+  negative: string;
+  vae: string;
+  clip_l: string;
+  t5xxl: string;
+  llm: string;
+  llm_vision: string;
+  offload: boolean;
+  flash_attn: boolean;
+  vae_tiling: boolean;
+  te_cpu: "" | "gerar" | "editar" | "sempre";
+  preview: "" | "none" | "proj" | "tae" | "vae";  // prévia no card enquanto gera ("" = automática)
+  taesd: string;
+};
+
+/** Metadados lidos do cabeçalho do .gguf. */
+export type ModelInfo = {
+  arch: string;
+  n_layer: number;
+  n_head_kv: number;
+  head_dim: number;
+  ctx_train: number; // contexto máximo treinado
+  n_expert: number;
+  n_expert_used: number;
+  attn_interval: number; // 1 em cada N camadas tem atenção (modelos híbridos)
+  size: number;
+};
+
+/** Estimativa de memória: o que vai para a VRAM e o total com a RAM. */
+export type MemoryEstimate = {
+  ok: boolean;
+  gpu: number;
+  total: number;
+  weights_gpu: number;
+  weights_cpu: number;
+  kv: number;
+  kv_gpu: number;
+  recurrent: number;
+  compute_gpu: number;
+  layers_gpu: number;
+  n_layer: number;
+  ctx_train: number;
+  attn_layers: number;
+};
+
+/** Amostragem de um modelo (tela Inferência). Vale para qualquer provedor: fica em model_settings. */
+export type Inference = {
+  temperature: number;
+  top_k: number;
+  top_p: number;
+  min_p: number;
+  repeat_penalty: number;
+  max_tokens: number; // 0 = sem limite
+  stop: string[];
+  think: boolean; // enable_thinking do template
+  reasoning_budget: number; // -1 = sem teto
+};
+
+/** Resposta de GET /local/inference: serve para modelo local e para modelo de qualquer provedor. */
+export type InferenceView = {
+  model: string;
+  inference: Inference;
+  inference_defaults: Inference;
+  inference_overrides: (keyof Inference)[];
+};
+
+/** Resposta de POST /local/model: padrões, valores atuais, o que saiu do padrão e a estimativa. */
+export type ModelView = {
+  path: string;
+  info: ModelInfo;
+  defaults: LlamaParams;
+  params: LlamaParams;
+  overrides: (keyof LlamaParams)[];
+  estimate: MemoryEstimate;
+  model: string; // id do modelo no chat (alias do llama-server)
+  inference: Inference;
+  inference_defaults: Inference;
+  inference_overrides: (keyof Inference)[];
+};
+
+/** Download ou geração em andamento (barra de progresso no painel). */
+export type Job = {
+  id: string;
+  kind: "runtime" | "modelo" | "imagem" | string;
+  name: string;
+  done: number;
+  total: number;
+  status: "running" | "pronto" | "erro" | "cancelado" | string;
+  error: string;
+  detail: string;
+  result: string | null;
+};
+
+export type ImageReq = {
+  nome: string;
+  doc: string;
+  precisa: Record<string, [string, string]>; // chave -> [o que baixar, link]
+  edita?: Record<string, [string, string]>; // só nos que editam imagem: o que a edição pede a mais
+  sugere: Partial<ImageParams>;
+};
+
+export type ImageOpts = {
+  model: string;
+  out_dir: string; // vazio = %APPDATA%/Forja/imagens
+  vae: string;
+  clip_l: string;
+  t5xxl: string;
+  llm: string;
+  llm_vision: string;
+  offload: boolean;
+  flash_attn: boolean;
+  vae_tiling: boolean;
+  te_cpu: "" | "gerar" | "editar" | "sempre";
+  diffusion_model: string;
+  steps: number;
+  cfg: number;
+  width: number;
+  height: number;
+  sampler: string;
+  negative: string;
+  seed: number; // 0 = aleatória
+  descarte_dias: number; // prazo das imagens reprovadas em descartadas/ (0 = guardar para sempre)
+};
+
+/** Uma variação dentro de um lote da seção Imagens. */
+export type LoteImagem = {
+  path: string;
+  seed: number;
+  model: string;
+  model_name: string;
+  // interrompida: o app fechou no meio do lote ("Continuar" gera de novo, com a mesma semente)
+  status: "pendente" | "gerando" | "pronta" | "erro" | "mantida" | "descartada" | "cancelada" | "interrompida";
+  error: string;
+  progress?: number; // 0..1, passo da amostragem enquanto gera
+  preview?: string; // prévia do passo atual (só com o modo de prévia do modelo ligado)
+  com_previa?: boolean; // o modelo gera com prévia: o card não usa o líquido, nem antes da 1ª
+  s_passo?: number; // segundos por passo, lido do sd-cli
+  restante?: number; // segundos até o fim da amostragem
+};
+
+/** meta da mensagem do assistente num lote (a thread do backend vai preenchendo `images`). */
+export type LoteMeta = {
+  job: string;
+  count: number;
+  seed_mode: SeedMode;
+  opts: Partial<ImageOpts>;
+  images: LoteImagem[];
+};
+
+/** meta da mensagem do usuário num lote. */
+export type PedidoMeta = { models?: string[]; refs?: string[] };
+
+export type SeedMode = "incremental" | "aleatoria" | "fixa";
+
+export type RuntimeInfo = {
+  installed: boolean;
+  exe: string;
+  backend: string; // o que está em uso
+  backends: string[]; // o que dá para baixar
+  available: { backend: string; exe: string; version: string }[]; // o que já está no disco
+  chosen: string; // escolhido à mão em Configurações › Runtime ("" = automático)
+};
+
+/** Memória da máquina: é o que diz se um modelo cabe na GPU, na RAM, ou em lugar nenhum. */
+export type Hardware = {
+  gpus: { id: string; name: string; total: number; free: number; enabled: boolean }[];
+  cpu: { name: string; arch: string; flags: string[]; cores: number };
+  vram: number;
+  vram_free: number;
+  ram: number;
+  ram_free: number;
+};
+
+export type LocalState = {
+  runtimes: { llama: RuntimeInfo; sd: RuntimeInfo };
+  models: LocalModel[];
+  server: {
+    running: boolean;
+    port: number;
+    path?: string;
+    alias?: string;
+    params?: LlamaParams;
+    ctx?: number | null;
+    pid?: number;
+    uptime?: number;
+    vision?: boolean;
+    /** Projetor de visão incompatível com o runtime: o encoder cai na CPU e cada print leva minutos. */
+    vision_lenta?: string;
+    // Carga em andamento (barra no topo da janela) e a falha da última tentativa, que fica até a próxima.
+    loading?: { path: string; name: string; elapsed: number; eta: number; percent: number };
+    error?: { when: number; path: string; message: string; log: string };
+  };
+  dirs: string[];
+  download_dir: string; // para onde vão os downloads (uma das dirs)
+  models_dir: string; // pasta padrão dos modelos (Configurações › Pastas)
+  data_dir: string;
+  image_busy: boolean; // gerando imagem: carregar modelo fica bloqueado
+  hardware: Hardware;
+  guardrail: "off" | "relaxado" | "rigoroso";
+  autoload: boolean; // carregar o último modelo ao abrir o Forja
+  hf_token: boolean; // só diz se existe; o token não volta do backend
+  jobs: Job[];
+  defaults: LlamaParams;
+  last: string;
+  image: ImageOpts;
+  image_dir: string; // pasta onde as imagens do painel são salvas
+  image_models: LocalModel[];
+  port: number;
+};
+
+export type HfModel = {
+  id: string;
+  author: string;
+  downloads: number;
+  likes: number;
+  updated: string;
+  gated: boolean;
+  tags: string[];
+};
+
+/** Ficha de um repositório na janela de busca. */
+export type HfRepo = {
+  id: string;
+  author: string;
+  downloads: number;
+  likes: number;
+  updated: string;
+  gated: boolean;
+  tags: string[];
+  license: string;
+  params: number;
+  arch: string;
+  ctx_train: number;
+  capabilities: { vision: boolean; tools: boolean; reasoning: boolean };
+  files: HfFile[];
+  readme: string;
+};
+export type HfFile = { path: string; size: number; quant: string; shards: number };
+
+// ------------------------------------------------------------------ Maestro
+// A Maestro planeja e verifica; os Workers implementam. O estado real vive no SQLite do backend
+// (taskdb) — a árvore aqui é leitura, vinda de /api/maestro/{conv}/board.
+
+/** Tipo da tarefa: o Worker sabe que mudança é, o roteador sabe que especialista chamar. */
+export type TipoTarefa = "feature" | "bugfix" | "refactor" | "test" | "ui" | "docs" | "chore";
+export const TIPOS_TAREFA: [TipoTarefa, string][] = [
+  ["feature", "Funcionalidade"], ["bugfix", "Correção"], ["refactor", "Refatoração"], ["test", "Testes"],
+  ["ui", "Tela / visual"], ["docs", "Documentação"], ["chore", "Manutenção"],
+];
+
+/** Worker especialista (Configurações › Maestro): o id é o que vai em model_slot. */
+export type Especialidade = { id: string; nome: string; quando: string; provider: string; model: string };
+
+export type Contract = {
+  type?: TipoTarefa;
+  context?: string;
+  goal: string;
+  relevant_files?: string[];
+  requirements?: string[];
+  constraints?: string[];
+  do_not?: string[];
+  acceptance_criteria?: string[];
+  verify_command?: string;
+  expected_result?: string;
+};
+
+export type TaskStatus =
+  | "pending" | "queued" | "loading_model" | "implementing" | "testing" | "reviewing"
+  | "completed" | "failed" | "blocked" | "needs_human" | "cancelled";
+
+/** Protocolo Worker → Maestro. `changes` e `tests` são medição (git + comando), não autoavaliação. */
+export type TaskResult = {
+  type: "task_result";
+  task_code: string;
+  attempt: number;
+  status: "completed" | "failed" | "unverified" | "error" | "cancelled";
+  changes: { path: string; status: string; additions: number | null; deletions: number | null }[];
+  commands: { command: string; status: string }[];
+  tests: { command: string; status: string; output: string } | null;
+  errors: string[];
+  review: string | null;
+  summary: string;
+  model: string | null;
+  level: string | null;
+  agent?: string | null;
+  seconds: number | null;
+  tokens: number | null;
+  iterations: number | null;
+};
+
+export type TaskAttempt = {
+  n: number;
+  status: string;
+  worker: { level?: string; provider?: string; model?: string; agent?: string | null; rota?: string };
+  strategy: string | null;
+  error: string | null;
+  seconds: number;
+  tokens: number;
+  result: TaskResult | null;
+  started_at: string;
+  finished_at: string | null;
+  has_transcript?: boolean;
+  transcript?: Message[];  // só no detalhe da tarefa: a conversa do Worker nesta tentativa
+};
+
+export type MaestroTask = {
+  code: string;
+  title: string;
+  status: TaskStatus;
+  feature_id: number;
+  priority: number;
+  depends_on: string[];
+  model_slot: string | null;
+  agent: string | null;
+  attempt_count: number;
+  max_attempts: number;
+  blocked_reason: string | null;
+  contract: Contract;
+  result: TaskResult | null;
+  updated_at: string;
+  attempts?: TaskAttempt[];
+};
+
+export type MaestroFeature = {
+  id: number;
+  title: string;
+  goal: string;
+  status: "planning" | "active" | "validating" | "done" | "cancelled";
+  copiada_para?: number | null;  // continua numa sessão nova (conversa); aqui fica só para consulta
+  tasks: MaestroTask[];
+};
+
+export type MaestroBoard = {
+  inicio?: string | null; // primeiro pedido da conversa (ISO UTC)
+  ultima?: string | null; // última atividade: mensagem, tarefa ou tentativa
+  features: MaestroFeature[];
+  counts: Partial<Record<TaskStatus, number>>;
+  total: number;
+  done: number;
+  open: number;
+};
+
+export type MaestroModels = {
+  running: boolean;
+  alias: string | null;
+  ctx: number | null;
+  vram: number | null;
+  vram_free: number | null;
+  ram: number | null;
+  ram_free: number | null;
+  lifecycle: string;
+  max_workers: number;
+  can_swap: boolean;
+  manageable: boolean;
+  min_ctx_worker: number;  // GGUF local com janela menor que isto não pode ser Worker
+  slots: Record<string, { provider: string; model: string }>;
+  especialidades?: Especialidade[];
+  workers_do_maestro?: boolean;
+  active: SubagentActive[];
+};
+
+/** Resposta em andamento. `tool` são os argumentos de uma tool call ainda chegando (write_file de
+ *  arquivo grande leva minutos e, sem isto, a tela fica parada como se o modelo tivesse travado). */
+export type Draft = {
+  content: string;
+  thinking: string;
+  tool?: { name: string; path?: string; text: string; chars?: number } | null;
+};
+
+/** Passos de um subagente/Worker, agrupados pelo id da chamada que o criou. */
+export type SubState = {
+  status: string;
+  steps: { call: any; result?: Message }[];
+  // Worker de contrato (Maestro): a conversa dele no formato do chat, e a resposta em andamento.
+  mensagens?: Message[];
+  draft?: Draft | null;
+};
+
+/** Troca de modelo em andamento, para o cockpit mostrar por que a execução parou por uns minutos. */
+export type ModelPhase = {
+  phase: "unloading" | "loading" | "ready" | "unloaded" | "error" | "clearing" | "cleared" | "restarting";
+  previous?: string;
+  model?: string;
+  reason?: string;
+};

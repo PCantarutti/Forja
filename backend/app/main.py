@@ -12,9 +12,9 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTe
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from . import (checkpoints, compact, comparar, config, db, documentos, gitops, llm, mcp_client, memory, mirror,
-               pesquisa, policy, relatorio, runner, settings, shell, skills, subagents, terminal, uploads,
-               workspace)
+from . import (baterias, checkpoints, compact, comparar, config, db, documentos, gitops, goals, llm, lsp,
+               mcp_client, memory, mirror, modelctl, pesquisa, policy, projstate, relatorio, runner, settings,
+               shell, skills, subagents, taskdb, terminal, uploads, workspace)
 from .agent import RUNS, Run, RunRequest, _load, _save, active_run
 from .browser import MANAGER
 from .tools import REGISTRY, ToolError
@@ -28,6 +28,7 @@ async def lifespan(_app):
     # Referência forte das tasks de fundo: o loop só guarda referência fraca, e o coletor de lixo
     # pode levar uma execução no meio. Mesmo motivo de pesquisa/comparar.
     vivas: set = set()
+    taskdb.reap()  # tentativas de tarefa que ficaram abertas numa queda anterior
     checkpoints.podar_antigos()  # desfazer de mais de um mês atrás: o banco não cresce para sempre
     # Espelho em Markdown: gera o que falta (banco anterior ao espelho) e limpa .md órfão.
     print(f"Forja: conversas espelhadas em {mirror.ROOT} ({mirror.sync()} arquivo(s) gerado(s))", flush=True)
@@ -39,6 +40,7 @@ async def lifespan(_app):
     await asyncio.gather(*vivas, return_exceptions=True)  # sem isto, "Task exception was never retrieved"
     shell.close_local()     # servidores que o agente subiu DENTRO do container
     terminal.close_local()  # shells do container; os do host são do runner e ficam de pé
+    lsp.fechar_todos()
     await mcp_client.stop()
     await MANAGER.shutdown()
 
@@ -82,7 +84,11 @@ def get_config():
             "num_ctx": config.NUM_CTX, "max_iterations": config.MAX_ITERATIONS,
             "default_workspace": workspace.label(None), "drives": [d["name"] for d in workspace.roots()],
             "picker_url": config.PICKER_URL,
-            "subagents": {k: v for k, v in subagents.configured().items()}}
+            "subagents": {k: v for k, v in subagents.configured().items()},
+            # o seletor de modelo barra o GGUF local com janela menor que isto (Maestro / Workers)
+            "min_ctx_maestro": config.MAESTRO_MIN_CTX, "min_ctx_worker": config.WORKER_MIN_CTX,
+            # modelo padrão da Maestro: o seletor da seção Maestro lê e grava este, não o do chat
+            "maestro_model": config.MAESTRO_MODEL}
 
 
 # ------------------------------------------------------------------ pastas de trabalho
@@ -125,7 +131,8 @@ def _conv_root(conv_id: int | str | None):
 @app.get("/api/tools")
 def get_tools():
     return [{"name": t.name, "description": t.description, "mutating": t.mutating, "always_ask": t.always_ask,
-             "source": t.source, "enabled": t.name not in config.DISABLED_TOOLS} for t in REGISTRY.values()]
+             "source": t.source, "enabled": t.name not in config.DISABLED_TOOLS,
+             "parameters": t.parameters} for t in REGISTRY.values()]  # parameters: aba Schema da Trajetória
 
 
 # ------------------------------------------------------------------ configurações
@@ -181,6 +188,44 @@ def put_project_memory(body: dict):
     try:
         return memory.project_write(body.get("content", ""))
     except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+class PersonalMemoryBody(BaseModel):
+    name: str
+    description: str = ""
+    content: str = ""
+    type: str = "usuario"
+
+
+@app.get("/api/memory/personal")
+def get_personal_memory():
+    """Memórias sobre o usuário: só o índice (nome, descrição, tipo, data)."""
+    return {"enabled": config.PERSONAL_MEMORY, "dir": str(memory.personal_dir()),
+            "items": memory.personal_list()}
+
+
+@app.get("/api/memory/personal/{name}")
+def read_personal_memory(name: str):
+    try:
+        return memory.personal_read(name)
+    except memory.MemoryError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.put("/api/memory/personal")
+def put_personal_memory(body: PersonalMemoryBody):
+    try:
+        return memory.personal_write(body.name, body.description, body.content, body.type)
+    except memory.MemoryError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/memory/personal/delete")
+def delete_personal_memory(body: dict):
+    try:
+        return {"removed": memory.personal_delete(body.get("names") or [])}
+    except memory.MemoryError as e:
         raise HTTPException(400, str(e))
 
 
@@ -325,7 +370,13 @@ async def get_activity():
 
     for r in RUNS.values():
         if not r.finished:
-            entrada(r.conv_id)["running"] = True
+            e = entrada(r.conv_id)
+            e["running"] = True
+            # Aprovações e perguntas esperando o usuário, inclusive as do Worker: a interface avisa
+            # (notificação do sistema) mesmo com outra conversa aberta na tela.
+            e["waiting"] = len(r.approvals)
+            e["paused"] = r.paused
+            e["alertas"] = r.alertas  # "pode estar travada": a interface notifica quando sobe
     for a in subagents.ativas():
         entrada(a["conversation_id"])["subagents"] += 1
     vivos = 0
@@ -338,7 +389,7 @@ async def get_activity():
                 entrada(int(s["conv"]))["servers"] += 1
     except Exception:  # runner fora do ar não pode derrubar a barra lateral
         pass
-    return {"conversations": list(por_conversa.values()), "servers": vivos}
+    return {"conversations": list(por_conversa.values()), "servers": vivos, "local": False}
 
 
 @app.post("/api/servers/clear")
@@ -374,6 +425,23 @@ class CompararBody(BaseModel):
     system: str = ""
     effort: str = "medio"
     cego: bool = False
+    confirm: bool = False           # sim, pode descarregar o modelo local (só existe no desktop)
+    bateria: str = ""               # teste pronto de especialidade (baterias.BATERIAS): anexo e gabarito
+
+
+class TestarBody(BaseModel):
+    codigo: str
+    linguagem: str = ""             # a do bloco (```html); vazio = descobre pelo conteúdo
+    chave: str = "teste"            # uma pasta por resposta (comparação + modelo)
+    conv: int | None = None         # conversa dona do servidor de teste (aba Instâncias)
+    bateria: str = ""               # resposta de teste pronto: roda junto os casos do gabarito
+
+
+class JuizBody(BaseModel):
+    provider: str = ""
+    model: str = ""
+
+
     confirm: bool = False
 
 
@@ -404,7 +472,7 @@ def _sse_comparar(message_id: int) -> StreamingResponse:
 async def comparar_rodar(conv_id: int, body: CompararBody):
     try:
         msg = comparar.start(conv_id, body.prompt, body.itens, body.modo, body.system, body.effort,
-                             body.cego, body.confirm)
+                             body.cego, body.confirm, body.bateria)
     except comparar.ModeloCarregado as e:
         raise HTTPException(409, str(e))  # a tela pergunta se pode descarregar e repete com confirm=true
     except ToolError as e:
@@ -423,12 +491,100 @@ def comparar_cancelar(message_id: int):
     return comparar.cancelar(message_id)
 
 
+class RefazerBody(BaseModel):
+    item: str
+
+
+class AdicionarBody(BaseModel):
+    provider: str = ""
+    model: str = ""
+    path: str = ""
+
+
+@app.post("/api/comparar/{message_id}/adicionar")
+async def comparar_adicionar(message_id: int, body: AdicionarBody):
+    try:
+        return comparar.adicionar(message_id, body.model_dump())
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/comparar/{message_id}/remover")
+def comparar_remover(message_id: int, body: RefazerBody):
+    try:
+        return comparar.remover(message_id, body.item)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/comparar/{message_id}/refazer")
+async def comparar_refazer(message_id: int, body: RefazerBody):
+    # async: com a comparação encerrada, abre uma task nova no loop
+    try:
+        return comparar.refazer(message_id, body.item)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/comparar/{message_id}/voto")
 def comparar_voto(message_id: int, body: VotoBody):
     try:
         return comparar.votar(message_id, body.voto)
     except ToolError as e:
         raise HTTPException(400, str(e))
+
+
+@app.post("/api/comparar/testar")
+def comparar_testar(body: TestarBody):
+    """Testar o código de uma resposta: HTML sobe num servidor (abre no navegador integrado);
+    Python e JavaScript voltam como comando para o terminal."""
+    try:
+        return baterias.testar_codigo(body.codigo, body.linguagem, body.chave, body.conv, body.bateria)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/comparar/baterias")
+def comparar_baterias():
+    """Testes prontos por especialidade de Worker (prompt, o que medem, arquivo e gabarito)."""
+    return baterias.publico()
+
+
+def _sse_analise(message_id: int) -> StreamingResponse:
+    """Retrato da análise a cada tick, até ela acabar. Sair da tela não a interrompe: ela roda no
+    servidor, e voltar reconecta aqui."""
+    async def stream():
+        while True:
+            estado = baterias.estado_analise(message_id) or {"status": "nenhum"}
+            yield f"data: {json.dumps(estado, ensure_ascii=False, default=str)}\n\n"
+            if estado["status"] != "rodando":
+                return
+            await asyncio.sleep(comparar.TICK)
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/comparar/{message_id}/julgar")
+async def comparar_julgar(message_id: int, body: JuizBody):
+    """Um modelo escolhido pelo usuário lê todas as respostas e estatísticas e responde com a tabela
+    comparativa (quem acertou, quem alucinou, quem foi mais rápido), em forma de chat."""
+    if not (body.provider and body.model):
+        raise HTTPException(400, "Escolha o modelo que vai analisar.")
+    baterias.iniciar_analise(message_id, body.provider, body.model)
+    return _sse_analise(message_id)
+
+
+@app.get("/api/comparar/{message_id}/julgar")
+def comparar_julgar_acompanhar(message_id: int):
+    """Reconectar à análise (voltou à página): o andamento, ou {"status": "nenhum"}."""
+    return _sse_analise(message_id)
+
+
+@app.post("/api/comparar/{message_id}/julgar/parar")
+def comparar_julgar_parar(message_id: int):
+    baterias.parar_analise(message_id)
+    return {"ok": True}
 
 
 @app.get("/api/comparar/placar")
@@ -623,6 +779,27 @@ async def browser_tabs(body: TabsBody, conv: str = "0"):
     return await s.state_with_title()
 
 
+@app.post("/api/browser/abrir")
+async def browser_abrir(body: NavigateBody, conv: str = "0"):
+    """Abre a URL numa aba só dela (o "Testar" do Comparar): se já há uma aba nessa URL, volta para ela
+    e recarrega (o código pode ter mudado); senão abre uma aba nova. Nunca duplica a mesma página."""
+    s = _sess(conv)
+    try:
+        abas = await s.tabs() if s.open else []
+        mesma = next((t for t in abas if t["url"].split("#")[0] == body.url), None)
+        vazia = len(abas) == 1 and abas[0]["url"] in ("about:blank", "")
+        if mesma:
+            await s.switch_tab(mesma["index"])
+            await s.navigate(body.url)
+        elif vazia:
+            await s.navigate(body.url)  # a única aba está em branco: usa ela
+        else:
+            await s.new_tab(body.url)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+    return await s.state_with_title()
+
+
 @app.post("/api/browser/upload")
 async def browser_upload(conv: str = "0", file: UploadFile | None = File(None)):
     """Responde ao seletor de arquivo aberto pela página: sem arquivo = cancelar."""
@@ -696,8 +873,8 @@ def create_conversation(body: dict | None = None):
         except workspace.WorkspaceError as e:
             raise HTTPException(400, str(e))
     kind = (body or {}).get("kind") or "agent"
-    if kind not in ("chat", "agent", "comparar", "pesquisa"):
-        raise HTTPException(400, "kind deve ser chat, agent, comparar ou pesquisa")
+    if kind not in ("chat", "agent", "maestro", "comparar", "pesquisa"):
+        raise HTTPException(400, "kind deve ser chat, agent, maestro, comparar ou pesquisa")
     with db.session() as s:
         c = db.Conversation(workspace=folder, kind=kind)
         s.add(c)
@@ -776,6 +953,20 @@ def patch_conversation(conv_id: int, body: ConvPatch):
     if body.title is not None:
         mirror.write(conv_id)  # o título está no nome do arquivo: regrava e apaga o antigo
     return out
+
+
+@app.get("/api/conversations/{conv_id}/goal")
+def get_goal_da_conversa(conv_id: int):
+    """Faixa da goal acima do campo de mensagem (DeepSeek Harness: ui-goal)."""
+    return {"goal": goals.para_tela(conv_id)}
+
+
+@app.post("/api/conversations/{conv_id}/goal")
+def acao_goal(conv_id: int, body: dict):
+    try:
+        return {"goal": goals.acao_da_tela(conv_id, str(body.get("action") or ""))}
+    except ToolError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/conversations/{conv_id}/export")
@@ -1246,3 +1437,113 @@ def change_permission(run_id: str, body: dict):
 def stop(run_id: str):
     _get_run(run_id).stop()
     return {"ok": True}
+
+
+@app.post("/api/runs/{run_id}/pause")
+async def pause(run_id: str, body: dict):
+    """Pausa (ou retoma) no fim do passo em curso: o que está rodando termina, o próximo espera."""
+    run = _get_run(run_id)
+    run.pausar(bool(body.get("paused", True)))
+    await run.publish({"type": "paused", "paused": run.paused})
+    return {"ok": True, "paused": run.paused}
+
+
+# ------------------------------------------------------------------ Maestro
+# Execução, cancelamento e aprovação continuam em /conversations/{id}/run e /runs/{id}/*: a Maestro
+# é um Run como qualquer outro. O que existe aqui é a leitura da árvore de tarefas e a intervenção
+# humana sobre ela (editar contrato, reenviar, assumir).
+
+
+@app.get("/api/maestro/{conv_id}/board")
+def maestro_board(conv_id: int):
+    """Árvore de funcionalidades, tarefas e tentativas. É o que o cockpit desenha."""
+    with db.session() as s:
+        _get_conv(s, conv_id)
+    return taskdb.board(conv_id)
+
+
+@app.get("/api/maestro/{conv_id}/task/{code}")
+def maestro_task(conv_id: int, code: str):
+    try:
+        return taskdb.detail(conv_id, code)
+    except ToolError as e:
+        raise HTTPException(404, str(e))
+
+
+class TaskPatch(BaseModel):
+    status: str | None = None
+    reason: str | None = None
+    contract: dict | None = None
+    model_slot: str | None = None
+    priority: int | None = None
+    max_attempts: int | None = None
+
+
+@app.post("/api/maestro/{conv_id}/task/{code}")
+def maestro_task_patch(conv_id: int, code: str, body: TaskPatch):
+    """Intervenção humana: corrigir o contrato, trocar o modelo, desbloquear, assumir a tarefa."""
+    if active_run(conv_id) and body.status in ("implementing", "testing"):
+        raise HTTPException(409, "A Maestro está executando; pare antes de mexer no estado da tarefa")
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not patch:
+        raise HTTPException(400, "Nada para mudar")
+    token = taskdb.CONV.set(conv_id)
+    try:
+        return {"ok": True, "text": taskdb._update_task(None, {"code": code, **patch}),
+                "task": taskdb.detail(conv_id, code)}
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        taskdb.CONV.reset(token)
+
+
+@app.post("/api/maestro/{conv_id}/nova-sessao")
+def maestro_nova_sessao(conv_id: int):
+    """Botão "Nova sessão": contexto limpo, com cópia do trabalho aberto (a lista fica nesta conversa)."""
+    if active_run(conv_id):
+        raise HTTPException(409, "Pare a Maestro antes de abrir uma sessão nova")
+    novo, copiadas = projstate.nova_sessao(conv_id)
+    return {"id": novo, "copied": copiadas}
+
+
+@app.post("/api/maestro/{conv_id}/task/{code}/attempt/{n}/rollback")
+def maestro_attempt_rollback(conv_id: int, code: str, n: int):
+    """Desfaz o que UMA tentativa do Worker escreveu (arquivos voltam ao estado de antes dela)."""
+    if active_run(conv_id):
+        raise HTTPException(409, "Pare a Maestro antes de desfazer uma tentativa")
+    with db.session() as s:
+        task = s.query(db.Task).filter(db.Task.conversation_id == conv_id,
+                                       db.Task.code == code.upper()).first()
+        att = task and s.query(db.Attempt).filter(db.Attempt.task_id == task.id, db.Attempt.n == n).first()
+        if not att:
+            raise HTTPException(404, f"{code} não tem a tentativa {n}")
+        att_id = att.id
+    restaurados = checkpoints.restore_attempt(att_id)
+    if not restaurados:
+        raise HTTPException(400, "Esta tentativa não tem alteração de arquivo guardada para desfazer")
+    with db.session() as s:
+        att = s.get(db.Attempt, att_id)
+        att.estado = None  # os arquivos voltaram: não é mudança externa na próxima tarefa
+        s.commit()
+    # A entrega da tarefa saiu do disco: ela volta a ser trabalho a fazer.
+    token = taskdb.CONV.set(conv_id)
+    try:
+        for novo in ("pending", "queued"):
+            try:
+                taskdb.set_status(code, novo, conv_id)
+                break
+            except ToolError:
+                continue
+        return {"restored": restaurados, "task": taskdb.detail(conv_id, code)}
+    finally:
+        taskdb.CONV.reset(token)
+
+
+@app.get("/api/maestro/models")
+def maestro_models():
+    """Estado do ciclo de vida dos modelos, para o painel Modelo·VRAM do cockpit."""
+    return {**modelctl.status(), "max_workers": config.MAX_WORKERS,
+            "can_swap": modelctl.pode_trocar(), "min_ctx_worker": config.WORKER_MIN_CTX,
+            "slots": subagents.configured(), "active": subagents.ativas(),
+            "especialidades": config.WORKER_ESPECIALIDADES, "workers_do_maestro": config.WORKERS_DO_MAESTRO,
+            "maestro_model": config.MAESTRO_MODEL}

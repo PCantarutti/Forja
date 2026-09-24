@@ -43,6 +43,12 @@ Mudança que só toca os arquivos "comuns" (a maioria) aplica sem conflito. Muda
 | `backend/app/gitops.py` | `worktree` traduz caminho | caminho direto |
 | `backend/app/mirror.py` | espelho em `/data/conversas` (volume) | espelho em `%APPDATA%\Forja\conversas` |
 | `backend/app/browser.py` | só o modo espelho (Chromium headless + screencast) | mais o modo nativo (`FORJA_CDP`, views do Electron) |
+| `backend/app/llm.py` | sem `_inference()` nem sonda do `localai` | amostragem por modelo, `ctx`/visão do `localai`, dica do Ollama por hostname |
+| `backend/app/lsp.py` | mata o servidor de linguagem com `os.killpg` | `native.popen_kwargs`/`kill_tree` |
+| `backend/app/baterias.py` | `http.server` do teste sobe com `shell._local_start` (container) | `shell._start` com `&` do PowerShell |
+| `backend/app/sessoes.py` e `projstate.py` | comparam pasta pelo caminho no container (`workspace.resolve`) | `workspace.normalize` (identidade) |
+| `backend/app/terminal.py` (terminal do agente) | `terminal_*` sempre bash no container | shell do sistema |
+| `backend/tests/conftest.py` | fixture que monta o disco do pytest como `HOST_MOUNTS` (os testes do desktop usam `tmp_path` como pasta) | `FORJA_DATA` temporário |
 | `frontend/src/components/BrowserPanel.tsx` | espelho: clique/teclado/roda vão ao backend | mais as views nativas do Electron |
 | `frontend/src/components/Settings.tsx` | 7 abas | mais a aba *Aplicativo* (zoom, bandeja, iniciar com o Windows) |
 | `frontend/src/forja.d.ts` | não existe | tipos da ponte `window.forja` |

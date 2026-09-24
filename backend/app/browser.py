@@ -36,6 +36,8 @@ from . import config, uploads
 from .tools import Tool, ToolError, register, resolve_path
 from .web import UNTRUSTED
 
+NL = "\n"  # usado em f-strings/joins do browser_validate, onde a quebra é parte do formato
+
 VIEWPORT = {"width": 1280, "height": 800}  # inicial; o painel da UI manda o tamanho real (set_viewport)
 MIN_VIEWPORT, MAX_VIEWPORT = (320, 240), (3840, 2400)
 NAV_TIMEOUT = 15_000
@@ -530,6 +532,23 @@ def _locator(page, selector: str):
 
 
 def _act_err(selector: str, e: Exception) -> str:
+    texto = str(e)
+    if m := re.search(r"strict mode violation.*?resolved to (\d+) elements", texto, re.S):
+        # Vários iguais ("Excluir" em cada card, "Alta" no filtro e no modal): no TaskBoard a Maestro
+        # desistia e clicava por browser_eval, sem passar pelo clique de verdade.
+        dica = (" Num <select>, prefira browser_type no combobox com o texto da opção."
+                if "option" in selector.lower() else "")
+        return (f"'{selector}' casou com {m.group(1)} elementos. Escolha um: acrescente ' >> nth=0' (o 1º), "
+                f"' >> nth=1'…, restrinja pelo contêiner (ex.: '#modal >> {selector}') ou use o ref do "
+                f"browser_read.{dica}")
+    if "resolved to" in texto:
+        # O elemento existe: dizer "a página mudou" mandava o modelo reler e tentar o mesmo ref para
+        # sempre (seis vezes seguidas numa validação real), quando o problema era outro.
+        motivo = next((l.strip(" -") for l in texto.splitlines()
+                       if any(k in l for k in ("not visible", "outside of the viewport", "not stable",
+                                               "intercepts pointer", "not enabled", "disabled"))), _err(e))
+        return (f"'{selector}' existe, mas não aceitou a ação: {motivo}. Tente browser_scroll até ele, "
+                "espere a página terminar de carregar, ou confira se um modal/overlay está por cima.")
     if REF_RE.match(selector.strip()):
         return (f"Ref '{selector}' não encontrado: a página mudou desde o último browser_read. "
                 "Chame browser_read de novo e use um ref atual.")
@@ -575,14 +594,85 @@ async def read(_root: Path, args: dict) -> str:
     return f"{UNTRUSTED}{await _summary(page)}\n\n{snap[:max_chars]}{more}"
 
 
+async def validate(_root: Path, args: dict) -> str:
+    """Abre a página e devolve estrutura + erros de console numa resposta só.
+
+    Existe por orçamento de contexto, não por conveniência: validar uma tela custava três chamadas
+    (navigate, read, console), e cada rodada do modelo recarrega o histórico inteiro. Para a Maestro,
+    que valida depois de cada tarefa, três viram uma.
+    """
+    s = current()
+    antes = len(s.logs)
+    if url := (args.get("url") or "").strip():
+        await navigate(_root, {"url": url})
+    page = await s.ensure()
+    partes = [await _summary(page)]
+
+    novos = list(s.logs)[antes:]
+    erros = [l for l in novos if l.split("] ", 1)[-1].startswith(ERROR_PREFIXES)]
+    cabeca = f"ERROS DE CONSOLE: {len(erros)}"
+    partes.append(NL.join([cabeca, *erros[-20:]]) if erros else cabeca + " (nenhum)")
+
+    estrutura = await read(_root, {"selector": args.get("selector") or "",
+                                   "max_chars": args.get("max_chars") or 8_000})
+    # `read` já carrega o aviso de conteúdo não confiável e o resumo; fica só o corpo.
+    partes.append("ESTRUTURA DA PÁGINA" + NL + estrutura.split(NL + NL, 1)[-1])
+    return UNTRUSTED + (NL + NL).join(partes)
+
+
+@asynccontextmanager
+async def _com_tela(page):
+    """Dá à página um viewport de verdade enquanto o agente age nela, se ela não tiver.
+
+    No modo nativo a aba é uma view do Electron que só ganha tamanho quando o painel Navegador
+    daquela conversa está na tela. Com o painel fechado (ou mostrando outra conversa, o normal no
+    cockpit do Maestro) a página fica com viewport 0x0: o snapshot lista os botões, mas todo clique
+    morre em "element is outside of the viewport" — numa validação real, seis cliques seguidos
+    falharam no mesmo contador. Mesma saída do print: override de CDP só durante a ação."""
+    sessao = None
+    with contextlib.suppress(Exception):
+        if page.viewport_size is None and 0 in await page.evaluate("[innerWidth, innerHeight]"):
+            sessao = await page.context.new_cdp_session(page)
+            await sessao.send("Emulation.setDeviceMetricsOverride",
+                              {"width": PRINT_VIEWPORT["width"], "height": PRINT_VIEWPORT["height"],
+                               "deviceScaleFactor": 1, "mobile": False})
+    try:
+        yield
+    finally:
+        if sessao is not None:
+            with contextlib.suppress(Exception):
+                try:
+                    await sessao.send("Emulation.clearDeviceMetricsOverride")
+                finally:
+                    await sessao.detach()
+
+
+async def _tag(loc) -> str:
+    try:
+        return str(await loc.evaluate("e => e.tagName", timeout=2000)).upper()
+    except Exception:  # vários elementos, ou nenhum: o clique/fill normal dá o erro certo
+        return ""
+
+
+# <option> não é clicável (fica oculta dentro do <select>): seleciona pelo próprio select, com os eventos
+# que um usuário dispararia. No TaskBoard a Maestro tentou clicar em "Em Andamento" e desistiu.
+SELECIONA_OPCAO = """o => { const s = o.closest('select'); s.value = o.value;
+  s.dispatchEvent(new Event('input', {bubbles: true})); s.dispatchEvent(new Event('change', {bubbles: true})); }"""
+
+
 async def click(_root: Path, args: dict) -> str:
     page = await current().ensure()
     selector = args["selector"]
-    try:
-        await _locator(page, selector).click(timeout=ACT_TIMEOUT)
-    except Exception as e:
-        raise ToolError(_act_err(selector, e)) from e
-    await _settle(page)
+    async with _com_tela(page):
+        try:
+            loc = _locator(page, selector)
+            if await _tag(loc) == "OPTION":
+                await loc.evaluate(SELECIONA_OPCAO)
+            else:
+                await loc.click(timeout=ACT_TIMEOUT)
+        except Exception as e:
+            raise ToolError(_act_err(selector, e)) from e
+        await _settle(page)
     return await _summary(page)
 
 
@@ -590,13 +680,20 @@ async def type_text(_root: Path, args: dict) -> str:
     page = await current().ensure()
     selector = args["selector"]
     loc = _locator(page, selector)
-    try:
-        await loc.fill(str(args["text"]), timeout=ACT_TIMEOUT)
-        if args.get("submit"):
-            await loc.press("Enter", timeout=ACT_TIMEOUT)
-    except Exception as e:
-        raise ToolError(_act_err(selector, e)) from e
-    await _settle(page)
+    async with _com_tela(page):
+        try:
+            if await _tag(loc) == "SELECT":  # fill não serve em <select>: escolhe a opção pelo texto
+                try:
+                    await loc.select_option(label=str(args["text"]), timeout=ACT_TIMEOUT)
+                except Exception:
+                    await loc.select_option(value=str(args["text"]), timeout=ACT_TIMEOUT)
+            else:
+                await loc.fill(str(args["text"]), timeout=ACT_TIMEOUT)
+            if args.get("submit"):
+                await loc.press("Enter", timeout=ACT_TIMEOUT)
+        except Exception as e:
+            raise ToolError(_act_err(selector, e)) from e
+        await _settle(page)
     return await _summary(page)
 
 
@@ -643,8 +740,15 @@ async def tabs(_root: Path, args: dict) -> str:
 
 async def evaluate(_root: Path, args: dict) -> str:
     page = await current().ensure()
+    script = str(args["script"])
     try:
-        result = await page.evaluate(str(args["script"]))
+        try:
+            result = await page.evaluate(script)
+        except Exception as e:
+            # corpo de função solto ("const x = ...; return x"): o modelo escreve assim o tempo todo
+            if "Illegal return" not in str(e):
+                raise
+            result = await page.evaluate(f"(() => {{\n{script}\n}})()")
     except Exception as e:
         raise ToolError(f"Erro no JS: {_err(e)}") from e
     text = json.dumps(result, ensure_ascii=False, default=str)
@@ -655,6 +759,12 @@ def eval_preview(_root: Path, args: dict) -> dict:
     s = current()
     return {"kind": "command", "path": s.active.url if s.open else "(navegador fechado)",
             "text": str(args.get("script", ""))}
+
+
+SEM_BARRA = """() => { if (document.getElementById('forja-sem-barra')) return;
+  const s = document.createElement('style'); s.id = 'forja-sem-barra';
+  s.textContent = 'html,body{scrollbar-width:none!important}html::-webkit-scrollbar,body::-webkit-scrollbar{display:none!important}';
+  document.documentElement.appendChild(s); }"""
 
 
 @asynccontextmanager
@@ -682,6 +792,11 @@ async def _viewport_do_print(page, largura: int, altura: int):
             sessao = await page.context.new_cdp_session(page)
             await sessao.send("Emulation.setDeviceMetricsOverride",
                               {"width": largura, "height": altura, "deviceScaleFactor": 1, "mobile": False})
+    # Sem barra de rolagem no print: ela come ~15px da largura (o "desktop" deixa de ter 1280 de conteúdo)
+    # e aparece como uma faixa cinza que o modelo com visão lê como parte do layout. Estilo injetado só
+    # durante a foto — o `Emulation.setScrollbarsHidden` do CDP não vale na captura da view do Electron.
+    with contextlib.suppress(Exception):
+        await page.evaluate(SEM_BARRA)
     # Deixa o layout assentar antes de medir e fotografar: a troca de viewport é assíncrona e uma
     # página longa leva um tempo para refluir.
     with contextlib.suppress(Exception):
@@ -691,8 +806,11 @@ async def _viewport_do_print(page, largura: int, altura: int):
     except Exception:
         medido = [largura, altura]
     try:
-        yield {"width": int(medido[0]), "height": int(medido[1])}
+        # `cdp`: no nativo, a foto tem de sair por esta mesma sessão (ver screenshot)
+        yield {"width": int(medido[0]), "height": int(medido[1]), "cdp": sessao}
     finally:
+        with contextlib.suppress(Exception):
+            await page.evaluate("() => document.getElementById('forja-sem-barra')?.remove()")
         with contextlib.suppress(Exception):
             if sessao is not None:
                 try:
@@ -710,8 +828,12 @@ async def scroll(_root: Path, args: dict) -> str:
     que sobrava era `full_page`, que devolvia uma tira de 5000px e travava o modelo com visão por
     minutos. Com o scroll, cada print continua sendo uma tela de verdade e o modelo desce por ela.
     """
-    s = current()
-    page = await s.ensure()
+    page = await current().ensure()
+    async with _com_tela(page):  # rolar numa aba sem viewport não move nada
+        return await _rola(page, args)
+
+
+async def _rola(page, args: dict) -> str:
     alvo = str(args.get("selector") or "").strip()
     try:
         if alvo:
@@ -763,6 +885,14 @@ async def screenshot(_root: Path, args: dict) -> dict:
                 elemento = _locator(page, alvo)
                 await elemento.scroll_into_view_if_needed(timeout=PRINT_TIMEOUT)
                 jpg = await elemento.screenshot(**comum)
+            elif real.get("cdp") is not None:
+                # Nativo: o `page.screenshot()` do Playwright, numa aba sem viewport dele, fotografava o
+                # tamanho do PAINEL (estreito e alto), não o override — o print "desktop" de 1280x720
+                # saía igual ao de celular, e a revisão visual julgava o desktop sem nunca vê-lo. A foto
+                # sai pela mesma sessão CDP que aplicou o tamanho.
+                r = await real["cdp"].send("Page.captureScreenshot",
+                                           {"format": "jpeg", "quality": JPEG_QUALITY, "fromSurface": True})
+                jpg = base64.b64decode(r["data"])
             else:
                 jpg = await page.screenshot(**comum)
     except Exception as e:
@@ -807,10 +937,20 @@ register(Tool(
           "selector": {"type": "string", "description": "Opcional: ref ou seletor para ler só uma região"}}, []),
     read))
 register(Tool(
-    "browser_click", "Clica num elemento da aba ativa.",
+    "browser_validate",
+    "Valida uma página numa chamada só: abre a URL (se você passar uma), lista os erros de console e "
+    "devolve a estrutura da página. Use isto para conferir uma tela depois de uma tarefa, em vez de "
+    "browser_navigate + browser_console + browser_read — é o mesmo resultado numa rodada.",
+    _obj({"url": {"type": "string", "description": "URL a abrir; vazio usa a aba atual"},
+          "selector": {"type": "string", "description": "Opcional: ler só uma região"},
+          "max_chars": {"type": "integer", "description": "Limite da estrutura (padrão 8000)"}}, []),
+    validate))
+register(Tool(
+    "browser_click", "Clica num elemento da aba ativa. Numa <option> de um <select>, seleciona a opção.",
     _obj({"selector": SELECTOR}, ["selector"]), click, mutating=True))
 register(Tool(
-    "browser_type", "Preenche um campo (substitui o conteúdo) e opcionalmente aperta Enter.",
+    "browser_type", "Preenche um campo (substitui o conteúdo) e opcionalmente aperta Enter. Num <select> "
+                    "(combobox), escolhe a opção cujo texto é 'text'.",
     _obj({"selector": SELECTOR, "text": {"type": "string"},
           "submit": {"type": "boolean", "description": "Apertar Enter depois. Padrão: false"}},
          ["selector", "text"]),

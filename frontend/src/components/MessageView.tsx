@@ -1,19 +1,38 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { createContext, memo, useContext, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import type { Approval, AskQuestion, Attachment, Message, Preview, Task, ToolCall } from "../types";
+import { createPortal } from "react-dom";
+import type { Approval, AskQuestion, Attachment, Message, Preview, Task, ToolCall, Stats } from "../types";
 import { SourceChip, SourceList } from "./Sources";
 import { useStickyBottom } from "../useStickyBottom";
-import { Brain, Check, Chevron, Edit, ChevronDown, Clipboard, Split, Clock, Copy, Cube, Eye, EyeOff, FolderOpen, Gauge, Shield, Tokens, X } from "./icons";
+import { Brain, Check, Chevron, Edit, ChevronDown, Clipboard, Split, Clock, Copy, Cube, Download, Eye, EyeOff, FolderOpen, Gauge, Shield, Tokens, X } from "./icons";
+
+/** Quem fornece isto ganha o botão "Testar" nos blocos de código (código, linguagem do bloco).
+ * Só o Comparar fornece: no chat o bloco continua só com o copiar. */
+export const TestarCodigo = createContext<((codigo: string, linguagem: string) => void) | null>(null);
 
 /** Bloco de código com botão de copiar no canto (aparece ao passar o mouse). */
 function CodeBlock(props: React.ComponentProps<"pre">) {
   const ref = useRef<HTMLPreElement>(null);
+  const testar = useContext(TestarCodigo);
   // ponytail: o texto vem do DOM já renderizado, sem remontar o AST do markdown
   return (
     <div className="group relative">
       <BotaoDeCanto>
+        {testar && (
+          <button
+            title="Testar este código: HTML abre no navegador, Python e JavaScript rodam no terminal"
+            onClick={() => {
+              const code = ref.current?.querySelector("code");
+              const lang = /language-([\w-]+)/.exec(code?.className ?? "")?.[1] ?? "";
+              testar(ref.current?.textContent ?? "", lang);
+            }}
+            className="mr-1 rounded-md border border-line bg-surface px-2 py-0.5 text-[11px] text-muted hover:bg-raised hover:text-fg"
+          >
+            ▶ Testar
+          </button>
+        )}
         <CopyButton text={() => ref.current?.textContent ?? ""} bg />
       </BotaoDeCanto>
       <pre ref={ref} {...props} />
@@ -85,7 +104,19 @@ function Link({ href, children, ...rest }: React.ComponentProps<"a">) {
   );
 }
 
-const MD_COMPONENTS = { pre: CodeBlock, table: Table, a: Link };
+/** Imagem na resposta (ex.: prints do revisor do Comparar): clique amplia, no mesmo Lightbox dos anexos. */
+function Imagem({ src, alt, ...rest }: React.ComponentProps<"img">) {
+  const [zoom, setZoom] = useState(false);
+  return (
+    <>
+      <img src={src} alt={alt} {...rest} title={alt ? `${alt} — clique para ampliar` : "Clique para ampliar"}
+           onClick={() => setZoom(true)} className="cursor-zoom-in" />
+      {zoom && typeof src === "string" && <Lightbox src={src} titulo={alt} onClose={() => setZoom(false)} />}
+    </>
+  );
+}
+
+const MD_COMPONENTS = { pre: CodeBlock, table: Table, a: Link, img: Imagem };
 
 /**
  * Memoizado, e é o `memo` que mais paga no app inteiro.
@@ -181,16 +212,51 @@ export const setFileConv = (conv: number | null) => {
 export const fileUrl = (a: Attachment) => `/api/files?path=${encodeURIComponent(a.path)}&conv=${fileConv}`;
 
 /** Imagem em tela cheia; clique (ou Esc) fecha. */
-export function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
+export function Lightbox({ src, onClose, titulo }: { src: string; onClose: () => void; titulo?: string }) {
+  const [real, setReal] = useState(false);          // false = cabe na tela; true = pixel a pixel, com rolagem
+  const [medida, setMedida] = useState<[number, number] | null>(null);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-  return (
-    <div onClick={onClose} className="fixed inset-0 z-50 grid cursor-zoom-out place-items-center bg-black/85 p-4">
-      <img src={src} alt="" className="max-h-full max-w-full rounded-lg shadow-2xl" />
-    </div>
+  const nome = titulo || decodeURIComponent(src.split(/[/?=&]/).filter(Boolean).pop() || "Imagem");
+  const botao = "flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted hover:bg-raised hover:text-fg";
+  // Portal no body: desenhado dentro da resposta, herdava o CSS dela (miniatura de 280px numa célula de
+  // tabela) e o "ampliar" mostrava a imagem do mesmo tamanho, só que com o fundo escuro.
+  return createPortal(
+    <div onClick={onClose} role="dialog" aria-label={nome}
+         className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm">
+      <div onClick={(e) => e.stopPropagation()}
+           className="flex max-h-full max-w-[min(1400px,100%)] flex-col overflow-hidden rounded-2xl border border-line bg-panel shadow-2xl">
+        <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
+          <span className="min-w-0 truncate text-sm text-fg" title={nome}>{nome}</span>
+          {medida && <span className="shrink-0 text-[11px] text-faint">{medida[0]}×{medida[1]}</span>}
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            <button className={botao} onClick={() => setReal((v) => !v)}
+                    title={real ? "Ajustar à tela" : "Ver no tamanho real (com rolagem)"}>
+              {real ? "Ajustar à tela" : "Tamanho real"}
+            </button>
+            <a className={botao} href={src} download title="Baixar a imagem">
+              <Download className="size-3.5" />
+            </a>
+            <button className={botao} onClick={onClose} title="Fechar (Esc)">
+              <X className="size-3.5" />
+            </button>
+          </div>
+        </div>
+        <div className={`min-h-0 flex-1 bg-bg p-3 ${real ? "overflow-auto" : "flex items-center justify-center overflow-hidden"}`}>
+          <img
+            src={src}
+            alt={nome}
+            onLoad={(e) => setMedida([e.currentTarget.naturalWidth, e.currentTarget.naturalHeight])}
+            onClick={() => setReal((v) => !v)}
+            className={`rounded-lg ${real ? "max-w-none cursor-zoom-out" : "max-h-[calc(100vh-8rem)] max-w-full cursor-zoom-in object-contain"}`}
+          />
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -418,7 +484,57 @@ function Chip({ children }: { children: React.ReactNode }) {
 
 export type TurnStats = { model: string; tokens: number; seconds: number; tps: number | null; estimated: boolean };
 
-export function StatsRow({ s, live, instances, onInstances, phase }: { s: TurnStats; live?: boolean; instances?: number; onInstances?: () => void; phase?: string }) {
+/** Soma as iterações de um turno numa linha de estatísticas (t/s ponderado pelo tempo gerando). */
+export function aggregate(list: Stats[]): TurnStats {
+  const withTps = list.filter((s) => s.tps);
+  const gen = withTps.reduce((a, s) => a + s.tokens / s.tps!, 0);
+  return {
+    model: list[list.length - 1].model,
+    tokens: list.reduce((a, s) => a + s.tokens, 0),
+    seconds: list.reduce((a, s) => a + s.seconds, 0),
+    tps: gen > 0 ? withTps.reduce((a, s) => a + s.tokens, 0) / gen : null,
+    estimated: list.some((s) => s.estimated),
+  };
+}
+
+export type Turno = { stats: TurnStats | null; text: string; userId: number | null };
+
+/** Estatísticas por turno (todas as iterações até a próxima mensagem do usuário), chaveadas pelo
+ *  índice da última resposta do turno — é onde a linha de estatísticas é desenhada. */
+export function turnosDe(messages: Message[]): Map<number, Turno> {
+  const out = new Map<number, Turno>();
+  let acc: Stats[] = [];
+  let text: string[] = [];
+  let last = -1;
+  let userId: number | null = null;
+  const flush = () => {
+    if (last >= 0) out.set(last, { stats: acc.length ? aggregate(acc) : null, text: text.join("\n\n"), userId });
+    acc = [];
+    text = [];
+    last = -1;
+  };
+  messages.forEach((m, i) => {
+    if (m.role === "user") {
+      flush();
+      userId = m.id;
+    } else if (m.role === "assistant") {
+      last = i;
+      if (m.meta?.stats) acc.push(m.meta.stats);
+      if (m.content) text.push(m.content);
+    }
+  });
+  flush();
+  return out;
+}
+
+/** Resultado de cada chamada, pelo id: o bloco da ferramenta desenha o desfecho dentro dele. */
+export function resultadosDe(messages: Message[]): Map<string, Message> {
+  const m = new Map<string, Message>();
+  for (const msg of messages) if (msg.role === "tool" && msg.tool_call_id) m.set(msg.tool_call_id, msg);
+  return m;
+}
+
+export function StatsRow({ s, live, instances, instancesLabel, onInstances, phase }: { s: TurnStats; live?: boolean; instances?: number; instancesLabel?: string; onInstances?: () => void; phase?: string }) {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-muted">
       <Chip>
@@ -448,7 +564,7 @@ export function StatsRow({ s, live, instances, onInstances, phase }: { s: TurnSt
           ) : (
             <span className="size-1.5 animate-pulse rounded-full bg-sky-400" />
           )}
-          {[instances ? `${instances} instância${instances > 1 ? "s" : ""} rodando` : "", phase]
+          {[instances ? instancesLabel || `${instances} em segundo plano` : "", phase]
             .filter(Boolean)
             .join(" · ")}
         </button>
@@ -610,6 +726,7 @@ export function ToolBlock(props: {
               {JSON.stringify(call.arguments, null, 2)}
             </pre>
           )}
+          {approval?.nota && <div className="mb-2 text-xs text-amber-200/90">{approval.nota}</div>}
           <div className="flex flex-wrap gap-2">
             <button
               onClick={() => props.onDecide(true)}
@@ -673,10 +790,30 @@ export function ToolBlock(props: {
 
 export type ActivityPiece =
   | { kind: "thinking"; id: string; text: string }
-  | { kind: "tool"; id: string; call: ToolCall };
+  | { kind: "tool"; id: string; call: ToolCall }
+  | { kind: "note"; id: string; title: string; text: string };
+
+/** Eventos que o Forja manda ao MODELO (rodada de goal, aviso de segundo plano, contexto, hook,
+ * lembrete): não são conversa com o usuário, então vão dentro do bloco recolhível de atividade. */
+export const NOTA_DO_AGENTE: Record<string, string> = {
+  goal: "Nova rodada da goal",
+  aviso: "Aviso de segundo plano",
+  contexto: "Contexto de execução",
+  hook: "Hook do projeto",
+  nudge: "Lembrete automático",
+  skill: "Skill carregada",
+  mudanca: "Mudança de modo ou modelo",
+  referencia: "Conversa citada",
+};
 
 // Primeira ferramenta do grupo vira a frase de abertura do resumo.
 const ACTION: Record<string, string> = {
+  plan_feature: "Planejou uma funcionalidade",
+  run_task: "Despachou uma tarefa",
+  update_task: "Atualizou uma tarefa",
+  list_tasks: "Conferiu as tarefas",
+  session_note: "Registrou a sessão",
+  browser_validate: "Validou uma página",
   run_command: "Executou um comando",
   read_file: "Leu um arquivo",
   edit_file: "Editou um arquivo",
@@ -711,12 +848,25 @@ export function groupActivity(messages: Message[]): Map<number, ActivitySeg[]> {
     cur = [];
     at = -1;
   };
+  let notas: ActivityPiece[] = []; // avisos ao modelo esperando o próximo grupo abrir
   const open = (i: number) => {
     if (at < 0) at = i;
+    if (notas.length) {
+      cur.push(...notas);
+      notas = [];
+    }
   };
   messages.forEach((m, i) => {
     if (m.role === "tool") return; // resultado é desenhado dentro do bloco da ferramenta, não corta o grupo
+    const kind = m.role === "event" ? String(m.meta?.kind ?? "") : "";
+    if (kind in NOTA_DO_AGENTE) {  // aviso ao modelo: entra no grupo aberto (ou no próximo), não corta
+      const nota: ActivityPiece = { kind: "note", id: `nota-${m.id}`, title: NOTA_DO_AGENTE[kind], text: m.content };
+      if (at >= 0) cur.push(nota);
+      else notas.push(nota);
+      return;
+    }
     if (m.role !== "assistant") return flush();
+    if (notas.length && m.content && !m.thinking && !(m.tool_calls ?? []).length) open(i); // resposta direta: as notas ficam num grupo antes dela
     if (m.thinking) {
       open(i);
       cur.push({ kind: "thinking", id: `think-${m.id}`, text: m.thinking });
@@ -771,8 +921,10 @@ export function ActivityGroup(props: {
   // Screenshot e arquivo gerado são resposta, não detalhe de execução: saem do grupo e ficam
   // visíveis mesmo com ele colapsado.
   const shots = tools.flatMap((c) => props.results.get(c.id)?.meta?.attachments ?? []);
+  const soNotas = props.items.every((p) => p.kind === "note");
   const summary =
-    (props.live && !tools.length ? "Trabalhando" : tools.length > 1 ? `${head}, usou ${tools.length} ferramentas` : head) +
+    (props.live && !tools.length ? "Trabalhando" : soNotas ? "Avisos ao agente"
+      : tools.length > 1 ? `${head}, usou ${tools.length} ferramentas` : head) +
     (fails ? ` (${fails} falha${fails > 1 ? "s" : ""})` : "") +
     (props.live ? "…" : "");
 
@@ -790,6 +942,11 @@ export function ActivityGroup(props: {
           {props.items.map((p, k) =>
             p.kind === "thinking" ? (
               <Thinking key={p.id} text={p.text} />
+            ) : p.kind === "note" ? (
+              <details key={p.id} className="my-1.5 text-xs text-faint">
+                <summary className="cursor-pointer select-none hover:text-muted">{p.title}</summary>
+                <div className="mt-1 whitespace-pre-wrap text-muted">{p.text}</div>
+              </details>
             ) : (
               <div key={p.id}>
                 {props.renderTool(
@@ -828,7 +985,12 @@ export function EventNotice({ m }: { m: Message }) {
         </div>
       </details>
     );
-  const title = { warning: "Aviso", error: "Erro", nudge: "Lembrete automático ao modelo", info: "Info" }[kind as string];
+  const title = {
+    warning: "Aviso",
+    error: "Erro",
+    nudge: "Lembrete automático ao modelo",
+    info: "Info",
+  }[kind as string];
   return (
     <div className={`my-3 rounded-2xl border bg-surface px-4 py-2.5 text-sm ${EVENT_STYLE[kind] ?? EVENT_STYLE.info}`}>
       <span className="font-medium">{title}:</span> {m.content}

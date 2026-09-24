@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import { UsageBars, useCloudUsage } from "./CloudUsage";
 import { api } from "../api";
+import type { Especialidade } from "../types";
+import Confirma from "./Confirma";
 import { Modal } from "./Modal";
 import type { McpStatus, ToolInfo } from "./InfoPanel";
 import { Shield, Trash, Wrench } from "./icons";
+import ModelPicker from "./ModelPicker";
 
 export type Provider = {
   id: string;
@@ -28,6 +31,7 @@ export type AppSettings = {
   auto_approve_tools: string[];
   auto_approve_commands: string[];
   trusted_hooks: string[];
+  personal_memory: boolean;
   project_memory: boolean;
   project_memory_file: string;
   enabled_models: Record<string, string[] | undefined>;
@@ -36,6 +40,15 @@ export type AppSettings = {
   browser_idle_minutes: number;
   browser_scale: number;
   browser_stream: "png" | "jpeg";
+  maestro_max_iterations: number;
+  maestro_max_attempts: number;
+  max_workers: number;
+  model_lifecycle: string;
+  maestro_model: { provider: string; model: string };
+  maestro_browser: boolean;
+  auto_review: boolean;
+  maestro_visual: { provider: string; model: string };
+  worker_especialidades: Especialidade[];
 };
 
 type Entity = { name: string; entityType?: string; observations?: string[] };
@@ -49,12 +62,24 @@ type Memory = {
   raw?: string;
 };
 
-const TABS = ["Geral", "Provedores", "Subagentes", "Ferramentas", "Permissões", "MCP", "Memória"] as const;
+const TABS = ["Geral", "Provedores", "Subagentes", "Maestro", "Ferramentas", "Permissões", "MCP", "Memória"] as const;
 type Tab = (typeof TABS)[number];
 
 const input = "w-full rounded-lg border border-line bg-raised px-3 py-1.5 text-sm text-fg focus:border-[#555] focus:outline-none";
 const btn = "rounded-full border border-line px-3 py-1.5 text-sm text-fg hover:bg-raised";
 const btnPrimary = "rounded-full bg-fg px-4 py-1.5 text-sm font-medium text-black hover:bg-white disabled:opacity-40";
+
+function Toggle({ checked, onChange, label, hint, disabled }: { checked: boolean; onChange: (v: boolean) => void; label: string; hint?: string; disabled?: boolean }) {
+  return (
+    <label className={`flex items-start gap-3 rounded-xl border border-line bg-surface p-3 ${disabled ? "opacity-50" : "cursor-pointer hover:border-[#3d3d3d]"}`}>
+      <input type="checkbox" className="mt-0.5 size-4 accent-white" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <span className="min-w-0">
+        <span className="block text-sm text-fg">{label}</span>
+        {hint && <span className="mt-0.5 block text-xs text-muted">{hint}</span>}
+      </span>
+    </label>
+  );
+}
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -79,6 +104,7 @@ export default function Settings(props: {
   const [tab, setTab] = useState<Tab>("Geral");
   const [s, setS] = useState<AppSettings | null>(null);
   const [dirty, setDirty] = useState<Partial<AppSettings>>({});
+  const [descartar, setDescartar] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState("");
   const [busy, setBusy] = useState(false);
@@ -101,6 +127,7 @@ export default function Settings(props: {
     try {
       setS(await api.put<AppSettings>("/settings", body));
       setDirty({});
+      setDescartar(false);
       setSaved("Salvo.");
       props.onChanged();
     } catch (e: any) {
@@ -110,7 +137,6 @@ export default function Settings(props: {
   }
 
   async function resetAll() {
-    if (!confirm("Voltar todas as configurações para os valores do .env?")) return;
     setS(await api.post<AppSettings>("/settings/reset", {}));
     setDirty({});
     props.onChanged();
@@ -121,7 +147,11 @@ export default function Settings(props: {
       onClose={props.onClose}
       // Clicar fora com campo mexido apagava a edição sem perguntar — um erro de mira custava
       // um mcp.json ou uma instrução personalizada inteira.
-      canClose={() => !Object.keys(dirty).length || confirm("Descartar as alterações não salvas?")}
+      canClose={() => {
+        if (!Object.keys(dirty).length) return true;
+        setDescartar(true);
+        return false;
+      }}
       label="Configurações"
       className="flex h-[85vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-line bg-bg"
     >
@@ -136,15 +166,27 @@ export default function Settings(props: {
               {t}
             </button>
           ))}
-          <button onClick={resetAll} className="mt-auto rounded-lg px-3 py-1.5 text-left text-xs text-muted hover:text-red-300">
-            Restaurar padrões
-          </button>
+          <div className="mt-auto px-3 py-1.5">
+            <Confirma
+              rotulo="Restaurar padrões"
+              pergunta="Voltar tudo ao .env?"
+              className="text-left text-xs text-muted hover:text-red-300"
+              onSim={() => void resetAll()}
+            />
+          </div>
         </nav>
 
         <div className="flex min-w-0 flex-1 flex-col">
           <header className="flex items-center gap-3 border-b border-line px-5 py-3">
             <h2 className="flex-1 text-sm text-muted">{tab}</h2>
             {error && <span className="truncate text-sm text-red-300">{error}</span>}
+            {descartar && (
+              <span className="inline-flex items-center gap-1.5 text-xs">
+                <span className="text-amber-300">Descartar as alterações não salvas?</span>
+                <button className={btn} onClick={props.onClose}>Descartar</button>
+                <button className="px-2 text-muted hover:text-fg" onClick={() => setDescartar(false)}>Continuar editando</button>
+              </span>
+            )}
             {saved && <span className="text-sm text-emerald-400">{saved}</span>}
             {tab !== "MCP" && tab !== "Memória" && (
               <button className={btnPrimary} disabled={busy || !Object.keys(dirty).length} onClick={() => save()}>
@@ -211,6 +253,8 @@ export default function Settings(props: {
               <Providers s={s} set={set} />
             ) : tab === "Subagentes" ? (
               <Subagents s={s} set={set} />
+            ) : tab === "Maestro" ? (
+              <MaestroTab s={s} set={set} />
             ) : tab === "Ferramentas" ? (
               <Tools tools={props.tools} disabled={s.disabled_tools} onToggle={(d) => save({ disabled_tools: d })} />
             ) : tab === "Permissões" ? (
@@ -219,6 +263,7 @@ export default function Settings(props: {
               <Mcp mcp={props.mcp} onChanged={props.onChanged} />
             ) : (
               <>
+                <PersonalMemory s={s} set={set} save={save} />
                 <ProjectMemory s={s} set={set} save={save} />
                 <MemoryTab />
               </>
@@ -431,6 +476,216 @@ const SLOTS = [
   { key: "nuvem", title: "Nuvem", hint: "Rede de segurança: entra quando o slot escolhido não roda nesta máquina ou falha (ex.: Ollama Cloud). O modelo nunca escolhe este slot sozinho." },
 ] as const;
 
+// ------------------------------------------------------------------ Maestro
+
+const CICLOS: [string, string, string][] = [
+  ["persistent", "Persistente", "O modelo fica carregado entre tarefas. Mais rápido quando o mesmo modelo faz várias."],
+  ["unload_after_task", "Descarregar após a tarefa", "Libera VRAM/RAM ao fim de cada tarefa. Para quem troca de modelo com pouca memória."],
+  ["unload_clear", "Descarregar e esperar a memória voltar", "Descarrega e só segue quando a VRAM livre para de subir: o driver devolve a memória depois do processo morrer, e o próximo modelo carregado antes disso cairia para a CPU."],
+  ["restart_after_task", "Reiniciar o modelo após a tarefa", "Processo novo com o mesmo modelo, cache zerado. Para modelo que fica lento ou instável depois de muitas tarefas."],
+];
+
+/** Tudo que o usuário decide sobre o Maestro num lugar só (§30 do plano). Os slots de Worker são os
+ * mesmos da aba Subagentes e da doca Modelo · VRAM: um valor, três lugares para mexer nele. */
+function MaestroTab({ s, set }: { s: AppSettings; set: <K extends keyof AppSettings>(k: K, v: AppSettings[K]) => void }) {
+  const paralelo = s.max_workers > 1;
+  const slot = (k: "rapido" | "capaz") => s.subagents[k] ?? { provider: "", model: "" };
+  // Mesmos mínimos de janela do cockpit: GGUF local abaixo disso aparece desabilitado com o motivo.
+  const [minimo, setMinimo] = useState<{ min_ctx_maestro?: number; min_ctx_worker?: number }>({});
+  useEffect(() => {
+    api.get<{ min_ctx_maestro?: number; min_ctx_worker?: number }>("/config").then(setMinimo).catch(() => {});
+  }, []);
+  return (
+    <div className="max-w-2xl space-y-5">
+      <Field label="Modelo padrão da Maestro" hint="Usado na seção Maestro. Separado do modelo do chat e do agente: trocar um não troca o outro. Vazio = o modelo escolhido no chat.">
+        <div className="flex items-center gap-2 [&>div]:ml-0">
+          <ModelPicker
+            provider={s.maestro_model?.provider ?? ""}
+            model={s.maestro_model?.model ?? ""}
+            autoFallback={false}
+            loadLocal={false}
+            minCtx={minimo.min_ctx_maestro}
+            onChange={(provider, model) => set("maestro_model", { provider, model })}
+          />
+          {s.maestro_model?.model && (
+            <button className={btn} onClick={() => set("maestro_model", { provider: "", model: "" })}>
+              Limpar
+            </button>
+          )}
+        </div>
+      </Field>
+      {(["rapido", "capaz"] as const).map((k) => (
+        <Field key={k} label={`Worker ${k === "rapido" ? "rápido" : "capaz"}`}
+               hint={k === "rapido" ? "Tarefas simples. A Maestro escolhe o nível por tarefa." : "Tarefas difíceis, e o padrão quando a tarefa não diz."}>
+          <div className="flex items-center gap-2 [&>div]:ml-0">
+            <ModelPicker
+              provider={slot(k).provider}
+              model={slot(k).model}
+              autoFallback={false}
+              loadLocal={false}
+              minCtx={minimo.min_ctx_worker}
+              onChange={(provider, model) => set("subagents", { ...s.subagents, [k]: { provider, model } })}
+            />
+          </div>
+        </Field>
+      ))}
+      <Especialistas lista={s.worker_especialidades ?? []} minCtx={minimo.min_ctx_worker}
+                     onChange={(l) => set("worker_especialidades", l)} />
+      <Field label="Execução dos Workers" hint="Sequencial: um por vez — o único modo que troca de modelo local entre tarefas. Paralelo: tarefas independentes e sem arquivo em comum rodam juntas.">
+        <div className="flex items-center gap-2">
+          <select className={input} value={paralelo ? "paralelo" : "sequencial"}
+                  onChange={(e) => set("max_workers", e.target.value === "paralelo" ? Math.max(2, s.max_workers) : 1)}>
+            <option value="sequencial">Sequencial</option>
+            <option value="paralelo">Paralelo</option>
+          </select>
+          {paralelo && (
+            <label className="flex shrink-0 items-center gap-2 text-sm text-muted">
+              até
+              <input type="number" min={2} max={8} className={`${input} w-20`} value={s.max_workers}
+                     onChange={(e) => set("max_workers", Math.min(8, Math.max(2, Number(e.target.value) || 2)))} />
+              Workers
+            </label>
+          )}
+        </div>
+      </Field>
+      <Field label="Ciclo de vida do modelo local" hint={CICLOS.find((c) => c[0] === s.model_lifecycle)?.[2]}>
+        <select className={input} value={s.model_lifecycle} onChange={(e) => set("model_lifecycle", e.target.value)}>
+          {CICLOS.map(([v, l]) => (
+            <option key={v} value={v}>{l}</option>
+          ))}
+        </select>
+      </Field>
+      <Toggle
+        checked={s.maestro_browser}
+        onChange={(v) => set("maestro_browser", v)}
+        label="Validar entregas no navegador"
+        hint="A Maestro abre a tela no navegador para conferir estrutura e erros de console. Desligado, ela valida só por testes e comandos — e o prompt fica menor."
+      />
+      {s.maestro_browser && (
+        <Field label="Revisão visual (modelo com visão)"
+               hint="Julga os prints desktop e mobile de cada entrega com tela (sobreposição, texto cortado, contraste, coerência); o que reprovar vira tarefa. Precisa enxergar imagem — em IA local, um GGUF com projetor mmproj. Vazio: os prints ficam no chat, mas o visual não é julgado.">
+          <div className="flex items-center gap-2 [&>div]:ml-0">
+            <ModelPicker
+              provider={s.maestro_visual?.provider ?? ""}
+              model={s.maestro_visual?.model ?? ""}
+              autoFallback={false}
+              loadLocal={false}
+              onChange={(provider, model) => set("maestro_visual", { provider, model })}
+            />
+            {s.maestro_visual?.model && (
+              <button className={btn} onClick={() => set("maestro_visual", { provider: "", model: "" })}>
+                Limpar
+              </button>
+            )}
+          </div>
+        </Field>
+      )}
+      <Field label="Máximo de tentativas por tarefa" hint="Esgotou, a tarefa vai para 'precisa de você'. Vale para tarefas novas; dá para mudar uma a uma no painel da tarefa.">
+        <Num value={s.maestro_max_attempts} onChange={(v) => set("maestro_max_attempts", v)} />
+      </Field>
+      <Field label="Máximo de passos da Maestro por mensagem" hint="Teto de segurança da execução autônoma (planejar, despachar, validar...).">
+        <Num value={s.maestro_max_iterations} onChange={(v) => set("maestro_max_iterations", v)} />
+      </Field>
+      <LayoutCockpit />
+    </div>
+  );
+}
+
+/** Workers por especialidade. A Maestro vê só os que têm modelo (id, nome e "quando usar") e escolhe
+ * por tarefa; sem escolha, o Forja decide pelo tipo da tarefa e pelos arquivos. */
+function Especialistas(props: { lista: Especialidade[]; minCtx?: number; onChange: (l: Especialidade[]) => void }) {
+  const muda = (i: number, patch: Partial<Especialidade>) =>
+    props.onChange(props.lista.map((e, j) => (j === i ? { ...e, ...patch } : e)));
+  return (
+    <div>
+      <span className="text-sm text-fg">Workers especialistas</span>
+      <span className="mt-0.5 block text-xs text-muted">
+        Um modelo por tipo de trabalho. A Maestro escolhe o especialista de cada tarefa; quando ela não escolhe, o Forja
+        usa o tipo da tarefa (tela → Frontend, correção → Lógica, testes → Testes) e cai no Worker capaz se o
+        especialista não tiver modelo. Sem modelo, o especialista não aparece para a Maestro.
+      </span>
+      <div className="mt-2 space-y-2">
+        {props.lista.map((e, i) => (
+          <div key={e.id || i} className="rounded-lg border border-line p-2.5">
+            <div className="flex items-center gap-2">
+              <div className="w-52 shrink-0">
+                <input className={input} value={e.nome} placeholder="Nome"
+                       onChange={(ev) => muda(i, { nome: ev.target.value })} />
+              </div>
+              <div className="min-w-0 flex-1 [&>div]:ml-0">
+                <ModelPicker provider={e.provider} model={e.model} autoFallback={false} loadLocal={false}
+                             minCtx={props.minCtx} onChange={(provider, model) => muda(i, { provider, model })} />
+              </div>
+              {e.model && (
+                <button className="shrink-0 text-xs text-muted hover:text-fg" onClick={() => muda(i, { provider: "", model: "" })}>
+                  Limpar
+                </button>
+              )}
+              <button className="shrink-0 text-xs text-faint hover:text-red-300" title="Remover especialidade"
+                      onClick={() => props.onChange(props.lista.filter((_, j) => j !== i))}>
+                Remover
+              </button>
+            </div>
+            <input className={`${input} mt-1.5 text-xs`} value={e.quando} placeholder="Quando usar (a Maestro lê isto)"
+                   onChange={(ev) => muda(i, { quando: ev.target.value })} />
+          </div>
+        ))}
+      </div>
+      {props.lista.length < 12 && (
+        <button className="mt-2 rounded-md border border-line px-3 py-1.5 text-sm text-muted hover:bg-raised hover:text-fg"
+                onClick={() => props.onChange([...props.lista, { id: "", nome: "", quando: "", provider: "", model: "" }])}>
+          Adicionar especialidade
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Mesma chave do MaestroView: o padrão salvo pelo botão "Salvar layout como padrão" fica em `_padrao`.
+const LAYOUT_CHAVE = "forja.maestro.layout";
+
+function LayoutCockpit() {
+  const ler = (): Record<string, unknown> => {
+    try {
+      return JSON.parse(localStorage.getItem(LAYOUT_CHAVE) || "{}");
+    } catch {
+      return {};
+    }
+  };
+  const [temPadrao, setTemPadrao] = useState(() => "_padrao" in ler());
+  return (
+    // div, não Field: o <label> do Field repassa o clique ao primeiro botão de dentro, e depois do
+    // primeiro clique esse botão já é o "Sim" da confirmação — confirmaria sozinho.
+    <div>
+      <span className="text-sm text-fg">Layout do cockpit</span>
+      <span className="mt-0.5 block text-xs text-muted">
+        Posição, tamanho e blocos recolhidos com que as conversas novas da Maestro começam. As conversas que já têm
+        layout próprio não mudam.
+      </span>
+      <div className="mt-1.5">
+      {temPadrao ? (
+        <Confirma
+          rotulo="Voltar ao layout original"
+          pergunta="Conversas novas voltam ao layout original?"
+          className="rounded-md border border-line px-3 py-1.5 text-sm text-muted hover:bg-raised hover:text-fg"
+          onSim={() => {
+            const { _padrao: _, ...resto } = ler();
+            try {
+              localStorage.setItem(LAYOUT_CHAVE, JSON.stringify(resto));
+            } catch {
+              /* sem storage: nada salvo, nada a apagar */
+            }
+            setTemPadrao(false);
+          }}
+        />
+      ) : (
+        <p className="text-sm text-faint">Original. Ajuste o cockpit e use "Salvar layout como padrão", que aparece no cabeçalho.</p>
+      )}
+      </div>
+    </div>
+  );
+}
+
 function SlotModels({ provider, value, onChange }: { provider: string; value: string; onChange: (m: string) => void }) {
   const [models, setModels] = useState<string[]>([]);
   const [error, setError] = useState("");
@@ -617,6 +872,12 @@ function Permissions({ s, save }: { s: AppSettings; save: (patch: Partial<AppSet
           <span className="font-mono">*</span> ou <span className="font-mono">git *</span>.
         </span>
       </div>
+      <Toggle
+        checked={s.auto_review}
+        onChange={(v) => save({ auto_review: v })}
+        label="Revisor automático no modo Automático"
+        hint="Antes de mostrar o card de aprovação, o próprio modelo da conversa avalia o risco da ação (baixo, médio, alto). Risco baixo roda sem perguntar; o resto continua pedindo sua aprovação, com o motivo no card. Comando destrutivo sempre pergunta. Custa uma chamada ao modelo por aprovação."
+      />
       <ListEditor
         title="Comandos liberados (run_command)"
         hint="Compara o comando inteiro. Ex.: pytest*, git status, ls *, npm run build"
@@ -777,6 +1038,98 @@ function ProjectMemory({ s, set, save }: {
   );
 }
 
+type Lembranca = { name: string; slug: string; description: string; type: string; updated: string; size: number };
+
+/** O que o agente guardou sobre o usuário. No prompt entra só esta lista (uma linha cada); o conteúdo
+ *  ele lê com `recall` quando o assunto aparece — é o que segura o custo no modelo local. */
+function PersonalMemory({ s, set, save }: {
+  s: AppSettings;
+  set: <K extends keyof AppSettings>(k: K, v: AppSettings[K]) => void;
+  save: (patch?: Partial<AppSettings>) => Promise<void>;
+}) {
+  const [itens, setItens] = useState<Lembranca[] | null>(null);
+  const [pasta, setPasta] = useState("");
+  const [aberta, setAberta] = useState<string>("");
+  const [corpo, setCorpo] = useState("");
+
+  const carrega = () =>
+    api
+      .get<{ items: Lembranca[]; dir: string }>("/memory/personal")
+      .then((r) => {
+        setItens(r.items);
+        setPasta(r.dir);
+      })
+      .catch(() => setItens([]));
+
+  useEffect(() => {
+    carrega();
+  }, []);
+
+  async function abrir(m: Lembranca) {
+    if (aberta === m.slug) return setAberta("");
+    setAberta(m.slug);
+    setCorpo("");
+    const r = await api.get<{ content: string }>(`/memory/personal/${encodeURIComponent(m.slug)}`).catch(() => null);
+    setCorpo(r?.content ?? "(vazio)");
+  }
+
+  async function apagar(m: Lembranca) {
+    await api.post("/memory/personal/delete", { names: [m.slug] }).catch(() => null);
+    carrega();
+  }
+
+  return (
+    <div className="max-w-3xl space-y-3">
+      <Field
+        label="Memória sobre você"
+        hint="O agente guarda o que você contar de duradouro (como gosta de trabalhar, seu hardware, decisões suas). No prompt entra só o índice — uma linha por memória —, e o conteúdo só quando o assunto aparece. Vale a partir da conversa seguinte."
+      >
+        <Toggle
+          checked={s.personal_memory}
+          onChange={(v) => {
+            set("personal_memory", v);
+            save({ personal_memory: v });
+          }}
+          label={s.personal_memory ? "Ligada" : "Desligada"}
+        />
+      </Field>
+
+      {itens === null ? (
+        <p className="text-sm text-muted">Carregando…</p>
+      ) : !itens.length ? (
+        <p className="text-sm text-muted">Nada guardado ainda.</p>
+      ) : (
+        <div className="overflow-hidden rounded-xl border border-line">
+          {itens.map((m) => (
+            <div key={m.slug} className="border-b border-line last:border-0">
+              <div className="flex items-center gap-3 px-3 py-2 hover:bg-raised">
+                <button className="min-w-0 flex-1 text-left" onClick={() => abrir(m)}>
+                  <span className="block truncate text-sm text-fg">{m.name}</span>
+                  <span className="block truncate text-xs text-muted">{m.description}</span>
+                </button>
+                <span className="shrink-0 text-xs text-faint">{m.type}</span>
+                <span className="shrink-0 text-xs text-faint">{m.updated}</span>
+                <Confirma
+                  rotulo="esquecer"
+                  pergunta={`Esquecer "${m.name}"?`}
+                  className="shrink-0 text-xs text-faint hover:text-red-400"
+                  onSim={() => void apagar(m)}
+                />
+              </div>
+              {aberta === m.slug && (
+                <pre className="max-h-48 overflow-auto whitespace-pre-wrap bg-[#0d0d0d] px-3 py-2 text-xs text-muted">
+                  {corpo || "…"}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {pasta && <p className="text-xs text-faint">Arquivos em {pasta} — um .md por memória, dá para editar à mão.</p>}
+    </div>
+  );
+}
+
 function MemoryTab() {
   const [m, setM] = useState<Memory | null>(null);
   const [q, setQ] = useState("");
@@ -788,7 +1141,6 @@ function MemoryTab() {
   }, []);
 
   async function remove(name: string) {
-    if (!confirm(`Apagar "${name}" da memória da IA?`)) return;
     setBusy(true);
     setM(await api.post<Memory>("/memory/delete", { names: [name] }).catch(() => m));
     setBusy(false);
@@ -826,14 +1178,16 @@ function MemoryTab() {
               <span className="font-medium text-fg">{e.name}</span>
               {e.entityType && <span className="rounded bg-raised px-1.5 text-[10px] text-muted">{e.entityType}</span>}
               {m.can_delete && (
-                <button
-                  disabled={busy}
-                  onClick={() => remove(e.name)}
-                  className="ml-auto text-faint hover:text-red-400"
-                  title="Apagar"
-                >
-                  <Trash className="size-3.5" />
-                </button>
+                <span className="ml-auto">
+                  <Confirma
+                    rotulo={<Trash className="size-3.5" />}
+                    pergunta="Apagar da memória da IA?"
+                    titulo="Apagar"
+                    className="text-faint hover:text-red-400"
+                    desabilitado={busy}
+                    onSim={() => void remove(e.name)}
+                  />
+                </span>
               )}
             </div>
             {!!e.observations?.length && (
