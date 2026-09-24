@@ -386,7 +386,9 @@ def list_servers() -> list[dict]:
     entries: list[dict] = []
     if runner.online():
         try:
-            entries += [{**s, "where": "host"} for s in runner.servers()]
+            # a geração de imagem também roda pelo /serve do runner, mas não é servidor de ninguém
+            entries += [{**s, "where": "host"} for s in runner.servers()
+                        if not str(s.get("name", "")).startswith("forja-img-")]
         except runner.RunnerError as e:
             entries.append({"name": "(runner)", "alive": False, "error": str(e), "where": "host", "command": ""})
     with _local_lock:  # stop_server e clear_finished mexem no dict; ler fora dava KeyError

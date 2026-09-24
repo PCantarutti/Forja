@@ -4,6 +4,7 @@ import { useStickyBottom } from "./useStickyBottom";
 import Sidebar from "./components/Sidebar";
 import BrowserPanel from "./components/BrowserPanel";
 import ServersPanel from "./components/ServersPanel";
+import ImagensView from "./components/ImagensView";
 import CompararView from "./components/CompararView";
 import PesquisaView from "./components/PesquisaView";
 import PlansPanel, { type PlanEntry } from "./components/PlansPanel";
@@ -2133,6 +2134,15 @@ export default function App() {
               abrir("terminal");
               executarNoTerminal(browserKey, comando).catch((e) => setError(e.message));
             }}
+          />
+        ) : section === "imagem" ? (
+          <ImagensView
+            conv={currentId}
+            ensureConversation={ensureConversation}
+            provider={settings.provider}
+            model={settings.model}
+            onError={setError}
+            onConversationChanged={refreshConversations}
           />
         ) : (
         <>

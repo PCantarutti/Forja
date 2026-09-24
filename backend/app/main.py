@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import tempfile
 from contextlib import asynccontextmanager
@@ -12,10 +13,12 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTe
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from . import (baterias, checkpoints, compact, comparar, config, db, documentos, gitops, goals, llm, lsp,
+from . import (baterias, checkpoints, compact, comparar, config, db, documentos, gitops, goals, imagegen, llm,
+               lotes, lsp,
                mcp_client, memory, mirror, modelctl, pesquisa, policy, projstate, relatorio, runner, settings,
                shell, skills, subagents, taskdb, terminal, uploads, workspace)
 from .agent import RUNS, Run, RunRequest, _load, _save, active_run
+from .parsing import split_think
 from .browser import MANAGER
 from .tools import REGISTRY, ToolError
 
@@ -29,6 +32,8 @@ async def lifespan(_app):
     # pode levar uma execução no meio. Mesmo motivo de pesquisa/comparar.
     vivas: set = set()
     taskdb.reap()  # tentativas de tarefa que ficaram abertas numa queda anterior
+    lotes.reap()  # lotes de imagem que ficaram "gerando" quando o backend caiu no meio
+    lotes.limpar_descartadas()  # imagens reprovadas que já passaram do prazo
     checkpoints.podar_antigos()  # desfazer de mais de um mês atrás: o banco não cresce para sempre
     # Espelho em Markdown: gera o que falta (banco anterior ao espelho) e limpa .md órfão.
     print(f"Forja: conversas espelhadas em {mirror.ROOT} ({mirror.sync()} arquivo(s) gerado(s))", flush=True)
@@ -413,6 +418,201 @@ async def stop_server(name: str):
     except (ToolError, runner.RunnerError) as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "name": name, "where": where}
+
+
+# ------------------------------------------------------------------ imagens (lotes)
+# Mesmas rotas de lote do desktop. O estado e os ajustes, que lá vêm do painel IA local (/api/local),
+# aqui têm rota própria: não há IA local no Docker, e /api/local respondendo faria o seletor de
+# modelo achar que há.
+
+MELHORAR_PROMPT = (
+    "Você reescreve descrições para geradores de imagem (Stable Diffusion). Devolva SÓ o prompt "
+    "reescrito, em inglês, numa linha, com termos visuais concretos: assunto, composição, luz, "
+    "material, lente, estilo. Sem explicação, sem aspas, sem 'prompt:', sem negativos."
+)
+
+
+class LoteBody(BaseModel):
+    prompt: str = ""
+    opts: dict = {}
+    models: list[str] = []
+    count: int = 1
+    seed: int = 0
+    seed_mode: str = "incremental"  # incremental | aleatoria | fixa
+    confirm: bool = False
+    refs: list[str] = []  # imagens a editar; vazio = gerar do zero
+
+
+class DecidirBody(BaseModel):
+    keep: list[str] = []
+
+
+class PromptBody(BaseModel):
+    prompt: str
+    provider: str
+    model: str
+
+
+class CaminhoBody(BaseModel):
+    path: str
+
+
+class ModeloImagemBody(BaseModel):
+    path: str
+    params: dict = {}
+
+
+class ContinuarBody(BaseModel):
+    confirm: bool = False
+
+
+@app.get("/api/imagens/estado")
+async def imagens_estado():
+    """Modelos (arquivos no seu disco e de nuvem), ajustes, pasta e se o motor está pronto."""
+    return await asyncio.to_thread(imagegen.estado)
+
+
+@app.put("/api/imagens/ajustes")
+async def imagens_ajustes(body: dict):
+    try:
+        return await asyncio.to_thread(imagegen.set_image, body)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.put("/api/imagens/motor")
+async def imagens_motor(body: dict):
+    """Caminho do sd-cli, pastas de modelos e modelos de nuvem."""
+    try:
+        await asyncio.to_thread(imagegen.set_motor, body)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+    return await asyncio.to_thread(imagegen.estado)
+
+
+@app.put("/api/imagens/modelo")
+async def imagens_modelo(body: ModeloImagemBody):
+    """Ajustes de um modelo (passos, CFG, VAE...). Só o que sai do padrão fica salvo."""
+    try:
+        return await asyncio.to_thread(imagegen.save_image_params, body.path, body.params)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/imagens/achados")
+async def imagens_achados(path: str):
+    """VAE/codificador/mmproj com cara de ser deste modelo, perto dele no disco (para o botão Usar)."""
+    return await asyncio.to_thread(imagegen.achar_arquivos, path)
+
+
+@app.get("/api/imagens/arquivo")
+def imagens_arquivo(path: str):
+    """Só serve imagem do Forja: a pasta de imagens ou uma referência registrada."""
+    try:
+        f = imagegen._c(path)
+    except ToolError:
+        raise HTTPException(404, "Imagem não encontrada")
+    if not lotes.servivel(path) or not f.is_file():
+        raise HTTPException(404, "Imagem não encontrada")
+    return FileResponse(f)
+
+
+@app.post("/api/imagens/referencia")
+async def imagens_referencia(file: UploadFile = File(...)):
+    """Imagem enviada pelo navegador: vai para <pasta de imagens>/referencias/, que a rota de
+    arquivo já serve e que o sd-cli do seu sistema enxerga."""
+    # ponytail: referências não entram no expurgo; ficam até alguém apagar a pasta
+    dados = await file.read()
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(400, "Envie uma imagem (PNG, JPG ou WebP).")
+    if len(dados) > 50_000_000:
+        raise HTTPException(400, "Imagem maior que 50 MB.")
+    try:
+        # nome pelo conteúdo: mandar a mesma imagem de novo reaproveita o arquivo em vez de duplicar
+        alvo = (f"{imagegen.out_dir()}/referencias/"
+                f"{hashlib.sha256(dados).hexdigest()[:16]}-{uploads.safe_name(file.filename or 'ref.png')}")
+        f = imagegen._c(alvo)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        if not f.exists():
+            f.write_bytes(dados)
+    except (ToolError, OSError) as e:
+        raise HTTPException(400, str(e))
+    return {"path": alvo}
+
+
+@app.post("/api/imagens/referencia/caminho")
+def imagens_referencia_caminho(body: CaminhoBody):
+    """Imagem do seu disco, usada no lugar: nada é copiado, o lote guarda o caminho."""
+    try:
+        return {"path": lotes.registrar_referencia(body.path)}
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/imagens/{conv_id}/gerar")
+async def imagens_gerar(conv_id: int, body: LoteBody):
+    try:
+        return await asyncio.to_thread(lotes.start, conv_id, body.prompt, body.opts, body.models,
+                                       body.count, body.seed, body.seed_mode, body.confirm, body.refs)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/imagens/{message_id}/decidir")
+async def imagens_decidir(message_id: int, body: DecidirBody):
+    try:
+        return await asyncio.to_thread(lotes.decidir, message_id, body.keep)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/imagens/{message_id}/cancelar")
+def imagens_cancelar(message_id: int):
+    try:
+        return lotes.cancelar(message_id)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/imagens/{message_id}/continuar")
+async def imagens_continuar(message_id: int, body: ContinuarBody):
+    try:
+        return await asyncio.to_thread(lotes.continuar, message_id, body.confirm)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/imagens/{conv_id}/arquivos")
+def imagens_arquivos(conv_id: int):
+    """Para o aviso de "apagar conversa": quantas imagens vão junto e onde estão."""
+    arquivos = lotes.imagens_da_conversa(conv_id)
+    return {"count": len(arquivos), "primeira": arquivos[0] if arquivos else ""}
+
+
+@app.post("/api/imagens/descartadas/limpar")
+async def imagens_limpar(dias: int = 0):
+    """Expurgo manual da pasta descartadas/. Sem `dias`, apaga tudo o que está lá."""
+    return {"apagados": await asyncio.to_thread(lotes.limpar_descartadas, dias)}
+
+
+@app.post("/api/imagens/prompt")
+async def imagens_prompt(body: PromptBody):
+    """Passa o pedido por um LLM para virar um prompt de imagem decente. Opcional: a geração não usa."""
+    if not body.prompt.strip():
+        raise HTTPException(400, "Escreva alguma coisa antes de melhorar.")
+    out = ""
+    try:
+        async for kind, val in llm.chat_stream(body.provider, body.model,
+                                               [{"role": "system", "content": MELHORAR_PROMPT},
+                                                {"role": "user", "content": body.prompt}], None, 8192):
+            if kind == "content":
+                out += val
+    except llm.LLMError as e:
+        raise HTTPException(400, str(e))
+    texto = split_think(out)[1].strip().strip("`").strip()
+    if not texto:
+        raise HTTPException(400, "O modelo não devolveu um prompt.")
+    return {"prompt": texto}
 
 
 # ------------------------------------------------------------------ comparar modelos
@@ -873,8 +1073,8 @@ def create_conversation(body: dict | None = None):
         except workspace.WorkspaceError as e:
             raise HTTPException(400, str(e))
     kind = (body or {}).get("kind") or "agent"
-    if kind not in ("chat", "agent", "maestro", "comparar", "pesquisa"):
-        raise HTTPException(400, "kind deve ser chat, agent, maestro, comparar ou pesquisa")
+    if kind not in ("chat", "agent", "maestro", "imagem", "comparar", "pesquisa"):
+        raise HTTPException(400, "kind deve ser chat, agent, maestro, imagem, comparar ou pesquisa")
     with db.session() as s:
         c = db.Conversation(workspace=folder, kind=kind)
         s.add(c)
@@ -917,6 +1117,7 @@ async def bulk_conversations(body: BulkBody):
                     skipped.append(cid)  # não apaga conversa com execução em andamento
                     continue
                 s.query(db.Checkpoint).filter(db.Checkpoint.conversation_id == cid).delete()
+                lotes.apagar_imagens(cid)  # conversa de imagem: as geradas vão junto (a tela avisou)
                 s.delete(c)
                 closed.append(cid)
             elif body.action in ("archive", "unarchive"):
@@ -1243,7 +1444,9 @@ async def delete_conversation(conv_id: int):
     if active_run(conv_id):
         raise HTTPException(409, "Esta conversa tem uma execução em andamento. Pare antes de apagar.")
     with db.session() as s:
-        s.delete(_get_conv(s, conv_id))
+        c = _get_conv(s, conv_id)
+        lotes.apagar_imagens(conv_id)  # conversa de imagem: as geradas vão junto (a tela avisou)
+        s.delete(c)
         s.commit()
     mirror.remove(conv_id)  # o .md espelhado vai junto
     await MANAGER.close(str(conv_id))  # a sessão do navegador morre com a conversa

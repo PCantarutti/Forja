@@ -49,6 +49,10 @@ Mudança que só toca os arquivos "comuns" (a maioria) aplica sem conflito. Muda
 | `backend/app/sessoes.py` e `projstate.py` | comparam pasta pelo caminho no container (`workspace.resolve`) | `workspace.normalize` (identidade) |
 | `backend/app/terminal.py` (terminal do agente) | `terminal_*` sempre bash no container | shell do sistema |
 | `backend/tests/conftest.py` | fixture que monta o disco do pytest como `HOST_MOUNTS` (os testes do desktop usam `tmp_path` como pasta) | `FORJA_DATA` temporário |
+| `backend/app/imagegen.py` e `lotes.py` | motores `runner` (sd-cli do Windows pelo `/serve` do forja-runner) e `api` (endpoint OpenAI de imagens); caminhos do usuário traduzidos por `workspace.to_container`; config em `/data/imagens.json`, importada do `local.json` do desktop | sd-cli local via `localai` |
+| `backend/app/downloads.py` | só o registro de jobs | registro + download de runtimes e modelos |
+| `frontend/src/components/ImagensView.tsx` | `/api/imagens/estado` e `/api/imagens/ajustes`; anexo sempre por upload | `/api/local`; anexo pelo caminho do arquivo (Electron) |
+| `frontend/src/components/ImagensMotor.tsx` e `ImagensUi.tsx` | sd-cli, pastas, modelos de nuvem e ajustes por modelo | não existem (é o painel IA local, `LocalPanel.tsx`) |
 | `frontend/src/components/BrowserPanel.tsx` | espelho: clique/teclado/roda vão ao backend | mais as views nativas do Electron |
 | `frontend/src/components/Settings.tsx` | 7 abas | mais a aba *Aplicativo* (zoom, bandeja, iniciar com o Windows) |
 | `frontend/src/forja.d.ts` | não existe | tipos da ponte `window.forja` |
