@@ -3,14 +3,16 @@ runner), ou Lanczos (Pillow) aqui no container.
 
 Mesmo desenho do desktop (forja-desktop/backend/app/ampliar.py e comfy.py), só a parte de imagem: vídeo precisa
 de ffmpeg, que o Docker não tem. Os caminhos são os do sistema do usuário; o container lê e grava pela montagem
-(`imagegen._c`). O ESRGAN que o sd.cpp roda é o RRDBNet, nos dois jeitos de nomear as camadas; o x2plus entra
+(`imagegen._c`). O ESRGAN que o sd.cpp roda é o RRDBNet, nos dois jeitos de nomear as camadas; o 2× (12 canais) entra
 com pixel-unshuffle e o sd.cpp recusa. A escala sai dos pesos e é medida na saída. O ComfyUI não é baixado
 aqui (o web não baixa runtime): é o que o Forja Desktop instalou em `%APPDATA%/Forja/runtimes/comfy`.
 """
 from __future__ import annotations
 
 import functools
+import io
 import json
+import pickle
 import re
 import struct
 import time
@@ -26,8 +28,6 @@ EXT_IMAGEM = (".png", ".jpg", ".jpeg", ".webp")
 TILE_ESRGAN = 256  # o mesmo do desktop (medido no Arc B580)
 TIMEOUT = 600
 TIMEOUT_SEEDVR2 = 3900  # o comfy_job.py desiste em 1 h de trabalho + 5 min de subida
-VAE_SEEDVR2 = "seedvr2_ema_vae_fp16.safetensors"
-ESRGAN_MB = 200  # ponytail: ESRGAN/DAT/UltraSharp têm < 200 MB; acima disso só o SeedVR2 tem o cabeçalho lido (montagem lenta)
 
 
 def eh_imagem(path: str) -> bool:
@@ -46,15 +46,49 @@ def _nomes(path: str) -> list[str] | bytes:
         return list(json.loads(arq.read(n)))
 
 
-def tipo_por_nomes(nomes: list[str] | dict | bytes, arquivo: str = "") -> str:
-    """Mesma regra do desktop (forja-desktop/backend/app/ampliar.py): "esrgan" (RRDBNet, pelo sd-cli), "seedvr2"
-    (difusão), "spandrel" (DAT/HAT/SwinIR/SPAN/PLKSR/compactos e o RRDBNet 2× com pixel-unshuffle, pelo ComfyUI)
-    ou "" (não roda). `nomes`: cabeçalho do .safetensors (dict ou lista) ou os bytes do pickle do .pth."""
-    if isinstance(nomes, dict):
-        primeira = (nomes.get("conv_first.weight") or nomes.get("model.0.weight") or {}).get("shape") or []
-        if len(primeira) == 4 and primeira[1] != 3:
-            return "spandrel"
-    if "x2plus" in arquivo.lower().rsplit("/", 1)[-1]:
+class _SoFormas(pickle.Unpickler):
+    """Lê o pickle de um .pth sem executar nada: cada tensor vira só {"shape": [...]} (o `size` que o
+    _rebuild_tensor_v2 do torch recebe); fora o OrderedDict, toda classe vira um stub inerte."""
+    def find_class(self, modulo, nome):
+        if (modulo, nome) == ("collections", "OrderedDict"):
+            import collections
+            return collections.OrderedDict
+        if nome == "_rebuild_tensor_v2":
+            return lambda _armazem, _inicio, forma, *_: {"shape": list(forma)}
+        if nome == "_rebuild_parameter":
+            return lambda dados, *_: dados
+        return lambda *_a, **_k: None
+
+    def persistent_load(self, _pid):
+        return None
+
+
+def _formas_pth(dados: bytes) -> dict:
+    """{nome: {"shape": forma}} do pickle de um .pth (achata params_ema/params/state_dict). {} se não der para ler."""
+    try:
+        raiz = _SoFormas(io.BytesIO(dados)).load()
+    except Exception:  # noqa: BLE001 — pickle estranho: fica sem as formas
+        return {}
+    formas, pilha = {}, [raiz]
+    while pilha:
+        d = pilha.pop()
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if isinstance(v, dict) and "shape" in v:
+                    formas[str(k)] = v
+                elif isinstance(v, dict):
+                    pilha.append(v)
+    return formas
+
+
+def tipo_por_nomes(nomes: list[str] | dict | bytes) -> str:
+    """Mesma regra do desktop (forja-desktop/backend/app/ampliar.py), só pelo conteúdo: "esrgan" (RRDBNet, pelo
+    sd-cli), "seedvr2" (difusão), "vae" (o do SeedVR2), "spandrel" (DAT/HAT/SwinIR/SPAN/PLKSR/compactos e o RRDBNet
+    2× com pixel-unshuffle, pelo ComfyUI) ou "" (não roda). `nomes`: cabeçalho do .safetensors ou o pickle do .pth."""
+    # o 2× com pixel-unshuffle (12 canais na entrada) o sd.cpp recusa, mas o ComfyUI roda: vai por lá
+    formas = _formas_pth(nomes) if isinstance(nomes, bytes) else nomes if isinstance(nomes, dict) else {}
+    primeira = (formas.get("conv_first.weight") or formas.get("model.0.weight") or {}).get("shape") or []
+    if len(primeira) == 4 and primeira[1] != 3:
         return "spandrel"
     if isinstance(nomes, bytes):
         if (b"conv_first" in nomes and b"rdb1" in nomes) or (b"model.0.weight" in nomes and b"RDB1" in nomes):
@@ -65,6 +99,8 @@ def tipo_por_nomes(nomes: list[str] | dict | bytes, arquivo: str = "") -> str:
         return "esrgan"
     if any(".ada.txt." in n for n in nomes):
         return "seedvr2"
+    if any(n.startswith("decoder.") and ".upscale_conv." in n for n in nomes):
+        return "vae"
     return "spandrel" if _eh_spandrel(nomes) else ""
 
 
@@ -94,7 +130,7 @@ def tipo_local(path: str) -> str:
     if not str(path).lower().endswith((".pth", ".safetensors")):
         return ""
     try:
-        return tipo_por_nomes(_nomes_dict(path), str(path))
+        return tipo_por_nomes(_nomes_dict(path))
     except (OSError, ToolError, ValueError, zipfile.BadZipFile, KeyError, struct.error):
         return ""
 
@@ -105,6 +141,16 @@ def eh_ampliador(path: str) -> bool:
 
 def eh_seedvr2(path: str) -> bool:
     return tipo_local(path) == "seedvr2"
+
+
+def vae_seedvr2(modelo: str) -> str:
+    """O VAE do SeedVR2 na pasta do modelo, pelas camadas (qualquer nome)."""
+    pasta = modelo.rsplit("/", 1)[0]
+    try:
+        irmaos = sorted(_c(pasta).glob("*.safetensors"))
+    except (ToolError, OSError):
+        return ""
+    return next((c for c in (f"{pasta}/{f.name}" for f in irmaos) if tipo_local(c) == "vae"), "")
 
 
 def comfy_dir() -> str:
@@ -126,7 +172,7 @@ def _achados(_tick: int) -> tuple[dict, ...]:
         if not raiz.is_dir():
             continue
         for f in sorted(raiz.rglob("*")):
-            if f.suffix.lower() not in (".pth", ".safetensors") or f.name.lower() == VAE_SEEDVR2:
+            if f.suffix.lower() not in (".pth", ".safetensors"):
                 continue
             try:
                 tam = f.stat().st_size
@@ -136,8 +182,8 @@ def _achados(_tick: int) -> tuple[dict, ...]:
             chave = (f.name.lower(), tam)
             if chave in vistos:
                 continue
-            tipo = (tipo_local(host) if tam < ESRGAN_MB << 20 or f.name.lower().startswith("seedvr2") else "")
-            if tipo:
+            tipo = tipo_local(host)  # pelo cabeçalho (8 bytes + o JSON), não pelo nome nem pelo tamanho
+            if tipo and tipo != "vae":
                 vistos.add(chave)
                 out.append({"path": host, "name": f.stem, "tipo": tipo})
     return tuple(out)
@@ -199,9 +245,9 @@ def _comfy(entrada: str, saida: str, fator: int, modelo: str, job_id: str, progr
     if not pasta:
         raise ToolError("Falta o ComfyUI (motor do SeedVR2 e dos DAT/HAT/SwinIR): instale pelo Forja Desktop, "
                         "em Imagens › Ampliar › Baixar o que falta.")
-    vae = f"{modelo.rsplit('/', 1)[0]}/{VAE_SEEDVR2}" if modo == "seedvr2" else ""
-    if vae and not _existe(vae):
-        raise ToolError(f"Falta o VAE do SeedVR2 ({VAE_SEEDVR2}) ao lado do modelo.")
+    vae = vae_seedvr2(modelo) if modo == "seedvr2" else ""
+    if modo == "seedvr2" and not vae:
+        raise ToolError("Falta o VAE do SeedVR2 ao lado do modelo (o Forja Desktop baixa junto).")
     job = f"{imagegen.out_dir()}/.forja/comfy_job.py"
     _c(job).parent.mkdir(parents=True, exist_ok=True)
     _c(job).write_bytes(Path(__file__).with_name("comfy_job.py").read_bytes())

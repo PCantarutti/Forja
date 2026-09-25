@@ -268,7 +268,7 @@ def test_seedvr2_e_esrgan_antigo_no_catalogo_e_o_driver_pelo_runner(cfg, monkeyp
     m = cfg / "modelos"
     _safetensors(m / "4x-UltraSharp.safetensors", ["model.0.weight", "model.1.sub.0.RDB1.conv1.0.weight"])
     _safetensors(m / "seedvr2_3b_fp16.safetensors", ["blocks.0.ada.txt.attn_gate"])
-    _safetensors(m / "seedvr2_ema_vae_fp16.safetensors", ["decoder.conv_in.weight"])
+    _safetensors(m / "qualquer-vae.safetensors", ["decoder.up_blocks.0.upsamplers.0.upscale_conv.weight"])
     ampliar._achados.cache_clear()
     assert {x["name"]: x["tipo"] for x in ampliar.catalogo()["no_disco"]} == {"4x-UltraSharp": "esrgan", "seedvr2_3b_fp16": "seedvr2"}
     seed = host(m / "seedvr2_3b_fp16.safetensors")
@@ -294,7 +294,7 @@ def test_seedvr2_e_esrgan_antigo_no_catalogo_e_o_driver_pelo_runner(cfg, monkeyp
     assert ampliar.ampliar_imagem(host(src), out, 4, seed, progresso=lambda f, x: fases.append((f, x))) == {"w": 20, "h": 16}
     assert fases == [("iniciando o ComfyUI", None), ("ampliando", None), (None, 0.4)]
     a = comandos[0]
-    assert a[a.index("--vae") + 1].endswith("/seedvr2_ema_vae_fp16.safetensors") and a[1:3] == ["-X", "utf8"]
+    assert a[a.index("--vae") + 1].endswith("/qualquer-vae.safetensors") and a[1:3] == ["-X", "utf8"]
     assert workspace.to_container(a[a.index("-s") + 1]).read_bytes().startswith(b'"""Uma amplia')  # o driver foi para o disco
 
 
