@@ -286,6 +286,17 @@ def _nova_ampliacao(conv_id: int, origem: str, saida: str, prompt: str, opts: di
     return nova.to_dict()
 
 
+def _saida_ao_lado(origem: str, fator: int, modelo: str) -> str:
+    """O PNG novo ao lado da origem, com o fator e, no fim entre parênteses, o método: "cafe-2x (4x-UltraSharp).png",
+    "cafe-2x (Lanczos).png" (como o desktop). Dois métodos na mesma imagem não caem no mesmo arquivo; já existe: " 2", " 3"…"""
+    metodo = re.sub(r"[^\w.-]+", "", _base(modelo).rsplit(".", 1)[0])[:40] if modelo else "Lanczos"
+    base = f"{origem.rsplit('.', 1)[0]}-{fator}x ({metodo})"
+    saida, n = f"{base}.png", 2
+    while _existe(saida):
+        saida, n = f"{base} {n}.png", n + 1
+    return saida
+
+
 def ampliar(message_id: int, path: str, fator: int, modelo: str = "") -> dict:
     """Amplia uma imagem pronta do lote: vira um lote à parte na mesma conversa."""
     msg = _mensagem(message_id)
@@ -297,12 +308,7 @@ def ampliar(message_id: int, path: str, fator: int, modelo: str = "") -> dict:
         pedido = (s.query(db.Message).filter(db.Message.conversation_id == msg["conversation_id"], db.Message.role == "user",
                                              db.Message.id < message_id).order_by(db.Message.id.desc()).first())
         prompt = pedido.content if pedido else ""
-    # fator e método no nome: a mesma imagem ampliada 2× por dois métodos não pode cair no mesmo arquivo
-    metodo = re.sub(r"[^\w.-]+", "", _base(modelo).rsplit(".", 1)[0])[:32] if modelo else "lanczos"
-    base = f"{path.rsplit('.', 1)[0]}-{fator}x-{metodo}"
-    saida, n = f"{base}.png", 2
-    while _existe(saida):
-        saida, n = f"{base}-{n}.png", n + 1
+    saida = _saida_ao_lado(path, fator, modelo)
     return _nova_ampliacao(msg["conversation_id"], path, saida, prompt, dict(msg["meta"].get("opts") or {}),
                            item["seed"], fator, modelo)
 
@@ -319,7 +325,7 @@ def ampliar_arquivo(conv_id: int, path: str, fator: int, modelo: str = "") -> di
         raise ToolError(f"Não consegui ler {_base(path)} como imagem.") from None
     _c(imagegen.out_dir()).mkdir(parents=True, exist_ok=True)
     nome = re.sub(r"^[0-9a-f]{16}-", "", _base(path))  # a enviada chega em referencias/ com o sha na frente
-    saida = f"{imagegen.out_dir()}/{time.strftime('%Y%m%d-%H%M%S')}-{nome.rsplit('.', 1)[0]}-{fator}x.png"
+    saida = _saida_ao_lado(f"{imagegen.out_dir()}/{time.strftime('%Y%m%d-%H%M%S')}-{nome}", fator, modelo)
     return _nova_ampliacao(conv_id, path, saida, nome, {"width": w, "height": h}, 0, fator, modelo)
 
 

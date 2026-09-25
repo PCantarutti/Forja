@@ -238,7 +238,7 @@ def test_ampliar_imagem_lanczos_e_esrgan_que_nao_amplia(cfg, monkeypatch):
     Image.new("RGB", (5, 4)).save(src)
     m = _fim(lotes.ampliar_arquivo(conv, host(src), 4)["id"])
     item = m["meta"]["images"][0]
-    assert m["status"] == "pronto" and item["path"].endswith("-foto-4x.png") and item["model_name"] == "Lanczos · 4×"
+    assert m["status"] == "pronto" and item["path"].endswith("-foto-4x (Lanczos).png") and item["model_name"] == "Lanczos · 4×"
     assert Image.open(workspace.to_container(item["path"])).size == (20, 16)
     assert (m["meta"]["opts"]["width"], m["meta"]["opts"]["height"]) == (20, 16)
 
