@@ -587,6 +587,8 @@ class AmpliarBody(BaseModel):
     fator: int = 2
     modelo: str = ""  # vazio = Lanczos, sem IA
     suavizar: bool = False  # só vídeo (desktop); aqui é ignorado
+    prompt: str = ""  # redesenhar: o que o modelo deve desenhar (vazio = o prompt que gerou a imagem)
+    forca: float | None = None  # redesenhar: quanto pode mudar (denoise); vazio = o padrão
 
 
 @app.get("/api/local/video/ampliadores")
@@ -599,7 +601,7 @@ async def local_video_ampliadores():
 @app.post("/api/imagens/{message_id}/ampliar")
 async def imagens_ampliar(message_id: int, body: AmpliarBody):
     try:
-        return await asyncio.to_thread(lotes.ampliar, message_id, body.path, body.fator, body.modelo)
+        return await asyncio.to_thread(lotes.ampliar, message_id, body.path, body.fator, body.modelo, body.prompt, body.forca)
     except ToolError as e:
         raise HTTPException(400, str(e))
 
@@ -608,7 +610,7 @@ async def imagens_ampliar(message_id: int, body: AmpliarBody):
 async def imagens_ampliar_arquivo(conv_id: int, body: AmpliarBody):
     """Uma imagem qualquer (enviada em /imagens/referencia, ou do disco): vira um lote ampliado nesta conversa."""
     try:
-        return await asyncio.to_thread(lotes.ampliar_arquivo, conv_id, body.path, body.fator, body.modelo)
+        return await asyncio.to_thread(lotes.ampliar_arquivo, conv_id, body.path, body.fator, body.modelo, body.prompt, body.forca)
     except ToolError as e:
         raise HTTPException(400, str(e))
 

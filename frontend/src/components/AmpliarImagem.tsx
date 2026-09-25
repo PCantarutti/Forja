@@ -5,19 +5,27 @@ import { btnPrimary } from "./ImagensUi";
 
 /** O que o backend acha nas pastas de modelos: ESRGAN (rápido, sd-cli) e SeedVR2 (difusão, pelo ComfyUI portátil que
  *  o Forja Desktop instala). Mesma rota do desktop. */
-type Ampliadores = { no_disco: { path: string; name: string; tipo: "esrgan" | "seedvr2" | "spandrel" }[]; comfy: { instalado: string }; erro: string };
+type Ampliadores = {
+  no_disco: { path: string; name: string; tipo: "esrgan" | "seedvr2" | "spandrel" | "redesenhar" }[];
+  comfy: { instalado: string };
+  erro: string;
+};
 
-/** Método (ESRGAN achado ou Lanczos) e fator. `enviar` cria o lote ampliado. */
+/** Método (ESRGAN achado, ComfyUI, redesenhar com um checkpoint ou Lanczos) e fator. `enviar` cria o lote ampliado.
+ *  `prompt`: o que gerou a imagem, ponto de partida do redesenho. */
 export function PainelAmpliar(props: {
   w: number;
   h: number;
-  enviar: (corpo: { fator: number; modelo: string }) => Promise<void>;
+  prompt?: string;
+  enviar: (corpo: { fator: number; modelo: string; prompt?: string; forca?: number }) => Promise<void>;
   onError: (e: string) => void;
 }) {
   const [cat, setCat] = useState<Ampliadores | null>(null);
   const [modelo, setModelo] = useState<string | null>(null); // null = ainda não escolheu
   const [fator, setFator] = useState<2 | 4>(2);
   const [enviando, setEnviando] = useState(false);
+  const [prompt, setPrompt] = useState(props.prompt ?? "");
+  const [forca, setForca] = useState(0.4);
   useEffect(() => {
     api.get<Ampliadores>("/local/video/ampliadores").then(setCat).catch((e) => props.onError(e.message));
   }, []);
@@ -25,13 +33,15 @@ export function PainelAmpliar(props: {
   // SeedVR2 e DAT/HAT/SwinIR (spandrel) rodam no ComfyUI: só aparecem com ele instalado
   const metodos = (cat?.no_disco ?? []).filter((m) => m.tipo === "esrgan" || !!cat?.comfy?.instalado);
   const escolhido = modelo ?? metodos.find((m) => m.tipo === "esrgan")?.path ?? "";
-  const pesado = metodos.find((m) => m.path === escolhido)?.tipo === "seedvr2";
+  const tipo = metodos.find((m) => m.path === escolhido)?.tipo;
+  const pesado = tipo === "seedvr2";
+  const redesenha = tipo === "redesenhar";
   const seedSemComfy = (cat?.no_disco ?? []).some((m) => m.tipo !== "esrgan") && !cat?.comfy?.instalado;
 
   async function ampliar() {
     setEnviando(true);
     try {
-      await props.enviar({ fator, modelo: escolhido });
+      await props.enviar({ fator, modelo: escolhido, ...(redesenha ? { prompt, forca } : {}) });
     } catch (e: any) {
       props.onError(e.message);
     } finally {
@@ -47,12 +57,31 @@ export function PainelAmpliar(props: {
       <label className="flex flex-col gap-1">
         <span className="text-faint">Método</span>
         <select className="rounded-md border border-line bg-raised px-2 py-1 text-fg" value={escolhido} onChange={(e) => setModelo(e.target.value)}>
-          {metodos.map((m) => <option key={m.path} value={m.path}>{m.name} ({m.tipo === "seedvr2" ? "IA pesada, leva minutos" : m.tipo === "spandrel" ? "IA, pelo ComfyUI" : "IA"})</option>)}
+          {metodos.map((m) => (
+            <option key={m.path} value={m.path}>
+              {m.tipo === "redesenhar" ? `Redesenhar com ${m.name} (muda a imagem, leva minutos)`
+                : `${m.name} (${m.tipo === "seedvr2" ? "IA pesada, leva minutos" : m.tipo === "spandrel" ? "IA, pelo ComfyUI" : "IA"})`}
+            </option>
+          ))}
           <option value="">Rápido, sem IA (Lanczos)</option>
         </select>
       </label>
       {pesado && <p className="text-faint">Difusão: reconstrói textura e detalhe, mas usa ~7 GB de VRAM e leva de 1 a alguns minutos.</p>}
-      {seedSemComfy && <p className="text-faint">Tem modelos que rodam no ComfyUI nas pastas (SeedVR2, DAT/HAT), mas falta o ComfyUI portátil: instale pelo Forja Desktop (Imagens › Ampliar).</p>}
+      {redesenha && (
+        <>
+          <label className="flex flex-col gap-1">
+            <span className="text-faint">O que desenhar <span className="text-faint/70">(em inglês funciona melhor)</span></span>
+            <textarea className="min-h-16 rounded-md border border-line bg-raised px-2 py-1 text-fg" value={prompt}
+              onChange={(e) => setPrompt(e.target.value)} placeholder="Descreva a imagem" />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-faint">Força {forca.toFixed(2).replace(".", ",")}</span>
+            <input type="range" min={0.2} max={0.7} step={0.05} value={forca} onChange={(e) => setForca(Number(e.target.value))} />
+            <span className="flex justify-between text-faint"><span>fiel, só limpa</span><span>reimagina a textura</span></span>
+          </label>
+        </>
+      )}
+      {seedSemComfy && <p className="text-faint">Tem modelos que rodam no ComfyUI nas pastas (SeedVR2, DAT/HAT, checkpoints para redesenhar), mas falta o ComfyUI portátil: instale pelo Forja Desktop (Imagens › Ampliar).</p>}
       {!metodos.length && (
         <p className="text-faint">
           Para ampliar com IA, ponha um RealESRGAN_x4plus.pth (ou x4plus_anime_6B) numa das pastas de modelos (github.com/xinntao/Real-ESRGAN).

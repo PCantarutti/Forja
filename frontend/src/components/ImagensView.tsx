@@ -772,6 +772,7 @@ function Lote(props: {
           <PainelAmpliar
             w={meta.opts.width ?? 0}
             h={meta.opts.height ?? 0}
+            prompt={promptDaImagem(props.pedido)}
             onError={props.onError}
             enviar={async (c) => {
               await api.post(`/imagens/${props.resposta.id}/ampliar`, { path: ampliando, ...c });
@@ -964,6 +965,14 @@ function rotuloSementes(sementes: number[], modo: SeedMode): string {
 
 function Chip({ children }: { children: React.ReactNode }) {
   return <span className="rounded-full bg-raised px-2 py-0.5">{children}</span>;
+}
+
+/** O prompt de partida do redesenho: o da geração; numa ampliação, o do redesenho dela; o nome de arquivo de uma
+ *  ampliação de arquivo não serve. */
+function promptDaImagem(pedido: Message): string {
+  const amp = (pedido.meta as { ampliacao?: { prompt?: string } } | null)?.ampliacao;
+  if (!amp) return pedido.content;
+  return amp.prompt || (/\.(png|jpe?g|webp)$/i.test(pedido.content) ? "" : pedido.content);
 }
 
 function Cartao(props: {

@@ -322,3 +322,38 @@ def test_dat_hat_pelo_comfyui_do_desktop(cfg, monkeypatch):
     workspace.to_container(out).parent.mkdir(parents=True, exist_ok=True)
     assert ampliar.ampliar_imagem(host(src), out, 4, dat) == {"w": 20, "h": 16}
     assert comandos[0][comandos[0].index("--modo") + 1] == "spandrel" and "--vae" not in comandos[0]
+
+
+def test_redesenhar_com_checkpoint_sdxl_pelo_comfyui(cfg, monkeypatch):
+    """Um checkpoint SDXL completo (qualquer nome) vira "redesenhar": vai pelo driver com prompt, força e bloco de 1024;
+    o prompt e a força ficam na ampliação, e sem prompt vale o da geração."""
+    from PIL import Image
+    from app import ampliar
+    m = cfg / "modelos"
+    _safetensors(m / "meu-modelo.safetensors", ["model.diffusion_model.input_blocks.0.0.weight",
+                                                  "first_stage_model.encoder.conv_in.weight", "conditioner.embedders.0.x"])
+    ampliar._achados.cache_clear()
+    ck = host(m / "meu-modelo.safetensors")
+    assert ampliar.tipo_checkpoint(ck) == "sdxl"
+    assert {x["name"]: x["tipo"] for x in ampliar.catalogo()["no_disco"]}["meu-modelo"] == "redesenhar"
+    monkeypatch.setattr(ampliar, "comfy_dir", lambda: host(cfg / "comfy"))
+    src = cfg / "c.png"
+    Image.new("RGB", (5, 4)).save(src)
+    comandos = []
+
+    def roda(a, cwd, job_id, limite_s, ao_ler=None):
+        comandos.append(a)
+        Image.new("RGB", (10, 8)).save(workspace.to_container(a[a.index("--saida") + 1]))
+        return {"exit_code": 0}, "FASE redesenhando o bloco 1 de 1\nOK 10x8"
+    monkeypatch.setattr(ampliar, "_rodar", roda)
+    out = host(cfg / "saida" / "c-2x.png")
+    workspace.to_container(out).parent.mkdir(parents=True, exist_ok=True)
+    assert ampliar.ampliar_imagem(host(src), out, 2, ck, prompt="a cup", forca=0.5) == {"w": 10, "h": 8}
+    a = comandos[0]
+    assert [a[a.index(k) + 1] for k in ("--modo", "--prompt", "--forca", "--bloco")] == ["redesenhar", "a cup", "0.50", "1024"]
+    assert lotes._redesenho(ck, " a cup ", None) == {"prompt": "a cup", "forca": ampliar.FORCA_PADRAO}
+    assert lotes._redesenho(host(src), "x", 0.5) == {}  # não é checkpoint: nada de prompt
+    with pytest.raises(lotes.ToolError, match="Força"):
+        lotes._redesenho(ck, "x", 0.95)
+    assert lotes.prompt_da_imagem("foto.png", {"ampliacao": {"origem": "x"}}) == ""  # nome de arquivo não é prompt
+    assert lotes.prompt_da_imagem("a cat", None) == "a cat"

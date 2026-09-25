@@ -260,7 +260,7 @@ def _validar_ampliacao(path: str, fator: int, modelo: str) -> None:
         raise ToolError("Amplie uma imagem PNG, JPG ou WebP.")
     if not _existe(path):
         raise ToolError("Esse arquivo não existe (ou não está acessível).")
-    if modelo and amp.tipo_local(modelo) in ("seedvr2", "spandrel"):
+    if modelo and (amp.tipo_local(modelo) in ("seedvr2", "spandrel") or amp.tipo_checkpoint(modelo)):
         if not amp.comfy_dir():
             raise ToolError("Falta o ComfyUI (motor do SeedVR2 e dos DAT/HAT/SwinIR): instale pelo Forja Desktop, "
                             "em Imagens › Ampliar › Baixar o que falta.")
@@ -270,10 +270,10 @@ def _validar_ampliacao(path: str, fator: int, modelo: str) -> None:
 
 
 def _nova_ampliacao(conv_id: int, origem: str, saida: str, prompt: str, opts: dict, seed: int,
-                    fator: int, modelo: str) -> dict:
+                    fator: int, modelo: str, redesenho: dict | None = None) -> dict:
     """A tomada nova (pedido + resposta) e a thread que amplia. `opts`: largura e altura da origem."""
     nome = _nome(modelo) if modelo else "Lanczos"
-    amp_meta = {"origem": origem, "fator": int(fator), "modelo": modelo, "suavizar": False}
+    amp_meta = {"origem": origem, "fator": int(fator), "modelo": modelo, "suavizar": False, **(redesenho or {})}
     opts = {**opts, "width": int(opts.get("width") or 0) * int(fator), "height": int(opts.get("height") or 0) * int(fator),
             "ampliacao": amp_meta}
     imagens = [{"path": saida, "seed": seed, "model": modelo, "model_name": f"{nome} · {fator}×",
@@ -297,7 +297,30 @@ def _saida_ao_lado(origem: str, fator: int, modelo: str) -> str:
     return saida
 
 
-def ampliar(message_id: int, path: str, fator: int, modelo: str = "") -> dict:
+def prompt_da_imagem(conteudo: str, meta: dict | None) -> str:
+    """O prompt que descreve a imagem de um lote (como o desktop): o da geração; numa ampliação, o do redesenho dela;
+    numa ampliação de arquivo o pedido é só o nome do arquivo, que não serve de prompt."""
+    amp = (meta or {}).get("ampliacao")
+    if not amp:
+        return conteudo or ""
+    if amp.get("prompt"):
+        return amp["prompt"]
+    return "" if re.search(r"\.(png|jpe?g|webp)$", conteudo or "", re.I) else (conteudo or "")
+
+
+def _redesenho(modelo: str, prompt: str, forca: float | None) -> dict:
+    """Redesenhar (checkpoint de imagem): o prompt e a força vão junto da ampliação (Continuar refaz igual)."""
+    from . import ampliar as amp
+    if not (modelo and amp.tipo_checkpoint(modelo)):
+        return {}
+    f = amp.FORCA_PADRAO if forca is None else float(forca)
+    if not 0.05 <= f <= 0.9:
+        raise ToolError("Força do redesenho entre 0,05 e 0,9.")
+    return {"prompt": (prompt or "").strip(), "forca": round(f, 2)}
+
+
+def ampliar(message_id: int, path: str, fator: int, modelo: str = "", prompt_novo: str = "",
+            forca: float | None = None) -> dict:
     """Amplia uma imagem pronta do lote: vira um lote à parte na mesma conversa."""
     msg = _mensagem(message_id)
     item = next((i for i in msg["meta"]["images"] if i["path"] == path), None)
@@ -308,12 +331,15 @@ def ampliar(message_id: int, path: str, fator: int, modelo: str = "") -> dict:
         pedido = (s.query(db.Message).filter(db.Message.conversation_id == msg["conversation_id"], db.Message.role == "user",
                                              db.Message.id < message_id).order_by(db.Message.id.desc()).first())
         prompt = pedido.content if pedido else ""
+        base = prompt_da_imagem(pedido.content, pedido.meta) if pedido else ""
     saida = _saida_ao_lado(path, fator, modelo)
+    # redesenhar: sem prompt na tela, vale o prompt que gerou a imagem
     return _nova_ampliacao(msg["conversation_id"], path, saida, prompt, dict(msg["meta"].get("opts") or {}),
-                           item["seed"], fator, modelo)
+                           item["seed"], fator, modelo, _redesenho(modelo, prompt_novo or base, forca))
 
 
-def ampliar_arquivo(conv_id: int, path: str, fator: int, modelo: str = "") -> dict:
+def ampliar_arquivo(conv_id: int, path: str, fator: int, modelo: str = "", prompt: str = "",
+                    forca: float | None = None) -> dict:
     """Uma imagem qualquer (enviada pelo navegador ou do disco): o resultado vai para a pasta de imagens."""
     from PIL import Image
     path = imagegen._norm(path)
@@ -326,7 +352,8 @@ def ampliar_arquivo(conv_id: int, path: str, fator: int, modelo: str = "") -> di
     _c(imagegen.out_dir()).mkdir(parents=True, exist_ok=True)
     nome = re.sub(r"^[0-9a-f]{16}-", "", _base(path))  # a enviada chega em referencias/ com o sha na frente
     saida = _saida_ao_lado(f"{imagegen.out_dir()}/{time.strftime('%Y%m%d-%H%M%S')}-{nome}", fator, modelo)
-    return _nova_ampliacao(conv_id, path, saida, nome, {"width": w, "height": h}, 0, fator, modelo)
+    return _nova_ampliacao(conv_id, path, saida, nome, {"width": w, "height": h}, 0, fator, modelo,
+                           _redesenho(modelo, prompt, forca))
 
 
 def _ampliar_trabalho(conv_id: int, message_id: int, job_id: str) -> None:
@@ -346,7 +373,7 @@ def _ampliar_trabalho(conv_id: int, message_id: int, job_id: str) -> None:
         def fase(texto: str | None, fracao: float | None = None) -> None:
             if texto:
                 item["fase"] = texto
-                if texto.startswith("ampliando") and not comeco[0]:
+                if texto.startswith(("ampliando", "redesenhando")) and not comeco[0]:
                     comeco[0] = time.monotonic()
             if fracao is not None:
                 item["progress"] = round(fracao, 3)
@@ -354,7 +381,8 @@ def _ampliar_trabalho(conv_id: int, message_id: int, job_id: str) -> None:
                 if fracao >= 0.05 and passou:
                     item["restante"] = round(passou * (1 - fracao) / fracao)
             _patch(message_id, meta={"images": imagens})
-        amp.ampliar_imagem(a["origem"], item["path"], a["fator"], a["modelo"], job_id, fase)
+        amp.ampliar_imagem(a["origem"], item["path"], a["fator"], a["modelo"], job_id, fase,
+                           a.get("prompt", ""), a.get("forca", amp.FORCA_PADRAO))
         item["status"] = "pronta"
     except Exception as e:
         cancelada = downloads.cancelled(job_id)

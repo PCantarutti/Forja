@@ -28,6 +28,8 @@ EXT_IMAGEM = (".png", ".jpg", ".jpeg", ".webp")
 TILE_ESRGAN = 256  # o mesmo do desktop (medido no Arc B580)
 TIMEOUT = 600
 TIMEOUT_SEEDVR2 = 3900  # o comfy_job.py desiste em 1 h de trabalho + 5 min de subida
+# Redesenhar: quanto o modelo pode mudar (denoise). O mesmo do desktop: 0,35 limpa sem inventar, 0,55 redesenha a textura.
+FORCA_PADRAO = 0.4
 
 
 def eh_imagem(path: str) -> bool:
@@ -135,6 +137,22 @@ def tipo_local(path: str) -> str:
         return ""
 
 
+def tipo_checkpoint(path: str) -> str:
+    """Checkpoint de imagem num arquivo só, que o ComfyUI carrega para redesenhar, pelo cabeçalho: "sdxl"
+    (conditioner.embedders), "sd15" (cond_stage_model) ou "" (FLUX/Qwen vêm em peças; GGUF fica de fora)."""
+    if not str(path).lower().endswith(".safetensors"):
+        return ""
+    try:
+        nomes = _nomes_dict(path)
+    except (OSError, ToolError, ValueError, KeyError, struct.error):
+        return ""
+    if not (any(n.startswith("model.diffusion_model.") for n in nomes) and any(n.startswith("first_stage_model.") for n in nomes)):
+        return ""
+    if any(n.startswith("conditioner.embedders.") for n in nomes):
+        return "sdxl"
+    return "sd15" if any(n.startswith("cond_stage_model.") for n in nomes) else ""
+
+
 def eh_ampliador(path: str) -> bool:
     return tipo_local(path) == "esrgan"
 
@@ -183,6 +201,8 @@ def _achados(_tick: int) -> tuple[dict, ...]:
             if chave in vistos:
                 continue
             tipo = tipo_local(host)  # pelo cabeçalho (8 bytes + o JSON), não pelo nome nem pelo tamanho
+            if not tipo and tipo_checkpoint(host):
+                tipo = "redesenhar"  # SD 1.5/SDXL completo: redesenha a imagem em alta resolução
             if tipo and tipo != "vae":
                 vistos.add(chave)
                 out.append({"path": host, "name": f.stem, "tipo": tipo})
@@ -237,9 +257,10 @@ def _esrgan(entrada: str, saida: str, modelo: str, repeticoes: int, job_id: str)
         raise ToolError(f"O ESRGAN falhou (código {info.get('exit_code')}):\n{log}")
 
 
-def _comfy(entrada: str, saida: str, fator: int, modelo: str, job_id: str, progresso=None, modo: str = "seedvr2") -> dict:
-    """comfy_job.py (o mesmo do desktop) no Python do portátil, pelo runner: `modo` seedvr2 (com o VAE) ou spandrel
-    (DAT/HAT/SwinIR e afins). O arquivo vai para a pasta de imagens, que o sistema do usuário enxerga; as fases e o
+def _comfy(entrada: str, saida: str, fator: int, modelo: str, job_id: str, progresso=None, modo: str = "seedvr2",
+           prompt: str = "", forca: float = FORCA_PADRAO, bloco: int = 1024) -> dict:
+    """comfy_job.py (o mesmo do desktop) no Python do portátil, pelo runner: `modo` seedvr2 (com o VAE), spandrel
+    (DAT/HAT/SwinIR e afins) ou redesenhar (checkpoint SD 1.5/SDXL por blocos, com prompt e força). O arquivo vai para a pasta de imagens, que o sistema do usuário enxerga; as fases e o
     resultado saem pelo log do runner."""
     pasta = comfy_dir()
     if not pasta:
@@ -267,7 +288,9 @@ def _comfy(entrada: str, saida: str, fator: int, modelo: str, job_id: str, progr
             ultima[0] = fracoes[-1]
             progresso(None, fracoes[-1])
     a = [f"{pasta}/python_embeded/python.exe", "-X", "utf8", "-s", job, "--modo", modo, "--comfy", pasta, "--modelo", modelo,
-         *(["--vae", vae] if vae else []), "--entrada", entrada, "--saida", saida, "--fator", str(int(fator))]
+         *(["--vae", vae] if vae else []), "--entrada", entrada, "--saida", saida, "--fator", str(int(fator)),
+         *(["--prompt", prompt, "--forca", f"{forca:.2f}", "--bloco", str(bloco), "--passos", "25"]
+           if modo == "redesenhar" else [])]
     info, log = _rodar(a, pasta, job_id, TIMEOUT_SEEDVR2, ao_ler)
     fim = next((l.strip() for l in reversed(log.splitlines()) if l.startswith(("OK ", "ERRO "))), "")
     if not fim.startswith("OK ") or not _existe(saida):
@@ -277,13 +300,18 @@ def _comfy(entrada: str, saida: str, fator: int, modelo: str, job_id: str, progr
     return {"w": w, "h": h}
 
 
-def ampliar_imagem(entrada: str, saida: str, fator: int, modelo: str = "", job_id: str = "", progresso=None) -> dict:
+def ampliar_imagem(entrada: str, saida: str, fator: int, modelo: str = "", job_id: str = "", progresso=None,
+                   prompt: str = "", forca: float = FORCA_PADRAO) -> dict:
     """Amplia `entrada` em `fator` e grava `saida` (.png). `modelo` vazio = Lanczos; SeedVR2 pelo ComfyUI;
     ESRGAN pelo sd-cli. ESRGAN que passou do alvo (um 4× pedido como 2×) volta ao tamanho pedido por Lanczos."""
     from PIL import Image
     tipo = tipo_local(modelo) if modelo else ""
     if tipo in ("seedvr2", "spandrel"):
         return _comfy(entrada, saida, fator, modelo, job_id, progresso, tipo)
+    ck = tipo_checkpoint(modelo) if modelo else ""
+    if ck:  # redesenhar: blocos de 1024 no SDXL, 768 no SD 1.5 (o tamanho em que cada um foi treinado)
+        return _comfy(entrada, saida, fator, modelo, job_id, progresso, "redesenhar", prompt, forca,
+                      1024 if ck == "sdxl" else 768)
     with Image.open(_c(entrada)) as im:
         w, h = im.size
         alvo = (w * int(fator), h * int(fator))
