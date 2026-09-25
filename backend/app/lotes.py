@@ -296,7 +296,12 @@ def ampliar(message_id: int, path: str, fator: int, modelo: str = "") -> dict:
         pedido = (s.query(db.Message).filter(db.Message.conversation_id == msg["conversation_id"], db.Message.role == "user",
                                              db.Message.id < message_id).order_by(db.Message.id.desc()).first())
         prompt = pedido.content if pedido else ""
-    saida = f"{path.rsplit('.', 1)[0]}-{fator}x.png"
+    # fator e método no nome: a mesma imagem ampliada 2× por dois métodos não pode cair no mesmo arquivo
+    metodo = re.sub(r"[^\w.-]+", "", _base(modelo).rsplit(".", 1)[0])[:32] if modelo else "lanczos"
+    base = f"{path.rsplit('.', 1)[0]}-{fator}x-{metodo}"
+    saida, n = f"{base}.png", 2
+    while _existe(saida):
+        saida, n = f"{base}-{n}.png", n + 1
     return _nova_ampliacao(msg["conversation_id"], path, saida, prompt, dict(msg["meta"].get("opts") or {}),
                            item["seed"], fator, modelo)
 
