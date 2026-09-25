@@ -284,15 +284,15 @@ def test_seedvr2_e_esrgan_antigo_no_catalogo_e_o_driver_pelo_runner(cfg, monkeyp
         comandos.append(a)
         saida = a[a.index("--saida") + 1]
         Image.new("RGB", (20, 16)).save(workspace.to_container(saida))
-        log = "FASE iniciando o ComfyUI\nFASE ampliando\nOK 20x16"
+        log = "FASE iniciando o ComfyUI\nFASE ampliando\nPROGRESSO 0.400\nOK 20x16"
         ao_ler and ao_ler(log)
         return {"exit_code": 0}, log
     monkeypatch.setattr(ampliar, "_rodar", roda)
     fases = []
     out = host(cfg / "saida" / "a-4x.png")
     workspace.to_container(out).parent.mkdir(parents=True, exist_ok=True)
-    assert ampliar.ampliar_imagem(host(src), out, 4, seed, progresso=fases.append) == {"w": 20, "h": 16}
-    assert fases == ["iniciando o ComfyUI", "ampliando"]
+    assert ampliar.ampliar_imagem(host(src), out, 4, seed, progresso=lambda f, x: fases.append((f, x))) == {"w": 20, "h": 16}
+    assert fases == [("iniciando o ComfyUI", None), ("ampliando", None), (None, 0.4)]
     a = comandos[0]
     assert a[a.index("--vae") + 1].endswith("/seedvr2_ema_vae_fp16.safetensors") and a[1:3] == ["-X", "utf8"]
     assert workspace.to_container(a[a.index("-s") + 1]).read_bytes().startswith(b'"""Uma amplia')  # o driver foi para o disco
