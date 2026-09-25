@@ -439,6 +439,7 @@ export type LoteImagem = {
   com_previa?: boolean; // o modelo gera com prévia: o card não usa o líquido, nem antes da 1ª
   s_passo?: number; // segundos por passo, lido do sd-cli
   restante?: number; // segundos até o fim da amostragem
+  fase?: string; // ampliação SeedVR2 em andamento: "iniciando o ComfyUI", "ampliando"
 };
 
 /** meta da mensagem do assistente num lote (a thread do backend vai preenchendo `images`). */

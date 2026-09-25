@@ -260,8 +260,12 @@ def _validar_ampliacao(path: str, fator: int, modelo: str) -> None:
         raise ToolError("Amplie uma imagem PNG, JPG ou WebP.")
     if not _existe(path):
         raise ToolError("Esse arquivo não existe (ou não está acessível).")
+    if modelo and amp.eh_seedvr2(modelo):
+        if not amp.comfy_dir():
+            raise ToolError("Falta o ComfyUI (motor do SeedVR2): instale pelo Forja Desktop, em Imagens › Ampliar › Baixar o que falta.")
+        return
     if modelo and not amp.eh_ampliador(modelo):
-        raise ToolError("Esse arquivo não é um modelo de ampliação (ESRGAN).")
+        raise ToolError("Esse arquivo não é um modelo de ampliação (ESRGAN ou SeedVR2).")
 
 
 def _nova_ampliacao(conv_id: int, origem: str, saida: str, prompt: str, opts: dict, seed: int,
@@ -323,7 +327,12 @@ def _ampliar_trabalho(conv_id: int, message_id: int, job_id: str) -> None:
     try:
         item.update(status="gerando", progress=0.0)
         _patch(message_id, meta={"images": imagens})
-        amp.ampliar_imagem(a["origem"], item["path"], a["fator"], a["modelo"], job_id)
+        fases = {"iniciando o ComfyUI": 0.05, "ampliando": 0.3}  # só o SeedVR2 avisa: leva minutos
+
+        def fase(texto: str) -> None:
+            item.update(fase=texto, progress=fases.get(texto, item.get("progress", 0.0)))
+            _patch(message_id, meta={"images": imagens})
+        amp.ampliar_imagem(a["origem"], item["path"], a["fator"], a["modelo"], job_id, fase)
         item["status"] = "pronta"
     except Exception as e:
         cancelada = downloads.cancelled(job_id)
@@ -332,6 +341,7 @@ def _ampliar_trabalho(conv_id: int, message_id: int, job_id: str) -> None:
     finally:
         imagegen.set_image_busy(False)
         item.pop("progress", None)
+        item.pop("fase", None)
     pronta = item["status"] == "pronta"
     downloads.finish(job_id, error="" if pronta else item["error"])
     mirror.write(conv_id)

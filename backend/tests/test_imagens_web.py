@@ -252,3 +252,47 @@ def test_ampliar_imagem_lanczos_e_esrgan_que_nao_amplia(cfg, monkeypatch):
     assert "'-M' 'upscale'" in rf.comandos[-1][1] and "'--backend' 'vulkan0'" in rf.comandos[-1][1]
     with pytest.raises(lotes.ToolError, match="2× ou 4×"):
         lotes.ampliar_arquivo(conv, host(src), 3)
+
+
+def _safetensors(f, camadas):
+    import struct
+    cab = json.dumps({n: {"dtype": "F16", "shape": [1], "data_offsets": [2 * i, 2 * i + 2]} for i, n in enumerate(camadas)}).encode()
+    f.write_bytes(struct.pack("<Q", len(cab)) + cab + b"\0\0" * len(camadas))
+
+
+def test_seedvr2_e_esrgan_antigo_no_catalogo_e_o_driver_pelo_runner(cfg, monkeypatch):
+    """UltraSharp (formato antigo) e SeedVR2 aparecem com o tipo; o SeedVR2 roda o comfy_job.py pelo runner e o
+    resultado sai do log (FASE vira progresso, OK vira tamanho)."""
+    from PIL import Image
+    from app import ampliar
+    m = cfg / "modelos"
+    _safetensors(m / "4x-UltraSharp.safetensors", ["model.0.weight", "model.1.sub.0.RDB1.conv1.0.weight"])
+    _safetensors(m / "seedvr2_3b_fp16.safetensors", ["blocks.0.ada.txt.attn_gate"])
+    _safetensors(m / "seedvr2_ema_vae_fp16.safetensors", ["decoder.conv_in.weight"])
+    ampliar._achados.cache_clear()
+    assert {x["name"]: x["tipo"] for x in ampliar.catalogo()["no_disco"]} == {"4x-UltraSharp": "esrgan", "seedvr2_3b_fp16": "seedvr2"}
+    seed = host(m / "seedvr2_3b_fp16.safetensors")
+    src = cfg / "a.png"
+    Image.new("RGB", (5, 4)).save(src)
+    monkeypatch.setattr(ampliar, "comfy_dir", lambda: "")
+    with pytest.raises(lotes.ToolError, match="ComfyUI"):  # sem o portátil do desktop
+        lotes._validar_ampliacao(host(src), 2, seed)
+    monkeypatch.setattr(ampliar, "comfy_dir", lambda: host(cfg / "comfy"))
+    comandos = []
+
+    def roda(a, cwd, job_id, limite_s, ao_ler=None):
+        comandos.append(a)
+        saida = a[a.index("--saida") + 1]
+        Image.new("RGB", (20, 16)).save(workspace.to_container(saida))
+        log = "FASE iniciando o ComfyUI\nFASE ampliando\nOK 20x16"
+        ao_ler and ao_ler(log)
+        return {"exit_code": 0}, log
+    monkeypatch.setattr(ampliar, "_rodar", roda)
+    fases = []
+    out = host(cfg / "saida" / "a-4x.png")
+    workspace.to_container(out).parent.mkdir(parents=True, exist_ok=True)
+    assert ampliar.ampliar_imagem(host(src), out, 4, seed, progresso=fases.append) == {"w": 20, "h": 16}
+    assert fases == ["iniciando o ComfyUI", "ampliando"]
+    a = comandos[0]
+    assert a[a.index("--vae") + 1].endswith("/seedvr2_ema_vae_fp16.safetensors") and a[1:3] == ["-X", "utf8"]
+    assert workspace.to_container(a[a.index("-s") + 1]).read_bytes().startswith(b'"""Uma amplia')  # o driver foi para o disco
