@@ -27,7 +27,7 @@ TILE_ESRGAN = 256  # o mesmo do desktop (medido no Arc B580)
 TIMEOUT = 600
 TIMEOUT_SEEDVR2 = 3900  # o comfy_job.py desiste em 1 h de trabalho + 5 min de subida
 VAE_SEEDVR2 = "seedvr2_ema_vae_fp16.safetensors"
-ESRGAN_MB = 200  # ponytail: ESRGAN/UltraSharp têm < 200 MB; acima disso só o SeedVR2 tem o cabeçalho lido (montagem lenta)
+ESRGAN_MB = 200  # ponytail: ESRGAN/DAT/UltraSharp têm < 200 MB; acima disso só o SeedVR2 tem o cabeçalho lido (montagem lenta)
 
 
 def eh_imagem(path: str) -> bool:
@@ -46,27 +46,65 @@ def _nomes(path: str) -> list[str] | bytes:
         return list(json.loads(arq.read(n)))
 
 
-def eh_ampliador(path: str) -> bool:
-    """ESRGAN (RRDBNet) pelo conteúdo, no formato novo (`conv_first`, `rdb1`) ou no antigo (`model.0`, `RDB1`,
-    do UltraSharp e dos da comunidade)."""
-    try:
-        nomes = _nomes(path)
-    except (OSError, ToolError, ValueError, zipfile.BadZipFile, KeyError, struct.error):
-        return False
+def tipo_por_nomes(nomes: list[str] | dict | bytes, arquivo: str = "") -> str:
+    """Mesma regra do desktop (forja-desktop/backend/app/ampliar.py): "esrgan" (RRDBNet, pelo sd-cli), "seedvr2"
+    (difusão), "spandrel" (DAT/HAT/SwinIR/SPAN/PLKSR/compactos e o RRDBNet 2× com pixel-unshuffle, pelo ComfyUI)
+    ou "" (não roda). `nomes`: cabeçalho do .safetensors (dict ou lista) ou os bytes do pickle do .pth."""
+    if isinstance(nomes, dict):
+        primeira = (nomes.get("conv_first.weight") or nomes.get("model.0.weight") or {}).get("shape") or []
+        if len(primeira) == 4 and primeira[1] != 3:
+            return "spandrel"
+    if "x2plus" in arquivo.lower().rsplit("/", 1)[-1]:
+        return "spandrel"
     if isinstance(nomes, bytes):
-        return (b"conv_first" in nomes and b"rdb1" in nomes) or (b"model.0.weight" in nomes and b"RDB1" in nomes)
-    return ((any(n.startswith("conv_first") for n in nomes) and any(".rdb1." in n for n in nomes))
-            or ("model.0.weight" in nomes and any(".RDB1." in n for n in nomes)))
+        if (b"conv_first" in nomes and b"rdb1" in nomes) or (b"model.0.weight" in nomes and b"RDB1" in nomes):
+            return "esrgan"
+        return "spandrel" if _eh_spandrel(nomes) else ""
+    if (any(n.startswith("conv_first") for n in nomes) and any(".rdb1." in n for n in nomes)) or \
+            ("model.0.weight" in nomes and any(".RDB1." in n for n in nomes)):
+        return "esrgan"
+    if any(".ada.txt." in n for n in nomes):
+        return "seedvr2"
+    return "spandrel" if _eh_spandrel(nomes) else ""
+
+
+SPANDREL = ("conv_after_body.", "before_RG.", "block_1.c1_r.", ".channel_mixer.")
+COMPACTO = re.compile(r"^body\.\d+\.(weight|bias)$")
+
+
+def _eh_spandrel(nomes) -> bool:
+    if isinstance(nomes, bytes):
+        return (any(x.rstrip(".").encode() in nomes for x in SPANDREL)
+                or (b"body.0.weight" in nomes and b"body.1.weight" in nomes and b"conv_first" not in nomes))
+    chaves = [n for n in nomes if n != "__metadata__"]
+    return (any(x in n for n in chaves for x in SPANDREL)
+            or (len(chaves) >= 6 and all(COMPACTO.match(n) for n in chaves)))
+
+
+def _nomes_dict(path: str) -> dict | bytes:
+    f = _c(path)
+    if f.suffix.lower() == ".pth":
+        return _nomes(path)
+    with open(f, "rb") as arq:
+        n = struct.unpack("<Q", arq.read(8))[0]
+        return json.loads(arq.read(n))
+
+
+def tipo_local(path: str) -> str:
+    if not str(path).lower().endswith((".pth", ".safetensors")):
+        return ""
+    try:
+        return tipo_por_nomes(_nomes_dict(path), str(path))
+    except (OSError, ToolError, ValueError, zipfile.BadZipFile, KeyError, struct.error):
+        return ""
+
+
+def eh_ampliador(path: str) -> bool:
+    return tipo_local(path) == "esrgan"
 
 
 def eh_seedvr2(path: str) -> bool:
-    """O DiT do SeedVR2 pelo cabeçalho: blocos com modulação por texto (`blocks.N.ada.txt`)."""
-    if not str(path).lower().endswith(".safetensors"):
-        return False
-    try:
-        return any(".ada.txt." in n for n in _nomes(path))
-    except (OSError, ToolError, ValueError, struct.error):
-        return False
+    return tipo_local(path) == "seedvr2"
 
 
 def comfy_dir() -> str:
@@ -98,8 +136,7 @@ def _achados(_tick: int) -> tuple[dict, ...]:
             chave = (f.name.lower(), tam)
             if chave in vistos:
                 continue
-            tipo = ("esrgan" if tam < ESRGAN_MB << 20 and eh_ampliador(host)
-                    else "seedvr2" if f.name.lower().startswith("seedvr2") and eh_seedvr2(host) else "")
+            tipo = (tipo_local(host) if tam < ESRGAN_MB << 20 or f.name.lower().startswith("seedvr2") else "")
             if tipo:
                 vistos.add(chave)
                 out.append({"path": host, "name": f.stem, "tipo": tipo})
@@ -154,14 +191,16 @@ def _esrgan(entrada: str, saida: str, modelo: str, repeticoes: int, job_id: str)
         raise ToolError(f"O ESRGAN falhou (código {info.get('exit_code')}):\n{log}")
 
 
-def _seedvr2(entrada: str, saida: str, fator: int, modelo: str, job_id: str, progresso=None) -> dict:
-    """comfy_job.py (o mesmo do desktop) no Python do portátil, pelo runner. O arquivo vai para a pasta de
-    imagens, que o sistema do usuário enxerga; as fases e o resultado saem pelo log do runner."""
+def _comfy(entrada: str, saida: str, fator: int, modelo: str, job_id: str, progresso=None, modo: str = "seedvr2") -> dict:
+    """comfy_job.py (o mesmo do desktop) no Python do portátil, pelo runner: `modo` seedvr2 (com o VAE) ou spandrel
+    (DAT/HAT/SwinIR e afins). O arquivo vai para a pasta de imagens, que o sistema do usuário enxerga; as fases e o
+    resultado saem pelo log do runner."""
     pasta = comfy_dir()
     if not pasta:
-        raise ToolError("Falta o ComfyUI (motor do SeedVR2): instale pelo Forja Desktop, em Imagens › Ampliar › Baixar o que falta.")
-    vae = f"{modelo.rsplit('/', 1)[0]}/{VAE_SEEDVR2}"
-    if not _existe(vae):
+        raise ToolError("Falta o ComfyUI (motor do SeedVR2 e dos DAT/HAT/SwinIR): instale pelo Forja Desktop, "
+                        "em Imagens › Ampliar › Baixar o que falta.")
+    vae = f"{modelo.rsplit('/', 1)[0]}/{VAE_SEEDVR2}" if modo == "seedvr2" else ""
+    if vae and not _existe(vae):
         raise ToolError(f"Falta o VAE do SeedVR2 ({VAE_SEEDVR2}) ao lado do modelo.")
     job = f"{imagegen.out_dir()}/.forja/comfy_job.py"
     _c(job).parent.mkdir(parents=True, exist_ok=True)
@@ -173,8 +212,8 @@ def _seedvr2(entrada: str, saida: str, fator: int, modelo: str, job_id: str, pro
             if linha.startswith("FASE ") and linha not in vistas and progresso:
                 vistas.add(linha)
                 progresso(linha[5:].strip())
-    a = [f"{pasta}/python_embeded/python.exe", "-X", "utf8", "-s", job, "--comfy", pasta, "--modelo", modelo, "--vae", vae,
-         "--entrada", entrada, "--saida", saida, "--fator", str(int(fator))]
+    a = [f"{pasta}/python_embeded/python.exe", "-X", "utf8", "-s", job, "--modo", modo, "--comfy", pasta, "--modelo", modelo,
+         *(["--vae", vae] if vae else []), "--entrada", entrada, "--saida", saida, "--fator", str(int(fator))]
     info, log = _rodar(a, pasta, job_id, TIMEOUT_SEEDVR2, ao_ler)
     fim = next((l.strip() for l in reversed(log.splitlines()) if l.startswith(("OK ", "ERRO "))), "")
     if not fim.startswith("OK ") or not _existe(saida):
@@ -187,8 +226,9 @@ def ampliar_imagem(entrada: str, saida: str, fator: int, modelo: str = "", job_i
     """Amplia `entrada` em `fator` e grava `saida` (.png). `modelo` vazio = Lanczos; SeedVR2 pelo ComfyUI;
     ESRGAN pelo sd-cli. ESRGAN que passou do alvo (um 4× pedido como 2×) volta ao tamanho pedido por Lanczos."""
     from PIL import Image
-    if modelo and eh_seedvr2(modelo):
-        return _seedvr2(entrada, saida, fator, modelo, job_id, progresso)
+    tipo = tipo_local(modelo) if modelo else ""
+    if tipo in ("seedvr2", "spandrel"):
+        return _comfy(entrada, saida, fator, modelo, job_id, progresso, tipo)
     with Image.open(_c(entrada)) as im:
         w, h = im.size
         alvo = (w * int(fator), h * int(fator))

@@ -260,9 +260,10 @@ def _validar_ampliacao(path: str, fator: int, modelo: str) -> None:
         raise ToolError("Amplie uma imagem PNG, JPG ou WebP.")
     if not _existe(path):
         raise ToolError("Esse arquivo não existe (ou não está acessível).")
-    if modelo and amp.eh_seedvr2(modelo):
+    if modelo and amp.tipo_local(modelo) in ("seedvr2", "spandrel"):
         if not amp.comfy_dir():
-            raise ToolError("Falta o ComfyUI (motor do SeedVR2): instale pelo Forja Desktop, em Imagens › Ampliar › Baixar o que falta.")
+            raise ToolError("Falta o ComfyUI (motor do SeedVR2 e dos DAT/HAT/SwinIR): instale pelo Forja Desktop, "
+                            "em Imagens › Ampliar › Baixar o que falta.")
         return
     if modelo and not amp.eh_ampliador(modelo):
         raise ToolError("Esse arquivo não é um modelo de ampliação (ESRGAN ou SeedVR2).")

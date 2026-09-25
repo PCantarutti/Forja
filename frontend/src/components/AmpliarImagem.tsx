@@ -5,7 +5,7 @@ import { btnPrimary } from "./ImagensUi";
 
 /** O que o backend acha nas pastas de modelos: ESRGAN (rápido, sd-cli) e SeedVR2 (difusão, pelo ComfyUI portátil que
  *  o Forja Desktop instala). Mesma rota do desktop. */
-type Ampliadores = { no_disco: { path: string; name: string; tipo: "esrgan" | "seedvr2" }[]; comfy: { instalado: string }; erro: string };
+type Ampliadores = { no_disco: { path: string; name: string; tipo: "esrgan" | "seedvr2" | "spandrel" }[]; comfy: { instalado: string }; erro: string };
 
 /** Método (ESRGAN achado ou Lanczos) e fator. `enviar` cria o lote ampliado. */
 export function PainelAmpliar(props: {
@@ -22,10 +22,11 @@ export function PainelAmpliar(props: {
     api.get<Ampliadores>("/local/video/ampliadores").then(setCat).catch((e) => props.onError(e.message));
   }, []);
   // SeedVR2 só com o ComfyUI do desktop instalado; nunca é o padrão (leva minutos)
-  const metodos = (cat?.no_disco ?? []).filter((m) => m.tipo !== "seedvr2" || !!cat?.comfy?.instalado);
+  // SeedVR2 e DAT/HAT/SwinIR (spandrel) rodam no ComfyUI: só aparecem com ele instalado
+  const metodos = (cat?.no_disco ?? []).filter((m) => m.tipo === "esrgan" || !!cat?.comfy?.instalado);
   const escolhido = modelo ?? metodos.find((m) => m.tipo === "esrgan")?.path ?? "";
   const pesado = metodos.find((m) => m.path === escolhido)?.tipo === "seedvr2";
-  const seedSemComfy = (cat?.no_disco ?? []).some((m) => m.tipo === "seedvr2") && !cat?.comfy?.instalado;
+  const seedSemComfy = (cat?.no_disco ?? []).some((m) => m.tipo !== "esrgan") && !cat?.comfy?.instalado;
 
   async function ampliar() {
     setEnviando(true);
@@ -46,12 +47,12 @@ export function PainelAmpliar(props: {
       <label className="flex flex-col gap-1">
         <span className="text-faint">Método</span>
         <select className="rounded-md border border-line bg-raised px-2 py-1 text-fg" value={escolhido} onChange={(e) => setModelo(e.target.value)}>
-          {metodos.map((m) => <option key={m.path} value={m.path}>{m.name} ({m.tipo === "seedvr2" ? "IA pesada, leva minutos" : "IA"})</option>)}
+          {metodos.map((m) => <option key={m.path} value={m.path}>{m.name} ({m.tipo === "seedvr2" ? "IA pesada, leva minutos" : m.tipo === "spandrel" ? "IA, pelo ComfyUI" : "IA"})</option>)}
           <option value="">Rápido, sem IA (Lanczos)</option>
         </select>
       </label>
       {pesado && <p className="text-faint">Difusão: reconstrói textura e detalhe, mas usa ~7 GB de VRAM e leva de 1 a alguns minutos.</p>}
-      {seedSemComfy && <p className="text-faint">Tem SeedVR2 nas pastas, mas falta o ComfyUI portátil: instale pelo Forja Desktop (Imagens › Ampliar).</p>}
+      {seedSemComfy && <p className="text-faint">Tem modelos que rodam no ComfyUI nas pastas (SeedVR2, DAT/HAT), mas falta o ComfyUI portátil: instale pelo Forja Desktop (Imagens › Ampliar).</p>}
       {!metodos.length && (
         <p className="text-faint">
           Para ampliar com IA, ponha um RealESRGAN_x4plus.pth (ou x4plus_anime_6B) numa das pastas de modelos (github.com/xinntao/Real-ESRGAN).

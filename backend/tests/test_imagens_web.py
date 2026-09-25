@@ -296,3 +296,29 @@ def test_seedvr2_e_esrgan_antigo_no_catalogo_e_o_driver_pelo_runner(cfg, monkeyp
     a = comandos[0]
     assert a[a.index("--vae") + 1].endswith("/seedvr2_ema_vae_fp16.safetensors") and a[1:3] == ["-X", "utf8"]
     assert workspace.to_container(a[a.index("-s") + 1]).read_bytes().startswith(b'"""Uma amplia')  # o driver foi para o disco
+
+
+def test_dat_hat_pelo_comfyui_do_desktop(cfg, monkeypatch):
+    """DAT/HAT/SwinIR (e o RealESRGAN x2plus) vão pelo mesmo driver, com --modo spandrel e sem VAE."""
+    from PIL import Image
+    from app import ampliar
+    m = cfg / "modelos"
+    _safetensors(m / "4x-UltraSharpV2.safetensors", ["before_RG.1.weight", "conv_after_body.weight"])
+    ampliar._achados.cache_clear()
+    dat = host(m / "4x-UltraSharpV2.safetensors")
+    assert ampliar.tipo_local(dat) == "spandrel"
+    assert {x["name"]: x["tipo"] for x in ampliar.catalogo()["no_disco"]}["4x-UltraSharpV2"] == "spandrel"
+    monkeypatch.setattr(ampliar, "comfy_dir", lambda: host(cfg / "comfy"))
+    src = cfg / "b.png"
+    Image.new("RGB", (5, 4)).save(src)
+    comandos = []
+
+    def roda(a, cwd, job_id, limite_s, ao_ler=None):
+        comandos.append(a)
+        Image.new("RGB", (20, 16)).save(workspace.to_container(a[a.index("--saida") + 1]))
+        return {"exit_code": 0}, "FASE ampliando\nOK 20x16"
+    monkeypatch.setattr(ampliar, "_rodar", roda)
+    out = host(cfg / "saida" / "b-4x.png")
+    workspace.to_container(out).parent.mkdir(parents=True, exist_ok=True)
+    assert ampliar.ampliar_imagem(host(src), out, 4, dat) == {"w": 20, "h": 16}
+    assert comandos[0][comandos[0].index("--modo") + 1] == "spandrel" and "--vae" not in comandos[0]
