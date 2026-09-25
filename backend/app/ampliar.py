@@ -225,7 +225,8 @@ def _comfy(entrada: str, saida: str, fator: int, modelo: str, job_id: str, progr
     info, log = _rodar(a, pasta, job_id, TIMEOUT_SEEDVR2, ao_ler)
     fim = next((l.strip() for l in reversed(log.splitlines()) if l.startswith(("OK ", "ERRO "))), "")
     if not fim.startswith("OK ") or not _existe(saida):
-        raise ToolError(fim[5:] if fim.startswith("ERRO ") else f"O ComfyUI saiu sem resultado (código {info.get('exit_code')}).")
+        raise ToolError(fim[5:] if fim.startswith("ERRO ") else f"O ComfyUI saiu sem resultado (código {info.get('exit_code')}). "
+                        + " | ".join(l for l in log.splitlines()[-6:] if l.strip())[-500:])
     w, h = (int(x) for x in re.findall(r"\d+", fim)[:2])
     return {"w": w, "h": h}
 
