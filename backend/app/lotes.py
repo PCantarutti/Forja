@@ -333,10 +333,20 @@ def _ampliar_trabalho(conv_id: int, message_id: int, job_id: str) -> None:
     try:
         item.update(status="gerando", progress=0.0)
         _patch(message_id, meta={"images": imagens})
-        fases = {"iniciando o ComfyUI": 0.05, "ampliando": 0.3}  # só o SeedVR2 avisa: leva minutos
+        # o que vai pelo ComfyUI avisa a fase e a fração (contada por ele, bloco a bloco): o card mostra a % e quanto
+        # falta, pelo ritmo desde que a ampliação começou de fato
+        comeco = [0.0]
 
-        def fase(texto: str) -> None:
-            item.update(fase=texto, progress=fases.get(texto, item.get("progress", 0.0)))
+        def fase(texto: str | None, fracao: float | None = None) -> None:
+            if texto:
+                item["fase"] = texto
+                if texto.startswith("ampliando") and not comeco[0]:
+                    comeco[0] = time.monotonic()
+            if fracao is not None:
+                item["progress"] = round(fracao, 3)
+                passou = time.monotonic() - comeco[0] if comeco[0] else 0
+                if fracao >= 0.05 and passou:
+                    item["restante"] = round(passou * (1 - fracao) / fracao)
             _patch(message_id, meta={"images": imagens})
         amp.ampliar_imagem(a["origem"], item["path"], a["fator"], a["modelo"], job_id, fase)
         item["status"] = "pronta"
@@ -348,6 +358,7 @@ def _ampliar_trabalho(conv_id: int, message_id: int, job_id: str) -> None:
         imagegen.set_image_busy(False)
         item.pop("progress", None)
         item.pop("fase", None)
+        item.pop("restante", None)
     pronta = item["status"] == "pronta"
     downloads.finish(job_id, error="" if pronta else item["error"])
     mirror.write(conv_id)

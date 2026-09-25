@@ -829,7 +829,8 @@ function Lote(props: {
             onPasta={() => mostrarNaPasta(img.path)}
             onEditar={() => props.onEditar(img.path)}
             onAmpliar={() => setAmpliando(img.path)}
-            origem={(props.pedido.meta as PedidoMeta | null)?.refs?.[0]}
+            // edição: a imagem editada por trás; ampliação: a original, enquanto amplia
+            origem={(props.pedido.meta as PedidoMeta | null)?.refs?.[0] ?? meta.opts.ampliacao?.origem}
           />
         ))}
       </div>
@@ -922,9 +923,9 @@ function Liquido({ fracao, sPasso, restante }: { fracao: number; sPasso?: number
       </div>
       <div className="relative text-center tabular-nums">
         <span className="block text-sm font-medium text-fg">{pct}%</span>
-        {!!sPasso && (
+        {(!!sPasso || !!restante) && (
           <span className="block text-[11px] text-muted">
-            {velocidade(sPasso)} · {duracao(restante ?? 0)} restantes
+            {sPasso ? `${velocidade(sPasso)} · ` : ""}{duracao(restante ?? 0)} restantes
           </span>
         )}
       </div>

@@ -207,11 +207,19 @@ def _comfy(entrada: str, saida: str, fator: int, modelo: str, job_id: str, progr
     _c(job).write_bytes(Path(__file__).with_name("comfy_job.py").read_bytes())
     vistas: set[str] = set()
 
-    def ao_ler(log: str) -> None:
+    ultima = [-1.0]
+
+    def ao_ler(log: str) -> None:  # FASE quando muda; PROGRESSO (a fração do ComfyUI) quando sobe
+        if not progresso:
+            return
         for linha in log.splitlines():
-            if linha.startswith("FASE ") and linha not in vistas and progresso:
+            if linha.startswith("FASE ") and linha not in vistas:
                 vistas.add(linha)
-                progresso(linha[5:].strip())
+                progresso(linha[5:].strip(), None)
+        fracoes = [float(l.split()[1]) for l in log.splitlines() if re.match(r"^PROGRESSO \d", l)]
+        if fracoes and fracoes[-1] > ultima[0]:
+            ultima[0] = fracoes[-1]
+            progresso(None, fracoes[-1])
     a = [f"{pasta}/python_embeded/python.exe", "-X", "utf8", "-s", job, "--modo", modo, "--comfy", pasta, "--modelo", modelo,
          *(["--vae", vae] if vae else []), "--entrada", entrada, "--saida", saida, "--fator", str(int(fator))]
     info, log = _rodar(a, pasta, job_id, TIMEOUT_SEEDVR2, ao_ler)
