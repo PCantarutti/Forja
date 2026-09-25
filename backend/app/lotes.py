@@ -13,6 +13,7 @@ passarem de `image.descarte_dias` (padrão 7).
 from __future__ import annotations
 
 import random
+import re
 import shutil
 import threading
 import time
@@ -249,6 +250,95 @@ def _trabalhar(conv_id: int, message_id: int, prompt: str, opts: dict, job_id: s
     _patch(message_id, status=status, meta={"images": imagens})
 
 
+# ------------------------------------------------------------------ ampliação (só imagem: vídeo precisa de ffmpeg)
+
+def _validar_ampliacao(path: str, fator: int, modelo: str) -> None:
+    from . import ampliar as amp
+    if int(fator) not in (2, 4):
+        raise ToolError("Amplie em 2× ou 4×.")
+    if not amp.eh_imagem(path):
+        raise ToolError("Amplie uma imagem PNG, JPG ou WebP.")
+    if not _existe(path):
+        raise ToolError("Esse arquivo não existe (ou não está acessível).")
+    if modelo and not amp.eh_ampliador(modelo):
+        raise ToolError("Esse arquivo não é um modelo de ampliação (ESRGAN).")
+
+
+def _nova_ampliacao(conv_id: int, origem: str, saida: str, prompt: str, opts: dict, seed: int,
+                    fator: int, modelo: str) -> dict:
+    """A tomada nova (pedido + resposta) e a thread que amplia. `opts`: largura e altura da origem."""
+    nome = _nome(modelo) if modelo else "Lanczos"
+    amp_meta = {"origem": origem, "fator": int(fator), "modelo": modelo, "suavizar": False}
+    opts = {**opts, "width": int(opts.get("width") or 0) * int(fator), "height": int(opts.get("height") or 0) * int(fator),
+            "ampliacao": amp_meta}
+    imagens = [{"path": saida, "seed": seed, "model": modelo, "model_name": f"{nome} · {fator}×",
+                "status": "pendente", "error": ""}]
+    _save(conv_id, role="user", content=prompt, meta={"refs": [], "models": [modelo], "ampliacao": amp_meta})
+    job = downloads.create("lote", f"ampliar {_base(origem)}")
+    nova = _save(conv_id, role="assistant", content="", status="running",
+                 meta={"job": job["id"], "count": 1, "seed_mode": "fixa", "opts": opts, "images": imagens})
+    threading.Thread(target=_ampliar_trabalho, args=(conv_id, nova.id, job["id"]), daemon=True).start()
+    return nova.to_dict()
+
+
+def ampliar(message_id: int, path: str, fator: int, modelo: str = "") -> dict:
+    """Amplia uma imagem pronta do lote: vira um lote à parte na mesma conversa."""
+    msg = _mensagem(message_id)
+    item = next((i for i in msg["meta"]["images"] if i["path"] == path), None)
+    if not item:
+        raise ToolError("Essa imagem não está pronta (ou o arquivo sumiu).")
+    _validar_ampliacao(path, fator, modelo)
+    with db.session() as s:
+        pedido = (s.query(db.Message).filter(db.Message.conversation_id == msg["conversation_id"], db.Message.role == "user",
+                                             db.Message.id < message_id).order_by(db.Message.id.desc()).first())
+        prompt = pedido.content if pedido else ""
+    saida = f"{path.rsplit('.', 1)[0]}-{fator}x.png"
+    return _nova_ampliacao(msg["conversation_id"], path, saida, prompt, dict(msg["meta"].get("opts") or {}),
+                           item["seed"], fator, modelo)
+
+
+def ampliar_arquivo(conv_id: int, path: str, fator: int, modelo: str = "") -> dict:
+    """Uma imagem qualquer (enviada pelo navegador ou do disco): o resultado vai para a pasta de imagens."""
+    from PIL import Image
+    path = imagegen._norm(path)
+    _validar_ampliacao(path, fator, modelo)
+    try:
+        with Image.open(_c(path)) as im:
+            w, h = im.size
+    except OSError:
+        raise ToolError(f"Não consegui ler {_base(path)} como imagem.") from None
+    _c(imagegen.out_dir()).mkdir(parents=True, exist_ok=True)
+    nome = re.sub(r"^[0-9a-f]{16}-", "", _base(path))  # a enviada chega em referencias/ com o sha na frente
+    saida = f"{imagegen.out_dir()}/{time.strftime('%Y%m%d-%H%M%S')}-{nome.rsplit('.', 1)[0]}-{fator}x.png"
+    return _nova_ampliacao(conv_id, path, saida, nome, {"width": w, "height": h}, 0, fator, modelo)
+
+
+def _ampliar_trabalho(conv_id: int, message_id: int, job_id: str) -> None:
+    from . import ampliar as amp
+    meta = _mensagem(message_id)["meta"]
+    imagens = list(meta["images"])
+    a = meta["opts"]["ampliacao"]
+    item = imagens[0]
+    imagegen.set_image_busy(True)
+    try:
+        item.update(status="gerando", progress=0.0)
+        _patch(message_id, meta={"images": imagens})
+        amp.ampliar_imagem(a["origem"], item["path"], a["fator"], a["modelo"], job_id)
+        item["status"] = "pronta"
+    except Exception as e:
+        cancelada = downloads.cancelled(job_id)
+        item["status"] = "cancelada" if cancelada else "erro"
+        item["error"] = "" if cancelada else str(e)
+    finally:
+        imagegen.set_image_busy(False)
+        item.pop("progress", None)
+    pronta = item["status"] == "pronta"
+    downloads.finish(job_id, error="" if pronta else item["error"])
+    mirror.write(conv_id)
+    _patch(message_id, status="pronto" if pronta else ("cancelado" if item["status"] == "cancelada" else "erro"),
+           meta={"images": imagens})
+
+
 A_REFAZER = ("interrompida", "pendente", "cancelada", "erro")
 
 
@@ -286,6 +376,13 @@ def continuar(message_id: int, confirm: bool = False) -> dict:
     imagens = list(msg["meta"]["images"])
     if not any(i["status"] in A_REFAZER for i in imagens):
         raise ToolError("Nada a continuar: todas as imagens deste lote já saíram.")
+    if (msg["meta"].get("opts") or {}).get("ampliacao"):  # é uma ampliação: refaz a ampliação
+        for i in imagens:
+            i.update(status="pendente", error="")
+        job = downloads.create("lote", f"ampliar {_base(imagens[0]['path'])}")
+        _patch(message_id, status="running", meta={"job": job["id"], "images": imagens})
+        threading.Thread(target=_ampliar_trabalho, args=(msg["conversation_id"], message_id, job["id"]), daemon=True).start()
+        return {"ok": True}
     with db.session() as s:
         pedido = (s.query(db.Message)
                   .filter(db.Message.conversation_id == msg["conversation_id"], db.Message.role == "user",

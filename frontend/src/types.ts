@@ -446,7 +446,7 @@ export type LoteMeta = {
   job: string;
   count: number;
   seed_mode: SeedMode;
-  opts: Partial<ImageOpts>;
+  opts: Partial<ImageOpts> & { ampliacao?: { origem: string; fator: number; modelo: string } }; // ampliação de outra imagem
   images: LoteImagem[];
 };
 

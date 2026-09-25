@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, uploadReferencia } from "../api";
 import type { ImageOpts, LoteImagem, LoteMeta, Message, PedidoMeta, SeedMode } from "../types";
-import { ArrowUp, Check, Copy, Edit, FolderOpen, Image, Paperclip, Refresh, Search, Sliders, Square, Trash, X } from "./icons";
+import { AmpliarArquivo, PainelAmpliar } from "./AmpliarImagem";
+import { ArrowUp, Check, Copy, Edit, FolderOpen, Image, Paperclip, Refresh, Search, Sliders, Square, TelaCheia, Trash, X } from "./icons";
 import { BotaoEnviar, CaixaPrompt, DireitaPrompt, RodapePrompt, campoPrompt, larguraNumero, numeroPilula, pilula, pilulaLigada, redondo } from "./Composer";
 import { btn, btnPrimary, campo, Field, input, Num, SAMPLERS } from "./ImagensUi";
 import ImagensMotor, { type EstadoImagens } from "./ImagensMotor";
 import { Lightbox } from "./MessageView";
+import { Modal } from "./Modal";
 import MascaraEditor, { type ModoPintura } from "./MascaraEditor";
 import ModelPicker from "./ModelPicker";
 
@@ -72,6 +74,7 @@ export default function ImagensView(props: {
   const [perguntando, setPerguntando] = useState(false);
   const [melhorando, setMelhorando] = useState(false);
   const [zoom, setZoom] = useState<string | null>(null);
+  const [ampliarPc, setAmpliarPc] = useState(false);
   // Na primeira vez herda o par do Chat; a partir daí é escolha própria desta aba.
   const [llm, setLlm] = useState(() => {
     try {
@@ -271,6 +274,20 @@ export default function ImagensView(props: {
   return (
     <>
       {zoom && <Lightbox src={zoom} onClose={() => setZoom(null)} />}
+      {ampliarPc && (
+        <Modal label="Ampliar imagem" onClose={() => setAmpliarPc(false)} className="w-full max-w-2xl rounded-2xl border border-line bg-surface p-4">
+          <p className="mb-3 text-sm text-fg">Ampliar imagem</p>
+          <AmpliarArquivo
+            ensureConversation={props.ensureConversation}
+            onError={mostrarErro}
+            onPronto={(conv) => {
+              setAmpliarPc(false);
+              props.onConversationChanged();
+              carregarConversa(conv);
+            }}
+          />
+        </Modal>
+      )}
       {pintando && (
         <MascaraEditor src={urlDa(pintando)} onClose={() => setPintando(null)} onPronta={(png, modo) => usarPintura(pintando, png, modo)} />
       )}
@@ -451,6 +468,9 @@ export default function ImagensView(props: {
                 className={redondo}
               >
                 <Paperclip className="size-4" />
+              </button>
+              <button onClick={() => setAmpliarPc(true)} title="Ampliar a resolução de uma imagem do dispositivo (ESRGAN ou Lanczos)" className={redondo}>
+                <TelaCheia className="size-4" />
               </button>
               <button
                 onClick={() => setAbrirAjustes((v) => !v)}
@@ -692,6 +712,7 @@ function Lote(props: {
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [salvando, setSalvando] = useState(false);
   const [vram, setVram] = useState(false);  // Continuar esbarrou num LLM carregado: pergunta antes
+  const [ampliando, setAmpliando] = useState<string | null>(null);
   const faltam = imagens.filter((i) => A_REFAZER.includes(i.status)).length;
 
   // Enquanto o lote roda os caminhos mudam de status; a seleção acompanha o que já ficou pronto.
@@ -745,6 +766,21 @@ function Lote(props: {
 
   return (
     <section className="my-8">
+      {ampliando && (
+        <Modal label="Ampliar imagem" onClose={() => setAmpliando(null)} className="w-full max-w-sm rounded-2xl border border-line bg-surface p-4">
+          <p className="mb-3 text-sm text-fg">Ampliar imagem</p>
+          <PainelAmpliar
+            w={meta.opts.width ?? 0}
+            h={meta.opts.height ?? 0}
+            onError={props.onError}
+            enviar={async (c) => {
+              await api.post(`/imagens/${props.resposta.id}/ampliar`, { path: ampliando, ...c });
+              setAmpliando(null);
+              props.onMudou();
+            }}
+          />
+        </Modal>
+      )}
       <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <p className="min-w-0 flex-1 text-[15px] text-fg">{props.pedido.content}</p>
         <span className="text-xs text-faint">
@@ -768,6 +804,7 @@ function Lote(props: {
         {[...new Set(imagens.map((i) => i.model_name))].map((n) => (
           <Chip key={n}>{n}</Chip>
         ))}
+        {meta.opts.ampliacao && <Chip>{`ampliada ${meta.opts.ampliacao.fator}×`}</Chip>}
         {!!(props.pedido.meta as PedidoMeta | null)?.refs?.length && (
           <Chip>edição de {(props.pedido.meta as PedidoMeta).refs!.length} imagem(ns)</Chip>
         )}
@@ -791,6 +828,7 @@ function Lote(props: {
             onSemente={() => props.onSemente(img.seed)}
             onPasta={() => mostrarNaPasta(img.path)}
             onEditar={() => props.onEditar(img.path)}
+            onAmpliar={() => setAmpliando(img.path)}
             origem={(props.pedido.meta as PedidoMeta | null)?.refs?.[0]}
           />
         ))}
@@ -935,6 +973,7 @@ function Cartao(props: {
   onSemente: () => void;
   onPasta: () => void;
   onEditar: () => void;
+  onAmpliar: () => void;
   origem?: string; // edição: a imagem que está sendo editada aparece por trás enquanto gera
 }) {
   const { img } = props;
@@ -1025,6 +1064,9 @@ function Cartao(props: {
             </button>
             <button onClick={props.onEditar} title="Editar esta imagem no próximo lote" className="text-faint hover:text-fg">
               <Edit className="size-3" />
+            </button>
+            <button onClick={props.onAmpliar} title="Ampliar a resolução (ESRGAN ou Lanczos)" className="text-faint hover:text-fg">
+              <TelaCheia className="size-3" />
             </button>
             <button onClick={props.onPasta} title="Mostrar na pasta" className="text-faint hover:text-fg">
               <FolderOpen className="size-3" />

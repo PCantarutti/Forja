@@ -206,3 +206,49 @@ def test_lote_gera_decide_e_apaga(cfg, monkeypatch):
 
 def test_arquivo_fora_da_pasta_nao_e_servido(cfg):
     assert not lotes.servivel("C:/Windows/win.ini")
+
+
+def _fim(message_id):
+    for _ in range(300):
+        m = lotes._mensagem(message_id)
+        if m["status"] != "running":
+            return m
+        time.sleep(0.02)
+    return m
+
+
+def test_ampliar_imagem_lanczos_e_esrgan_que_nao_amplia(cfg, monkeypatch):
+    """Lanczos é o Pillow aqui no container; ESRGAN vai pelo runner. O sd-cli que não carrega o modelo grava a
+    própria entrada: isso vira erro, não uma "ampliação" do mesmo tamanho."""
+    import zipfile
+    from PIL import Image
+    from app import ampliar
+    rf = RunnerFalso(monkeypatch)  # grava o PNG 1×1 no -o: o "ESRGAN que não ampliou"
+    monkeypatch.setattr(imagegen.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ampliar.time, "sleep", lambda s: None)
+    monkeypatch.setattr(imagegen, "_gpu", lambda exe: "vulkan0")
+    monkeypatch.setattr(lotes.mirror, "write", lambda c: None)
+    with db.session() as s:
+        c = db.Conversation(kind="imagem")
+        s.add(c)
+        s.commit()
+        conv = c.id
+    src = cfg / "de-fora" / "foto.jpg"
+    src.parent.mkdir()
+    Image.new("RGB", (5, 4)).save(src)
+    m = _fim(lotes.ampliar_arquivo(conv, host(src), 4)["id"])
+    item = m["meta"]["images"][0]
+    assert m["status"] == "pronto" and item["path"].endswith("-foto-4x.png") and item["model_name"] == "Lanczos · 4×"
+    assert Image.open(workspace.to_container(item["path"])).size == (20, 16)
+    assert (m["meta"]["opts"]["width"], m["meta"]["opts"]["height"]) == (20, 16)
+
+    esrgan = cfg / "modelos" / "RealESRGAN_x4plus.pth"
+    with zipfile.ZipFile(esrgan, "w") as z:
+        z.writestr("archive/data.pkl", b"conv_first.weight body.0.rdb1.conv1.weight")
+    ampliar._achados.cache_clear()
+    assert [x["name"] for x in ampliar.catalogo()["no_disco"]] == ["RealESRGAN_x4plus"]
+    m = _fim(lotes.ampliar(m["id"], item["path"], 2, host(esrgan))["id"])
+    assert m["status"] == "erro" and "mesmo tamanho" in m["meta"]["images"][0]["error"]
+    assert "'-M' 'upscale'" in rf.comandos[-1][1] and "'--backend' 'vulkan0'" in rf.comandos[-1][1]
+    with pytest.raises(lotes.ToolError, match="2× ou 4×"):
+        lotes.ampliar_arquivo(conv, host(src), 3)

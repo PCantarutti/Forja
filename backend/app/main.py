@@ -582,6 +582,37 @@ async def imagens_continuar(message_id: int, body: ContinuarBody):
         raise HTTPException(400, str(e))
 
 
+class AmpliarBody(BaseModel):
+    path: str
+    fator: int = 2
+    modelo: str = ""  # vazio = Lanczos, sem IA
+    suavizar: bool = False  # só vídeo (desktop); aqui é ignorado
+
+
+@app.get("/api/local/video/ampliadores")
+async def local_video_ampliadores():
+    """Mesma rota do desktop (o Forja Mobile também chama): os ESRGAN achados nas pastas de modelos."""
+    from . import ampliar
+    return await asyncio.to_thread(ampliar.catalogo)
+
+
+@app.post("/api/imagens/{message_id}/ampliar")
+async def imagens_ampliar(message_id: int, body: AmpliarBody):
+    try:
+        return await asyncio.to_thread(lotes.ampliar, message_id, body.path, body.fator, body.modelo)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/imagens/{conv_id}/ampliar-arquivo")
+async def imagens_ampliar_arquivo(conv_id: int, body: AmpliarBody):
+    """Uma imagem qualquer (enviada em /imagens/referencia, ou do disco): vira um lote ampliado nesta conversa."""
+    try:
+        return await asyncio.to_thread(lotes.ampliar_arquivo, conv_id, body.path, body.fator, body.modelo)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/imagens/{conv_id}/arquivos")
 def imagens_arquivos(conv_id: int):
     """Para o aviso de "apagar conversa": quantas imagens vão junto e onde estão."""
