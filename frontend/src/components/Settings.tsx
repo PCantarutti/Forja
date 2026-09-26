@@ -3,9 +3,10 @@ import { UsageBars, useCloudUsage } from "./CloudUsage";
 import { api } from "../api";
 import type { Especialidade } from "../types";
 import Confirma from "./Confirma";
+import { FONTES, TEMAS, lerAparencia, salvarAparencia } from "../aparencia";
 import { Modal } from "./Modal";
 import type { McpStatus, ToolInfo } from "./InfoPanel";
-import { Shield, Trash, Wrench } from "./icons";
+import { Shield, Trash, Wrench, X } from "./icons";
 import ModelPicker from "./ModelPicker";
 
 export type Provider = {
@@ -62,17 +63,35 @@ type Memory = {
   raw?: string;
 };
 
-const TABS = ["Geral", "Provedores", "Subagentes", "Maestro", "Ferramentas", "Permissões", "MCP", "Memória"] as const;
+const TABS = ["Aplicativo", "Tema", "Geral", "Provedores", "Subagentes", "Maestro", "Ferramentas", "Permissões", "MCP", "Memória"] as const;
 type Tab = (typeof TABS)[number];
+// Navegação agrupada do redesign ("Tema" = cores, destaque e fonte; "Aplicativo" = iniciais).
+const GRUPOS: { titulo: string; tabs: Tab[] }[] = [
+  { titulo: "App", tabs: ["Aplicativo", "Tema", "Geral"] },
+  { titulo: "Modelos", tabs: ["Provedores", "Subagentes", "Maestro"] },
+  { titulo: "Agente", tabs: ["Ferramentas", "Permissões", "MCP", "Memória"] },
+];
 
-const input = "w-full rounded-lg border border-line bg-raised px-3 py-1.5 text-sm text-fg focus:border-[#555] focus:outline-none";
-const btn = "rounded-full border border-line px-3 py-1.5 text-sm text-fg hover:bg-raised";
-const btnPrimary = "rounded-full bg-fg px-4 py-1.5 text-sm font-medium text-black hover:bg-white disabled:opacity-40";
+// O subtítulo ao lado do nome da aba, no cabeçalho (como no design).
+const SUBTITULO: Partial<Record<Tab, string>> = {
+  Aplicativo: "Como o app aparece para você",
+  Tema: "Cores, destaque e fonte",
+  Geral: "Prompt, limites e navegador",
+  Provedores: "Onde os modelos rodam",
+  Subagentes: "delegate_task: o agente escolhe o nível",
+  Maestro: "Planeja, despacha e valida",
+  Ferramentas: "O que está desligado não vai no tools nem no prompt",
+  MCP: "mcp.json na pasta de dados",
+};
+
+const input = "w-full rounded-[9px] border border-line bg-surface px-3 py-1.5 text-[13px] text-fg focus:border-focus focus:outline-none";
+const btn = "rounded-[9px] border border-line px-3 py-1.5 text-[12.5px] text-fg hover:bg-raised";
+const btnPrimary = "rounded-[9px] bg-accent px-4 py-1.5 text-[12.5px] font-medium text-accent-fg hover:brightness-110 disabled:opacity-40";
 
 function Toggle({ checked, onChange, label, hint, disabled }: { checked: boolean; onChange: (v: boolean) => void; label: string; hint?: string; disabled?: boolean }) {
   return (
-    <label className={`flex items-start gap-3 rounded-xl border border-line bg-surface p-3 ${disabled ? "opacity-50" : "cursor-pointer hover:border-[#3d3d3d]"}`}>
-      <input type="checkbox" className="mt-0.5 size-4 accent-white" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+    <label className={`flex items-start gap-3 rounded-xl border border-line bg-surface p-3 ${disabled ? "opacity-50" : "cursor-pointer hover:border-focus"}`}>
+      <input type="checkbox" className="mt-0.5 size-4 accent-[var(--accent)]" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
       <span className="min-w-0">
         <span className="block text-sm text-fg">{label}</span>
         {hint && <span className="mt-0.5 block text-xs text-muted">{hint}</span>}
@@ -81,13 +100,82 @@ function Toggle({ checked, onChange, label, hint, disabled }: { checked: boolean
   );
 }
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+function Field({ label, hint, children, div }: { label: string; hint?: string; children: React.ReactNode; div?: boolean }) {
+  // `div`: o controle são botões; num <label>, clicar no texto acionaria o primeiro deles.
+  const Tag = div ? "div" : "label";
   return (
-    <label className="block">
-      <span className="text-sm text-fg">{label}</span>
-      {hint && <span className="mt-0.5 block text-xs text-muted">{hint}</span>}
-      <div className="mt-1.5">{children}</div>
-    </label>
+    <Tag className="grid grid-cols-[280px_minmax(0,1fr)] items-start gap-6 border-b border-line py-3.5">
+      <span>
+        <span className="block text-[13.5px] text-fg">{label}</span>
+        {hint && <span className="mt-0.5 block text-xs leading-snug text-faint">{hint}</span>}
+      </span>
+      <div className="min-w-0">{children}</div>
+    </Tag>
+  );
+}
+
+/** Tema, destaque e fonte: aplicam na hora, sem Salvar. */
+function Aparencia() {
+  const [a, setA] = useState(lerAparencia);
+  const muda = (p: Partial<typeof a>) => {
+    const n = { ...a, ...p };
+    setA(n);
+    salvarAparencia(n);
+  };
+  const tema = TEMAS.find((t) => t.id === a.tema) ?? TEMAS[0];
+  return (
+    <div className="max-w-3xl">
+      <Field div label="Tema" hint="Cinzas e destaque da interface inteira. Vale na hora.">
+        <div className="grid grid-cols-3 gap-2">
+          {TEMAS.map((t) => (
+            <button key={t.id} type="button" onClick={() => muda({ tema: t.id, destaque: null })}
+                    className={`flex items-center gap-2.5 rounded-[9px] border px-2.5 py-2 text-left text-[12.5px] ${
+                      a.tema === t.id ? "border-accent-line bg-accent-soft text-fg" : "border-line text-fg-2 hover:border-focus hover:text-fg"}`}>
+              <span className="grid size-6 shrink-0 place-items-center rounded-md border border-line-strong" style={{ background: t.bg }}>
+                <span className="size-2.5 rounded-full" style={{ background: t.accent }} />
+              </span>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </Field>
+      <Field div label="Cor de destaque" hint="Botão principal, foco, item ativo e progresso. Em branco, a do tema.">
+        <div className="flex items-center gap-2">
+          <input type="color" value={a.destaque ?? tema.accent} onChange={(e) => muda({ destaque: e.target.value })}
+                 className="h-8 w-12 cursor-pointer rounded-[7px] border border-line bg-surface p-0.5" />
+          <span className="font-mono text-xs text-muted">{a.destaque ?? tema.accent}</span>
+          {a.destaque && <button type="button" className={btn} onClick={() => muda({ destaque: null })}>Usar a do tema</button>}
+        </div>
+      </Field>
+      <Field div label="Fonte" hint="Interface e código (números, caminhos, sementes).">
+        <div className="grid gap-2">
+          {FONTES.map((f) => (
+            <button key={f.id} type="button" onClick={() => muda({ fonte: f.id })}
+                    className={`rounded-[9px] border px-3 py-2 text-left ${a.fonte === f.id ? "border-accent-line bg-accent-soft" : "border-line hover:border-focus"}`}>
+              <span className="block text-[13px] text-fg">{f.label}</span>
+              <span className="block text-xs text-faint">{f.hint}</span>
+            </button>
+          ))}
+        </div>
+      </Field>
+    </div>
+  );
+}
+
+/** As iniciais do círculo no pé do trilho (ficam no localStorage, junto da aparência). */
+function Iniciais() {
+  const [a, setA] = useState(lerAparencia);
+  return (
+    <div className="max-w-3xl">
+      <Field label="Iniciais" hint="O círculo no pé do trilho de seções. Até 3 letras.">
+        <input className={`${input} w-24! font-mono uppercase`} maxLength={3} value={a.iniciais}
+               onChange={(e) => {
+                 const n = { ...a, iniciais: e.target.value.toUpperCase() };
+                 setA(n);
+                 salvarAparencia(n);
+               }} />
+      </Field>
+    </div>
   );
 }
 
@@ -153,33 +241,40 @@ export default function Settings(props: {
         return false;
       }}
       label="Configurações"
-      className="flex h-[85vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-line bg-bg"
+      className="flex h-[min(760px,90vh)] w-full max-w-[1080px] overflow-hidden rounded-[18px] border border-line-strong bg-bg shadow-dialog"
     >
-        <nav className="flex w-44 shrink-0 flex-col gap-0.5 border-r border-line bg-side p-3">
-          <div className="mb-2 px-2 text-sm font-medium">Configurações</div>
-          {TABS.map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`rounded-lg px-3 py-1.5 text-left text-sm ${tab === t ? "bg-raised text-fg" : "text-muted hover:bg-surface hover:text-fg"}`}
-            >
-              {t}
-            </button>
+        <nav className="flex w-[230px] shrink-0 flex-col overflow-y-auto border-r border-line bg-side p-3">
+          <div className="mb-1 px-2.5 pt-1 text-[15px] font-semibold text-fg">Configurações</div>
+          {GRUPOS.map((g) => (
+            <div key={g.titulo} className="mt-3">
+              <div className="px-2.5 pb-1 font-mono text-[10.5px] font-medium tracking-[.08em] text-faint uppercase">{g.titulo}</div>
+              {g.tabs.map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setTab(t)}
+                  className={`relative flex w-full rounded-[9px] px-2.5 py-1.5 text-left text-[13px] ${tab === t ? "bg-raised text-fg" : "text-muted hover:bg-surface hover:text-fg"}`}
+                >
+                  {tab === t && <span className="absolute top-1.5 bottom-1.5 -left-3 w-[3px] rounded-r-[3px] bg-accent" />}
+                  {t}
+                </button>
+              ))}
+            </div>
           ))}
-          <div className="mt-auto px-3 py-1.5">
+          <div className="mt-auto px-2.5 pt-4 pb-1">
             <Confirma
               rotulo="Restaurar padrões"
               pergunta="Voltar tudo ao .env?"
-              className="text-left text-xs text-muted hover:text-red-300"
+              className="text-left text-xs text-err hover:text-fg"
               onSim={() => void resetAll()}
             />
           </div>
         </nav>
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="flex items-center gap-3 border-b border-line px-5 py-3">
-            <h2 className="flex-1 text-sm text-muted">{tab}</h2>
-            {error && <span className="truncate text-sm text-red-300">{error}</span>}
+          <header className="flex items-center gap-3 border-b border-line px-6 py-3.5">
+            <h2 className="text-[17px] font-semibold text-fg">{tab}</h2>
+            <span className="min-w-0 flex-1 truncate text-[12.5px] text-faint">{SUBTITULO[tab]}</span>
+            {error && <span className="truncate text-sm text-err">{error}</span>}
             {descartar && (
               <span className="inline-flex items-center gap-1.5 text-xs">
                 <span className="text-amber-300">Descartar as alterações não salvas?</span>
@@ -187,22 +282,21 @@ export default function Settings(props: {
                 <button className="px-2 text-muted hover:text-fg" onClick={() => setDescartar(false)}>Continuar editando</button>
               </span>
             )}
-            {saved && <span className="text-sm text-emerald-400">{saved}</span>}
-            {tab !== "MCP" && tab !== "Memória" && (
-              <button className={btnPrimary} disabled={busy || !Object.keys(dirty).length} onClick={() => save()}>
-                Salvar
-              </button>
-            )}
-            <button onClick={props.onClose} className={btn}>
-              Fechar
+            {saved && <span className="text-sm text-ok">{saved}</span>}
+            <button onClick={props.onClose} title="Fechar (Esc)" aria-label="Fechar" className="rounded-[7px] p-1.5 text-faint hover:bg-raised hover:text-fg">
+              <X className="size-4" />
             </button>
           </header>
 
-          <div className="flex-1 overflow-y-auto p-5">
-            {!s ? (
+          <div className="flex-1 overflow-y-auto px-6 py-2">
+            {tab === "Aplicativo" ? (
+              <Iniciais />
+            ) : tab === "Tema" ? (
+              <Aparencia />
+            ) : !s ? (
               <div className="text-muted">Carregando…</div>
             ) : tab === "Geral" ? (
-              <div className="max-w-xl space-y-5">
+              <div className="max-w-3xl">
                 <Field label="Instruções personalizadas" hint="Vão no fim do system prompt, em todas as conversas.">
                   <textarea
                     rows={5}
@@ -269,6 +363,17 @@ export default function Settings(props: {
               </>
             )}
           </div>
+          <footer className="flex items-center gap-2 border-t border-line px-6 py-3">
+            <span className="flex-1 text-xs text-faint">Vale na próxima requisição, sem reiniciar.</span>
+            <button onClick={props.onClose} className={btn}>
+              {Object.keys(dirty).length ? "Cancelar" : "Fechar"}
+            </button>
+            {!["MCP", "Memória", "Aplicativo", "Tema"].includes(tab) && (
+              <button className={btnPrimary} disabled={busy || !Object.keys(dirty).length} onClick={() => save()}>
+                Salvar
+              </button>
+            )}
+          </footer>
         </div>
     </Modal>
   );
@@ -293,7 +398,7 @@ function Providers({ s, set }: { s: AppSettings; set: <K extends keyof AppSettin
     set("providers", s.providers.map((p, k) => (k === i ? { ...p, ...patch } : p)));
 
   return (
-    <div className="max-w-2xl space-y-4">
+    <div className="max-w-3xl">
       <p className="text-sm text-muted">
         Servidores compatíveis com a API da OpenAI. O tipo muda o jeito de falar: <span className="font-mono">ollama</span> usa
         a API nativa (respeita num_ctx), <span className="font-mono">lmstudio</span> lê a janela do modelo carregado,{" "}
@@ -496,7 +601,7 @@ function MaestroTab({ s, set }: { s: AppSettings; set: <K extends keyof AppSetti
     api.get<{ min_ctx_maestro?: number; min_ctx_worker?: number }>("/config").then(setMinimo).catch(() => {});
   }, []);
   return (
-    <div className="max-w-2xl space-y-5">
+    <div className="max-w-3xl">
       <Field label="Modelo padrão da Maestro" hint="Usado na seção Maestro. Separado do modelo do chat e do agente: trocar um não troca o outro. Vazio = o modelo escolhido no chat.">
         <div className="flex items-center gap-2 [&>div]:ml-0">
           <ModelPicker
@@ -722,7 +827,7 @@ function Subagents({ s, set }: { s: AppSettings; set: <K extends keyof AppSettin
   const change = (slot: (typeof SLOTS)[number]["key"], patch: Partial<{ provider: string; model: string }>) =>
     set("subagents", { ...s.subagents, [slot]: { ...spec(slot), ...patch } });
   return (
-    <div className="max-w-2xl space-y-5">
+    <div className="max-w-3xl">
       <p className="text-sm text-muted">
         O agente principal pode delegar uma subtarefa com <span className="font-mono">delegate_task</span> e escolhe o nível
         pela dificuldade. O subagente usa as mesmas ferramentas, aprovações e pasta de trabalho; só o relatório final dele
@@ -777,14 +882,14 @@ function Tools({ tools, disabled, onToggle }: { tools: ToolInfo[]; disabled: str
     groups.set(g, [...(groups.get(g) ?? []), t]);
   }
   return (
-    <div className="max-w-2xl space-y-5">
+    <div className="max-w-3xl">
       <p className="text-sm text-muted">
         Ferramentas desligadas não são enviadas ao modelo nem podem ser chamadas. O painel lateral sempre mostra a lista real.
       </p>
       {[...groups].map(([group, list]) => (
         <section key={group}>
           <div className="mb-2 flex items-center justify-between">
-            <h3 className="text-[11px] font-medium tracking-wider text-faint uppercase">{group}</h3>
+            <h3 className="text-[10.5px] font-medium tracking-[.08em] text-faint font-mono uppercase">{group}</h3>
             <button className="text-xs text-muted hover:text-fg" onClick={() => onToggle([...off].filter((n) => !list.some((t) => t.name === n)))}>
               ligar todas
             </button>
@@ -863,7 +968,7 @@ function ListEditor({ title, hint, placeholder, value, onChange }: {
 
 function Permissions({ s, save }: { s: AppSettings; save: (patch: Partial<AppSettings>) => void }) {
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="max-w-3xl">
       <div className="flex items-start gap-2 rounded-xl border border-line bg-surface p-3 text-sm text-muted">
         <Shield className="mt-0.5 size-4 shrink-0 text-amber-200" />
         <span>
@@ -932,7 +1037,7 @@ function Mcp({ mcp, onChanged }: { mcp: McpStatus | null; onChanged: () => void 
   }
 
   return (
-    <div className="max-w-2xl space-y-4">
+    <div className="max-w-3xl">
       <p className="text-sm text-muted">
         Servidores MCP, no mesmo formato do Claude Desktop. Comandos (<span className="font-mono">command</span>) rodam dentro do
         container do backend, que tem <span className="font-mono">npx</span> e <span className="font-mono">uvx</span>. Para
@@ -1160,7 +1265,7 @@ function MemoryTab() {
 
   const entities = m.entities.filter((e) => JSON.stringify(e).toLowerCase().includes(q.toLowerCase()));
   return (
-    <div className="max-w-2xl space-y-4">
+    <div className="max-w-3xl">
       <div className="flex items-center gap-3">
         <input className={input} placeholder="Buscar na memória" value={q} onChange={(e) => setQ(e.target.value)} />
         <button className={btn} onClick={load}>
