@@ -2062,10 +2062,10 @@ export default function App() {
       {/* Área de conteúdo: faixa superior com os botões do painel (como a barra de janela do Claude Desktop),
           e embaixo o chat com o painel lateral abrindo à direita, logo abaixo dos botões. */}
       <div className="flex min-w-0 flex-1 flex-col bg-bg">
-        <div className={`arrasta livre-controles flex h-12 shrink-0 items-center gap-2 px-3 ${sidebarHidden ? "pl-12" : ""}`}>
+        <div className={`arrasta livre-controles @container/cab flex h-12 shrink-0 items-center gap-2 px-3 ${sidebarHidden ? "pl-12" : ""}`}>
           {/* Esquerda: título, pasta e atalhos; direita: botões do painel (tudo numa faixa só, como no Claude Desktop). */}
-          <div className="flex min-w-0 flex-1 items-center gap-2">
-          <span className="truncate text-sm font-medium text-fg" title={conv?.title}>
+          <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+          <span className="min-w-12 truncate text-sm font-medium text-fg" title={conv?.title}>
             {conv?.title ?? "Nova conversa"}
           </span>
           {agentica && (
