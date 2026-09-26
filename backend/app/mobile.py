@@ -5,7 +5,7 @@ Só o que o código compartilhado chama, sem efeito.
 from __future__ import annotations
 
 
-def notify(ev: dict, conv_id: int, run_id: str) -> None:
+def notify(ev: dict, conv_id: int, run_id: str, maestro: bool = False) -> None:
     return None
 
 
