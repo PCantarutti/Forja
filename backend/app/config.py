@@ -106,3 +106,46 @@ MODEL_LIFECYCLE = "persistent"      # persistent | unload_after_task (Etapa 4)
 # prompt no meio do trabalho. Modelo de nuvem fica de fora: a janela dele não é o usuário que escolhe.
 MAESTRO_MIN_CTX = int(os.getenv("MAESTRO_MIN_CTX", "32768"))
 WORKER_MIN_CTX = int(os.getenv("WORKER_MIN_CTX", "16384"))
+
+# ------------------------------------------------------------------ vindo do Forja Desktop (E4–E17)
+# Aqui não há IA local embutida nem sandbox do backend (o isolamento é o do forja-runner): os valores
+# existem porque o código compartilhado e as configurações os leem.
+WORKSPACE_PADRAO: str | None = None
+SANDBOX_MEMORIA_MB = -1
+SANDBOX_PROCESSOS = 128
+SANDBOX_CPU = 80
+SANDBOX_ISOLADO = "desligado"
+SANDBOX_MOTOR = "auto"
+SANDBOX_WSL_DISTRO = ""
+REVISAO = "avisa"  # revisão de código por critério de aceite (off | avisa | bloqueia)
+AUTONOMO: dict = {}  # opções do trabalho autônomo (autonomo.PADRAO preenche o resto)
+MCP_SERVIDOR = False
+MCP_PERMISSAO = "manual"
+NUVEM_POR_PAPEL = {"explorador": False, "revisor": False, "visual": False}
+CACHE_DISCO = False  # cache do prompt em disco é do llama.cpp embutido
+CACHE_DISCO_GB = 0.0
+DESCARREGAR_OCIOSO_MIN = 0
+LOCAL_PORT = int(os.getenv("FORJA_LOCAL_PORT", "8077"))
+
+# Tetos proporcionais à janela: cada execução põe aqui a janela real do modelo (tokens).
+import contextvars as _cv  # noqa: E402
+
+JANELA: _cv.ContextVar[int | None] = _cv.ContextVar("forja_janela", default=None)
+CHARS_POR_TOKEN = 3
+FATOR_TETOS = 1.0
+PERFIL_HARDWARE = "auto"
+
+
+def teto(padrao: int, fracao: float) -> int:
+    """Teto em caracteres: o menor entre o padrão e `fracao` da janela real (sem janela conhecida, o padrão)."""
+    janela = JANELA.get()
+    if not janela:
+        return padrao
+    return max(min(padrao, 1_000), min(padrao, int(janela * fracao * CHARS_POR_TOKEN * FATOR_TETOS)))
+
+
+def teto_linhas(padrao: int, fracao: float, chars_por_linha: int = 50) -> int:
+    janela = JANELA.get()
+    if not janela:
+        return padrao
+    return max(min(padrao, 50), min(padrao, int(janela * fracao * CHARS_POR_TOKEN * FATOR_TETOS / chars_por_linha)))

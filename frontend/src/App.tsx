@@ -16,6 +16,7 @@ import { CaixaPrompt, DireitaPrompt, RodapePrompt, campoPrompt, enviarClasse, pa
 import { GRADE_VAZIA, abertos, abrir as abrirTile, fechar as fecharTile, soltos, type Grade } from "./components/tiles";
 import { executarNoTerminal } from "./components/TerminalPanel";
 import SettingsDialog from "./components/Settings";
+import BoardView, { CardNoChat } from "./components/BoardView";
 import FolderPicker, { folderName } from "./components/FolderPicker";
 import ModelPicker from "./components/ModelPicker";
 import ContextRing from "./components/ContextRing";
@@ -23,6 +24,8 @@ import GoalStrip from "./components/GoalStrip";
 import Trajetoria from "./components/Trajetoria";
 import TodosBar from "./components/TodosBar";
 import Confirma from "./components/Confirma";
+import { Modal } from "./components/Modal";
+import { LogoMark } from "./components/Logo";
 import { lerAparencia } from "./aparencia";
 import {
   ModeWarning,
@@ -37,6 +40,8 @@ import {
   Attachments,
   CopyButton,
   EventNotice,
+  Reconectando,
+  TENTATIVA,
   NOTA_DO_AGENTE,
   Markdown,
   setFileConv,
@@ -56,7 +61,7 @@ import {
   turnosDe,
   type TurnStats,
 } from "./components/MessageView";
-import { ArrowUp, ChevronDown, Edit, ExternalLink, FolderOpen, Laptop, Paperclip, Refresh, Square, Undo, PanelLeft } from "./components/icons";
+import { ArrowUp, ChevronDown, Edit, ExternalLink, FolderOpen, Globe, Laptop, Paperclip, Quadro, Refresh, Square, Undo, X, PanelLeft } from "./components/icons";
 import type { Activity, Approval, Attachment, BrowserState, Conversation, Draft, MaestroBoard, Message, ModelPhase, RunnerStatus, Settings, Skill, Stats, SubState, Task, ToolCall, ToolsSent } from "./types";
 import MaestroView, { ABAS_MAESTRO, SO_MAESTRO } from "./components/MaestroView";
 import Saudacao from "./components/Saudacao";
@@ -86,6 +91,7 @@ type Config = {
   num_ctx: number;
   default_workspace?: string;
   picker_url?: string;
+  workspace_padrao?: string | null;  // pasta de conversa nova de Agente/Maestro (Configurações); null = escolher
   min_ctx_maestro?: number;  // janela mínima de modelo local para a Maestro (o seletor barra abaixo)
   maestro_model?: { provider: string; model: string };  // modelo padrão da Maestro (Configurações)
 };
@@ -205,6 +211,20 @@ const FASE: Record<string, (a: Record<string, unknown>) => string | undefined> =
   write_file: (a) => `Escrevendo ${arquivo(a.path) ?? "um arquivo"}`,
   edit_file: (a) => `Editando ${arquivo(a.path) ?? "um arquivo"}`,
   list_dir: (a) => `Listando ${trecho(a.path, 40) ?? "a pasta"}`,
+  explore: (a) => `Explorando: ${trecho(a.question, 50) ?? "o código"}`,
+  code_search: (a) => `Procurando no código: ${trecho(a.query, 40) ?? "…"}`,
+  board_card: (a) => `Criando card no board: ${trecho(a.titulo, 40) ?? "…"}`,
+  tree: (a) => `Olhando a árvore de ${trecho(a.path, 40) ?? "pastas do projeto"}`,
+  ast: (a) => ({ outline: `Lendo a estrutura de ${arquivo(a.path) ?? "um arquivo"}`,
+                 symbol: `Lendo ${trecho(a.name, 30) ?? "um símbolo"} em ${arquivo(a.path) ?? "um arquivo"}`,
+                 node_at: `Localizando o código na linha ${String(a.line ?? "")}`,
+                 query: "Buscando pela estrutura do código" } as Record<string, string>)[String(a.operation)]
+    ?? "Analisando o código",
+  imports: (a) => ({ of: `Vendo o que ${arquivo(a.path) ?? "o arquivo"} importa`,
+                     importers: `Vendo quem importa ${arquivo(a.path) ?? "o arquivo"}`,
+                     graph: "Montando o grafo de imports",
+                     cycles: "Procurando ciclos de import" } as Record<string, string>)[String(a.operation)]
+    ?? "Analisando os imports",
   list_agents: () => "Conferindo os subagentes",
   lsp: (a) => `Consultando o language server (${String(a.operation ?? "")})`,
   session_search: (a) => `Procurando em conversas anteriores ${trecho(a.query, 30) ?? ""}`.trim(),
@@ -275,6 +295,8 @@ const FASE: Record<string, (a: Record<string, unknown>) => string | undefined> =
   forget: (a) => `Apagando a mem\u00f3ria ${trecho(a.name, 30) ?? ""}`.trim(),
   update_tasks: () => "Atualizando a lista de tarefas",
   image_generate: (a) => `Gerando a imagem “${trecho(a.prompt, 40) ?? "pedida"}”`,
+  video_generate: (a) => `Gerando o vídeo “${trecho(a.prompt, 40) ?? "pedido"}”`,
+  imagens_pendentes: (a) => `Registrando ${Array.isArray(a.slots) ? a.slots.length : ""} slots de imagem`,
   delegate_task: (a) => `Delegando: ${trecho(a.task, 44) ?? "uma tarefa"}`,
   exit_plan_mode: () => "Montando o plano",
   // Maestro: sem frase aqui, a linha de status viraria "Usando run_task" e esconderia o alvo.
@@ -289,6 +311,14 @@ const FASE: Record<string, (a: Record<string, unknown>) => string | undefined> =
 export default function App() {
   const [config, setConfig] = useState<Config>({ providers: [], num_ctx: 32768 });
   const [showSettings, setShowSettings] = useState(false);
+  const [showBoard, setShowBoard] = useState(false);
+  const [boardFoco, setBoardFoco] = useState<{ id: number; projeto: string } | null>(null);
+  // Card na resposta da IA (CardNoChat): clicar abre o board no projeto dele, com o card aberto.
+  useEffect(() => {
+    const abre = (e: Event) => { setBoardFoco((e as CustomEvent).detail); setShowBoard(true); };
+    window.addEventListener("forja:board", abre);
+    return () => window.removeEventListener("forja:board", abre);
+  }, []);
   const [allTools, setAllTools] = useState<ToolInfo[]>([]);
   const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [geral, setSettings] = useState<Settings>(loadSettings);
@@ -307,7 +337,9 @@ export default function App() {
   const [nativeError, setNativeError] = useState("");
   const [picking, setPicking] = useState(false); // diálogo nativo aberto no sistema
   // Pasta escolhida antes de a conversa existir (tela inicial); vira a pasta da conversa no 1º envio.
-  const [pendingWs, setPendingWs] = useState<string | null>(() => localStorage.getItem("forja.workspace"));
+  // Pasta da conversa nova (Agente/Maestro). Começa na pasta padrão das Configurações, se houver; sem ela, o
+  // envio é barrado até escolher (a última pasta usada não é mais herdada).
+  const [pendingWs, setPendingWs] = useState<string | null>(null);
   const [subSteps, setSubSteps] = useState<Record<string, SubState>>({});
   const [board, setBoard] = useState<MaestroBoard | null>(null);  // árvore de tarefas do Maestro
   // Troca de modelo local em curso. Carregar um GGUF leva minutos: sem isto o cockpit parece travado.
@@ -456,12 +488,22 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (pendingWs) localStorage.setItem("forja.workspace", pendingWs);
-    else localStorage.removeItem("forja.workspace");
-  }, [pendingWs]);
+    if (currentId === null && config.workspace_padrao !== undefined) setPendingWs((p) => p ?? config.workspace_padrao ?? null);
+  }, [config.workspace_padrao]);
 
   // Miniaturas/anexos são servidos da pasta da conversa aberta.
   useEffect(() => setFileConv(currentId), [currentId]);
+  // E16-C: trabalho autônomo por conversa (o menu Modo mostra; o backend guarda)
+  const [autonomo, setAutonomo] = useState(false);
+  useEffect(() => {
+    setAutonomo(false);
+    if (currentId !== null) api.get<{ ligado: boolean }>(`/conversations/${currentId}/autonomo`).then((r) => setAutonomo(r.ligado)).catch(() => {});
+  }, [currentId]);
+  const mudaAutonomo = (v: boolean) => {
+    if (currentId === null) return;
+    setAutonomo(v);
+    api.put<{ ligado: boolean }>(`/conversations/${currentId}/autonomo`, { ligado: v }).then((r) => setAutonomo(r.ligado)).catch(() => setAutonomo(!v));
+  };
 
   // Ao trocar de conversa, restaura o estado da coluna direita dela. Rascunho (sem conversa) = recolhida.
   // Conversa recém-criada a partir do rascunho herda o estado atual (ex.: agente abriu o navegador no 1º turno).
@@ -483,6 +525,19 @@ export default function App() {
 
   // Cada conversa tem a própria sessão de navegador; "0" é o rascunho da tela inicial.
   const browserKey = currentId === null ? "0" : String(currentId);
+  // Link clicado na resposta (Sources.pedeLink): pergunta se abre no navegador do Forja ou no do sistema.
+  const [linkAberto, setLinkAberto] = useState<string | null>(null);
+  useEffect(() => {
+    const pede = (e: Event) => setLinkAberto((e as CustomEvent<string>).detail);
+    window.addEventListener("forja:link", pede);
+    return () => window.removeEventListener("forja:link", pede);
+  }, []);
+  function abreLinkNoForja(url: string) {
+    setLinkAberto(null);
+    setBrowserOpen(true);
+    abrir("browser");
+    api.post(`/browser/navigate?conv=${browserKey}`, { url }).catch((e) => setError(e.message));
+  }
   useEffect(() => {
     api.get<BrowserState>(`/browser?conv=${browserKey}`).then((s) => setBrowserOpen(s.open)).catch(() => setBrowserOpen(false));
   }, [browserKey]);
@@ -528,16 +583,23 @@ export default function App() {
         .catch(() => {});
     carrega();
     const t = setInterval(carrega, 4000);
-    return () => clearInterval(t);
+    // Janela escondida tem o timer estrangulado pelo Chromium: ao voltar, confere na hora.
+    window.addEventListener("focus", carrega);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("focus", carrega);
+    };
   }, []);
 
   // Avisos que não dependem da conversa aberta na tela: aprovação esperando (inclusive do Worker) e
   // Maestro que terminou. Vêm da atividade, que cobre todas as conversas; a aberta já avisa pelo stream.
   const atividadeAnterior = useRef<Activity | null>(null);
+  const turnosVistos = useRef(new Set<string>());
   useEffect(() => {
     const antes = atividadeAnterior.current;
     atividadeAnterior.current = activity;
     if (!antes) return;
+    if (activity.lista && antes.lista && activity.lista !== antes.lista) refreshConversations();
     const conv = (id: number) => conversationsRef.current.find((c) => c.id === id);
     const abrir = (id: number) => () => openConversation(id);
     const rodandoAntes = new Map(antes.conversations.filter((c) => c.running).map((c) => [c.id, c]));
@@ -552,10 +614,24 @@ export default function App() {
                `${conv(c.id)?.title ?? "Conversa"}: ${c.waiting} esperando você`, true, abrir(c.id));
       }
     }
+    // "IA local" com outro nome no seletor (o modelo foi trocado pelo celular ou pela API): o llama-server só
+    // tem um modelo, então a resposta viria dele com o rótulo do antigo. O seletor passa a mostrar o carregado.
+    if (activity.local && activity.local_alias && settings.provider === "local" && settings.model !== activity.local_alias
+        && secaoRef.current !== "maestro")
+      setSettings((s) => ({ ...s, model: activity.local_alias! }));
     const agora = new Set(activity.conversations.filter((c) => c.running).map((c) => c.id));
-    // Turno aberto pelo servidor (aviso de processo em segundo plano que terminou) na conversa da tela:
-    // conecta no stream dele, como no F5.
-    if (currentId && !running && agora.has(currentId) && !rodandoAntes.has(currentId)) openConversation(currentId);
+    // Turno que esta tela não disparou (o celular, ou aviso de processo em segundo plano) na conversa aberta:
+    // rodando, conecta no stream dele como no F5; já terminado (durou menos que o intervalo), recarrega.
+    const turno = activity.conversations.find((c) => c.id === currentId)?.run;
+    if (currentId && !running && turno && turno !== runId.current && !turnosVistos.current.has(turno)) {
+      turnosVistos.current.add(turno);
+      if (agora.has(currentId)) openConversation(currentId);
+      else {
+        const id = currentId;
+        api.get<Live>(`/conversations/${id}/live`).then((l) => abertaRef.current === id && setMessages(l.messages)).catch(() => {});
+        refreshConversations();
+      }
+    }
     for (const id of rodandoAntes.keys()) {
       if (agora.has(id) || conv(id)?.kind !== "maestro") continue;
       api.get<MaestroBoard>(`/maestro/${id}/board`).then((b) => {
@@ -581,11 +657,14 @@ export default function App() {
   const secaoRef = useRef(section);
   const secaoEscolhida = useRef(false);  // true depois que a pessoa clica numa aba
   secaoRef.current = section;
+  // A conversa aberta, para a lista não esconder a dela enquanto ainda está vazia (só com anexo).
+  const abertaRef = useRef<number | null>(null);
+  abertaRef.current = currentId;
 
   function refreshConversations(kind: Section = section) {
     const meu = ++pedidoConversas.current;
     api
-      .get<Conversation[]>(`/conversations?kind=${kind}`)
+      .get<Conversation[]>(`/conversations?kind=${kind}${abertaRef.current ? `&keep=${abertaRef.current}` : ""}`)
       .then((list) => {
         if (meu !== pedidoConversas.current) return;  // resposta atrasada de outra seção
         conversationsRef.current = list;
@@ -777,6 +856,7 @@ export default function App() {
     setCtx(null);
     setCheckpoints({});
     setChangesCount(0);
+    setPendingWs(config.workspace_padrao ?? null);
   }
 
   async function deleteConversation(id: number) {
@@ -974,6 +1054,7 @@ export default function App() {
   async function ensureConversation(): Promise<number> {
     if (currentId !== null) return currentId;
     const c = await api.post<Conversation>("/conversations", { workspace: pendingWs, kind: section });
+    abertaRef.current = c.id;
     setCurrentId(c.id);
     setMessages([]);
     refreshConversations();
@@ -1060,6 +1141,7 @@ export default function App() {
     // sem erro nenhum na tela. O dataTransfer do arrastar tem o mesmo prazo de validade.
     const lista = Array.from(files);
     if (!lista.length) return;
+    if (semPasta) return setError("Escolha uma pasta de trabalho antes de anexar: o anexo vai para dentro dela.");
     setUploading(true);
     const conv = await ensureConversation().catch((e) => {
       setError(e.message);
@@ -1115,8 +1197,13 @@ export default function App() {
   }
 
   // Menu `/`: aparece quando o campo começa com "/" e ainda é uma linha só.
-  const slashQuery = input.startsWith("/") && !input.includes("\n") ? input.slice(1).split(" ")[0].toLowerCase() : null;
-  const slashMatches = slashQuery === null ? [] : skills.filter((s) => s.name.toLowerCase().startsWith(slashQuery));
+  const slashQuery = input.startsWith("/") && !input.startsWith("/skill:") && !input.includes("\n") ? input.slice(1).split(" ")[0].toLowerCase() : null;
+  // `/skill:nome` em qualquer ponto do texto (várias por mensagem): só skills de prompt; o menu completa o nome.
+  const inlineQuery = /(?:^|\s)\/skill:([\w.-]*)$/.exec(input)?.[1]?.toLowerCase() ?? null;
+  const slashMatches = inlineQuery !== null
+    ? skills.filter((s) => s.kind === "prompt" && s.name.toLowerCase().startsWith(inlineQuery))
+    : slashQuery === null ? [] : skills.filter((s) => s.name.toLowerCase().startsWith(slashQuery));
+  const menuSkill = slashQuery !== null || inlineQuery !== null;
 
   // Menu `@`: caminhos da pasta da conversa, enquanto o @ é a última coisa digitada.
   const mentionQuery = /(?:^|\s)@(\S*)$/.exec(input)?.[1] ?? null;
@@ -1159,6 +1246,12 @@ export default function App() {
       : [];
 
   async function applySkill(s: Skill): Promise<void> {
+    if (inlineQuery !== null) {
+      setInput((v) => v.replace(/\/skill:[\w.-]*$/, `/skill:${s.name} `));
+      setSlashIndex(0);
+      requestAnimationFrame(() => composer.current?.focus());
+      return;
+    }
     const args = input.slice(1).split(" ").slice(1).join(" ");
     setInput("");
     setSlashIndex(0);
@@ -1180,7 +1273,7 @@ export default function App() {
 
   async function send(texto?: string, skill = false): Promise<void> {
     const content = (texto ?? input).trim();
-    if (!skill && slashQuery !== null && slashMatches.length) return applySkill(slashMatches[slashIndex] ?? slashMatches[0]);
+    if (!skill && menuSkill && slashMatches.length) return applySkill(slashMatches[slashIndex] ?? slashMatches[0]);
     if (!content && !attachments.length) return;
     colar();  // mandar mensagem é dizer "quero ver o que vem agora": volta para o fim da conversa
     if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
@@ -1197,6 +1290,10 @@ export default function App() {
     }
     if (!settings.model) {
       setError("Escolha um modelo primeiro.");
+      return;
+    }
+    if (semPasta) {
+      setError("Escolha uma pasta de trabalho antes de enviar (no seletor de pasta, no topo).");
       return;
     }
     setError("");
@@ -1341,6 +1438,14 @@ export default function App() {
     return { used, max, out: lastTurn?.tokens ?? null, avg, models, sessao, partes };
   }, [messages, turns, ctx]);
 
+  /** Abre uma conversa de outra seção (ex.: Imagens ⇄ o chat que pediu as imagens). */
+  function irParaConversa(id: number, kind: Section) {
+    secaoEscolhida.current = true;
+    if (kind !== section) setSection(kind);
+    openConversation(id);
+    refreshConversations(kind);
+  }
+
   function changeSection(next: Section) {
     secaoEscolhida.current = true;
     if (next === section) return;
@@ -1349,24 +1454,30 @@ export default function App() {
   }
 
   const conv = conversations.find((c) => c.id === currentId);
-  const wsLabel = (conv ? conv.workspace : pendingWs) ?? config.default_workspace ?? "pasta padrão";
+  // Conversa aberta sem pasta = das antigas, que rodam na raiz interna; a nova sem pasta ainda não pode enviar.
+  const wsLabel = conv ? conv.workspace ?? config.default_workspace ?? "pasta padrão" : pendingWs;
 
   // O turno atual ainda está rodando: não mostra estatísticas dele até terminar.
   const lastUserIndex = messages.map((m) => m.role).lastIndexOf("user");
 
   // Linha de estatísticas sempre presente enquanto roda: iterações já concluídas do turno (valores reais do
   // provider) + a geração em andamento (tokens contados ao vivo, tempo correndo, t/s atual).
+  // Conversa do Claude por MCP: quem responde é ele, não o modelo escolhido aqui. O Run dela fica aberto
+  // enquanto ele trabalha, e sem isto a linha "ao vivo" mostrava o modelo do Maestro com ~0 tokens.
+  const doClaude = (conv?.origem as any)?.externo === "claude";
+  // o modelo do Claude (do transcript dele, via hook); o do Forja não é quem responde nesta conversa
+  const modeloVivo = doClaude ? ((conv?.origem as any)?.modelo ?? "Claude (via MCP)") : settings.model;
   const liveStats: TurnStats | null = (() => {
     void tick; // recalcula a cada 250 ms
     if (!running) return null;
     const done = messages.slice(lastUserIndex + 1).flatMap((m) => (m.role === "assistant" && m.meta?.stats ? [m.meta.stats as Stats] : []));
-    const base: TurnStats = done.length ? aggregate(done) : { model: settings.model, tokens: 0, seconds: 0, tps: null, estimated: true };
+    const base: TurnStats = done.length ? aggregate(done) : { model: modeloVivo, tokens: 0, seconds: 0, tps: null, estimated: true };
     const g = liveGen.current;
-    if (!g) return { ...base, model: settings.model || base.model, estimated: true };
+    if (!g) return { ...base, model: modeloVivo || base.model, estimated: true };
     const now = Date.now();
     const gen = g.tFirst ? (now - g.tFirst) / 1000 : 0;
     return {
-      model: settings.model || base.model,
+      model: modeloVivo || base.model,
       tokens: base.tokens + g.tokens,
       seconds: base.seconds + (now - g.t0) / 1000,
       tps: gen > 0.3 ? g.tokens / gen : base.tps,
@@ -1443,6 +1554,7 @@ export default function App() {
   // Agente e Maestro agem numa pasta de trabalho: os dois têm seletor de pasta, modos de permissão,
   // aviso de modo e Shift+Tab. Uma condição só, para os dois não divergirem de novo.
   const agentica = section === "agent" || section === "maestro";
+  const semPasta = agentica && currentId === null && !pendingWs;
   // A conversa desenhada como no chat. Função de uma lista de mensagens, e não bloco fixo, porque o
   // cockpit do Maestro desenha a do Worker com ela também: o mesmo "Raciocinou ›", os mesmos blocos
   // de ferramenta com diff, a mesma linha de tokens e t/s — igual por construção, não por imitação.
@@ -1511,8 +1623,14 @@ export default function App() {
                     )}
                   </div>
                 );
-              if (m.role === "event")
-                return String(m.meta?.kind ?? "") in NOTA_DO_AGENTE || m.meta?.kind === "tasks" ? null : <EventNotice key={m.id} m={m} />; // essas vão no bloco de atividade
+              if (m.role === "event") {
+                if (String(m.meta?.kind ?? "") in NOTA_DO_AGENTE || m.meta?.kind === "tasks") return null; // essas vão no bloco de atividade
+                // Cada tentativa de reconexão grava um evento: na tela é um cartão só, o da tentativa atual. Some
+                // quando conecta (vem outra mensagem); se esgotar, fica o erro final, que já diz o motivo.
+                const tentativa = TENTATIVA.exec(m.content ?? "");
+                if (tentativa) return i === messages.length - 1 ? <Reconectando key={m.id} texto={m.content ?? ""} n={tentativa[1]} /> : null;
+                return <EventNotice key={m.id} m={m} />;
+              }
               if (m.role !== "assistant") return null;
               const turn = tur.get(i);
               const showTurn = turn && !(vivo && i > lu);
@@ -1580,6 +1698,10 @@ export default function App() {
                   )}
                   {showTurn && (
                     <div className="mt-4 space-y-1.5">
+                      {/* cards que a IA criou no board neste turno: no fim da resposta, antes dos números */}
+                      {turn.cards.length > 0 && (
+                        <div className="mb-3">{turn.cards.map((c) => <CardNoChat key={c.id} card={c} />)}</div>
+                      )}
                       {turn.stats && (
                         <StatsRow
                           s={turn.stats}
@@ -1719,6 +1841,30 @@ export default function App() {
   // Maestro mostra esta mesma na coluna da Maestro.
   const conversaBlock = (
   <>
+  {linkAberto && (
+    <Modal onClose={() => setLinkAberto(null)} label="Abrir link" className="w-full max-w-sm space-y-4 rounded-xl border border-line bg-surface p-5">
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-base font-medium text-fg">Abrir link</div>
+          <div className="mt-1 truncate font-mono text-xs text-muted" title={linkAberto}>{linkAberto}</div>
+        </div>
+        <button onClick={() => setLinkAberto(null)} title="Fechar" aria-label="Fechar"
+                className="-mr-1 -mt-1 rounded-lg p-1.5 text-faint hover:bg-raised hover:text-fg">
+          <X className="size-4" />
+        </button>
+      </div>
+      <div className="flex flex-col gap-2">
+        <button autoFocus onClick={() => abreLinkNoForja(linkAberto)}
+                className="flex items-center gap-2.5 rounded-xl bg-accent px-4 py-2.5 text-sm font-medium text-accent-fg hover:brightness-110">
+          <Globe className="size-4" /> Navegador do Forja
+        </button>
+        <button onClick={() => { window.open(linkAberto, "_blank"); setLinkAberto(null); }}
+                className="flex items-center gap-2.5 rounded-xl border border-line px-4 py-2.5 text-sm text-fg hover:bg-raised">
+          <ExternalLink className="size-4" /> Navegador do sistema
+        </button>
+      </div>
+    </Modal>
+  )}
   {showFolder && (
     <FolderPicker
       current={conv ? conv.workspace ?? null : pendingWs}
@@ -1753,13 +1899,16 @@ export default function App() {
               <>
                 <b className="font-medium text-fg">Agente</b>
                 <span className="text-faint">·</span>
-                <span>lê e escreve em <span className="font-mono text-fg">{wsLabel}</span></span>
+                {wsLabel ? <span>lê e escreve em <span className="font-mono text-fg">{wsLabel}</span></span> : <span className="text-warn">escolha uma pasta de trabalho no topo para começar</span>}
               </>
             ) : section === "maestro" ? (
               <>
                 <b className="font-medium text-fg">Maestro</b>
                 <span className="text-faint">·</span>
-                <span>planeja, delega aos Workers e valida em <span className="font-mono text-fg">{wsLabel}</span></span>
+                <span>
+                  planeja, delega aos Workers e valida em{" "}
+                  {wsLabel ? <span className="font-mono text-fg">{wsLabel}</span> : <span className="text-warn">uma pasta — escolha no topo</span>}
+                </span>
               </>
             ) : (
               <>
@@ -1830,7 +1979,7 @@ export default function App() {
             ))}
           </div>
         )}
-        {slashQuery !== null && slashMatches.length > 0 && (
+        {menuSkill && slashMatches.length > 0 && (
           <div className="mb-2 max-h-56 overflow-y-auto rounded-xl border border-line bg-bg py-1 text-sm">
             {slashMatches.map((s, i) => (
               <button
@@ -1879,7 +2028,7 @@ export default function App() {
                 return setMentionHits([]);
               }
             }
-            if (slashQuery !== null && slashMatches.length) {
+            if (menuSkill && slashMatches.length) {
               if (e.key === "ArrowDown") {
                 e.preventDefault();
                 return setSlashIndex((i) => (i + 1) % slashMatches.length);
@@ -1890,9 +2039,10 @@ export default function App() {
               }
               if (e.key === "Tab") {
                 e.preventDefault();
+                if (inlineQuery !== null) return applySkill(slashMatches[slashIndex] ?? slashMatches[0]);
                 return setInput(`/${slashMatches[slashIndex]?.name ?? slashMatches[0].name} `);
               }
-              if (e.key === "Escape") {
+              if (e.key === "Escape" && inlineQuery === null) {
                 e.preventDefault();
                 return setInput("");
               }
@@ -1908,7 +2058,7 @@ export default function App() {
           }}
           ref={composer}
           rows={2}
-          placeholder={running ? "Mensagem para o próximo passo do agente (entra na fila)…" : section === "maestro" ? "Qual é o objetivo? A Maestro planeja e delega ( / para comandos, @ para arquivos )" : section === "agent" ? "Peça algo ao agente... ( / para comandos, @ para arquivos )" : "Digite uma mensagem..."}
+          placeholder={doClaude ? "Mensagem para o Claude (chega a ele na próxima ferramenta que ele chamar)…" : running ? "Mensagem para o próximo passo do agente (entra na fila)…" : section === "maestro" ? "Qual é o objetivo? A Maestro planeja e delega ( / para comandos, @ para arquivos )" : section === "agent" ? "Peça algo ao agente... ( / para comandos, @ para arquivos )" : "Digite uma mensagem..."}
           className={campoPrompt}
         />
         <RodapePrompt>
@@ -1931,6 +2081,8 @@ export default function App() {
             onEffort={(effort) => update({ effort })}
             running={running}
             semExtremo={section === "maestro"}
+            autonomo={agentica && currentId !== null ? autonomo : undefined}
+            onAutonomo={agentica && currentId !== null ? mudaAutonomo : undefined}
           />
           <ContextRing
             used={summary.used}
@@ -2059,6 +2211,24 @@ export default function App() {
 
   );
 
+  // Onde o cabeçalho começa na janela: o CSS (.cab-centro) usa para pôr o indicador no centro da janela.
+  const cabecalho = useRef<HTMLDivElement>(null);
+  const indicador = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = cabecalho.current, ind = indicador.current;
+    if (!el || !ind) return;
+    const mede = () => {
+      el.style.setProperty("--x0", `${el.getBoundingClientRect().left}px`);
+      el.style.setProperty("--wi", `${ind.offsetWidth}px`);
+      el.style.setProperty("--wr", `${(el.lastElementChild as HTMLElement).offsetWidth}px`);
+    };
+    const ro = new ResizeObserver(mede);
+    ro.observe(el);
+    ro.observe(ind);
+    ro.observe(el.lastElementChild!);
+    return () => ro.disconnect();
+  }, []);
+
   return (
     <div className="flex h-full">
       <SectionRail
@@ -2087,13 +2257,31 @@ export default function App() {
       {showSettings && (
         <SettingsDialog onClose={() => setShowSettings(false)} tools={allTools} mcp={mcp} onChanged={refreshTools} />
       )}
+      {showBoard && (
+        <BoardView
+          key={boardFoco?.id ?? "board"}
+          pasta={boardFoco?.projeto ?? (conv ? conv.workspace : pendingWs) ?? null}
+          foco={boardFoco?.id}
+          carimbo={activity.board}
+          onClose={() => { setShowBoard(false); setBoardFoco(null); }}
+          onAbrirConversa={async (id) => {
+            setShowBoard(false);
+            try {
+              const c = await api.get<{ kind?: string }>(`/conversations/${id}`);
+              irParaConversa(id, (c.kind as Section) || "agent");
+            } catch (e: any) {
+              setError(e.message);
+            }
+          }}
+        />
+      )}
 
       {/* Área de conteúdo: faixa superior com os botões do painel (como a barra de janela do Claude Desktop),
           e embaixo o chat com o painel lateral abrindo à direita, logo abaixo dos botões. */}
-      <div className="flex min-w-0 flex-1 flex-col bg-bg">
-        <div className={`arrasta livre-controles @container/cab flex h-12 shrink-0 items-center gap-2 px-3 ${sidebarHidden ? "pl-12" : ""}`}>
+      <div className="@container/cab flex min-w-0 flex-1 flex-col bg-bg">
+        <div ref={cabecalho} className={`arrasta livre-controles cab-centro grid h-12 shrink-0 items-center gap-3 px-3`}>
           {/* Esquerda: título, pasta e atalhos; direita: botões do painel (tudo numa faixa só, como no Claude Desktop). */}
-          <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+          <div className={`flex min-w-0 items-center gap-2 overflow-hidden ${sidebarHidden ? "pl-9" : ""}`}>
           <span className="min-w-12 truncate text-sm font-medium text-fg" title={conv?.title}>
             {conv?.title ?? "Nova conversa"}
           </span>
@@ -2101,11 +2289,11 @@ export default function App() {
           <button
             onClick={chooseFolder}
             disabled={running || picking}
-            title={`Pasta de trabalho: ${wsLabel}\nClique para trocar`}
-            className="inline-flex max-w-56 shrink-0 items-center gap-1 rounded-[7px] border border-line bg-raised px-2 py-[3px] font-mono text-[11.5px] text-fg-2 hover:border-focus hover:text-fg disabled:opacity-50"
+            title={wsLabel ? `Pasta de trabalho: ${wsLabel}\nClique para trocar` : "Nenhuma pasta escolhida: clique para escolher"}
+            className={`inline-flex min-w-0 max-w-56 items-center gap-1 rounded-[7px] border px-2 py-[3px] font-mono text-[11.5px] disabled:opacity-50 ${wsLabel ? "border-line bg-raised text-fg-2 hover:border-focus hover:text-fg" : "border-warn/40 bg-warn/10 text-warn hover:text-fg"}`}
           >
             <span className="truncate">
-              {picking ? "escolhendo…" : folderName(conv ? conv.workspace ?? config.default_workspace : pendingWs ?? config.default_workspace)}
+              {picking ? "escolhendo…" : wsLabel ? folderName(wsLabel) : "Escolher pasta"}
             </span>
             <ChevronDown className="size-3 shrink-0" />
           </button>
@@ -2117,6 +2305,10 @@ export default function App() {
               </button>
               <button onClick={() => openPath(".", "reveal")} title="Abrir a pasta no Explorer" className="rounded-[7px] p-1.5 text-faint hover:bg-raised hover:text-fg">
                 <FolderOpen className="size-3.5" />
+              </button>
+              <button onClick={() => setShowBoard(true)} title="Board do projeto: backlog, varredura e Iniciar"
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-[7px] px-2 py-1 text-xs text-muted hover:bg-raised hover:text-fg">
+                <Quadro className="size-3.5" /> <span className="@max-[760px]/cab:hidden">Board</span>
               </button>
             </>
           )}
@@ -2132,6 +2324,8 @@ export default function App() {
           )}
           {picking && <span className="text-xs text-muted">Escolha a pasta na janela do sistema (pode estar atrás do navegador).</span>}
           </div>
+          {/* Indicador da IA local no centro da janela (ver .cab-centro no index.css). */}
+          <div ref={indicador} />
           <RightTabsBar
             abertos={soltos(gradeTela)}
             onSelect={(tab) => setRight((r) => (abertos(r).includes(tab) ? fecharTile(r, tab) : abrirTile(r, tab, larguraDe(tab))))}
@@ -2161,7 +2355,7 @@ export default function App() {
             onBoard={setBoard}
             modelPhase={modelPhase}
             provider={settings.provider}
-            model={settings.model}
+            model={modeloVivo}
             conversa={conversaBlock}
             renderConversa={conversaDe}
             composer={composerBlock}

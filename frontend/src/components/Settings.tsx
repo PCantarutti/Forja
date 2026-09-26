@@ -8,6 +8,7 @@ import { Modal } from "./Modal";
 import type { McpStatus, ToolInfo } from "./InfoPanel";
 import { Shield, Trash, Wrench, X } from "./icons";
 import ModelPicker from "./ModelPicker";
+import Metricas from "./Metricas";
 
 export type Provider = {
   id: string;
@@ -45,6 +46,8 @@ export type AppSettings = {
   maestro_max_attempts: number;
   max_workers: number;
   model_lifecycle: string;
+  revisao?: "off" | "avisa" | "bloqueia";
+  autonomo?: { recuperacao?: boolean; horas?: number; passos?: number; ask_user?: "anota" | "recomendada"; notificar_nivel?: number };
   maestro_model: { provider: string; model: string };
   maestro_browser: boolean;
   auto_review: boolean;
@@ -63,13 +66,14 @@ type Memory = {
   raw?: string;
 };
 
-const TABS = ["Aplicativo", "Tema", "Geral", "Provedores", "Subagentes", "Maestro", "Ferramentas", "Permissões", "MCP", "Memória"] as const;
+const TABS = ["Aplicativo", "Tema", "Geral", "Provedores", "Subagentes", "Maestro", "Ferramentas", "Permissões", "MCP", "Memória", "Métricas"] as const;
 type Tab = (typeof TABS)[number];
 // Navegação agrupada do redesign ("Tema" = cores, destaque e fonte; "Aplicativo" = iniciais).
 const GRUPOS: { titulo: string; tabs: Tab[] }[] = [
   { titulo: "App", tabs: ["Aplicativo", "Tema", "Geral"] },
   { titulo: "Modelos", tabs: ["Provedores", "Subagentes", "Maestro"] },
   { titulo: "Agente", tabs: ["Ferramentas", "Permissões", "MCP", "Memória"] },
+  { titulo: "Uso", tabs: ["Métricas"] },
 ];
 
 // O subtítulo ao lado do nome da aba, no cabeçalho (como no design).
@@ -82,6 +86,7 @@ const SUBTITULO: Partial<Record<Tab, string>> = {
   Maestro: "Planeja, despacha e valida",
   Ferramentas: "O que está desligado não vai no tools nem no prompt",
   MCP: "mcp.json na pasta de dados",
+  Métricas: "O Maestro melhorou? Tarefas, cache, rotas e falhas",
 };
 
 const input = "w-full rounded-[9px] border border-line bg-surface px-3 py-1.5 text-[13px] text-fg focus:border-focus focus:outline-none";
@@ -293,6 +298,8 @@ export default function Settings(props: {
               <Iniciais />
             ) : tab === "Tema" ? (
               <Aparencia />
+            ) : tab === "Métricas" ? (
+              <Metricas onError={setError} />
             ) : !s ? (
               <div className="text-muted">Carregando…</div>
             ) : tab === "Geral" ? (
@@ -309,9 +316,10 @@ export default function Settings(props: {
                 <Field label="num_ctx (Ollama)" hint="Janela enviada ao Ollama. No LM Studio, a janela é a do modelo carregado.">
                   <Num value={s.num_ctx} onChange={(v) => set("num_ctx", v)} />
                 </Field>
-                <Field label="Máximo de iterações por mensagem" hint="Quantos passos o agente pode dar antes de parar sozinho.">
+                <Field label="Máximo de iterações por mensagem" hint="Quantos passos o agente pode dar antes de parar sozinho. No trabalho autônomo vira checkpoint: com progresso recente, segue.">
                   <Num value={s.max_iterations} onChange={(v) => set("max_iterations", v)} />
                 </Field>
+                <Autonomo v={s.autonomo ?? {}} onChange={(v) => set("autonomo", v)} />
                 <Field label="Compactar contexto em" hint="Fração da janela (0.3 a 0.95) que dispara o resumo automático.">
                   <input
                     type="number"
@@ -592,6 +600,37 @@ const CICLOS: [string, string, string][] = [
 
 /** Tudo que o usuário decide sobre o Maestro num lugar só (§30 do plano). Os slots de Worker são os
  * mesmos da aba Subagentes e da doca Modelo · VRAM: um valor, três lugares para mexer nele. */
+/** Trabalho autônomo. Liga-se por conversa (menu Modo); aqui ficam o orçamento e o comportamento. */
+function Autonomo({ v, onChange }: { v: NonNullable<AppSettings["autonomo"]>; onChange: (v: NonNullable<AppSettings["autonomo"]>) => void }) {
+  const o = { recuperacao: true, horas: 8, passos: 2000, ask_user: "anota" as const, notificar_nivel: 4, ...v };
+  const muda = (patch: Partial<typeof o>) => onChange({ ...o, ...patch });
+  return (
+    <Field label="Trabalho autônomo"
+           hint="Liga por conversa, no menu Modo do campo de mensagem. A recuperação de loop (resumir o loop, recuar ao último ponto bom, parar com relatório) vale em toda conversa com ela ligada.">
+      <div className="space-y-2 text-sm">
+        <label className="flex items-center gap-2 text-fg-2">
+          <input type="checkbox" checked={o.recuperacao} onChange={(e) => muda({ recuperacao: e.target.checked })} />
+          Recuperação automática de loop (resumir o loop, recuar ao último ponto bom e, se nada der certo, parar com relatório)
+        </label>
+        <div className="flex flex-wrap items-center gap-2 text-muted">
+          Orçamento:
+          <input type="number" min={0.1} step={0.5} className={`${input} w-20`} value={o.horas}
+                 onChange={(e) => muda({ horas: Number(e.target.value) || 8 })} /> h ou
+          <input type="number" min={10} step={100} className={`${input} w-24`} value={o.passos}
+                 onChange={(e) => muda({ passos: Number(e.target.value) || 2000 })} /> passos
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-muted">
+          Pergunta sem ninguém olhando:
+          <select className={`${input} w-auto`} value={o.ask_user} onChange={(e) => muda({ ask_user: e.target.value as "anota" | "recomendada" })}>
+            <option value="anota">anotar e seguir</option>
+            <option value="recomendada">escolher a recomendada</option>
+          </select>
+        </div>
+      </div>
+    </Field>
+  );
+}
+
 function MaestroTab({ s, set }: { s: AppSettings; set: <K extends keyof AppSettings>(k: K, v: AppSettings[K]) => void }) {
   const paralelo = s.max_workers > 1;
   const slot = (k: "rapido" | "capaz") => s.subagents[k] ?? { provider: "", model: "" };
@@ -652,6 +691,14 @@ function MaestroTab({ s, set }: { s: AppSettings; set: <K extends keyof AppSetti
             </label>
           )}
         </div>
+      </Field>
+      <Field label="Revisão de código"
+             hint="Depois de o teste da tarefa passar, o modelo da Maestro confere cada critério de aceite contra o diff, antes do commit. Avisa: aponta o que não foi atendido e a Maestro decide. Bloqueia: devolve ao Worker uma vez e, persistindo, a tentativa falha. O FORJA.md do projeto pode mudar com a linha 'revisao: bloqueia'.">
+        <select className={input} value={s.revisao ?? "avisa"} onChange={(e) => set("revisao", e.target.value as AppSettings["revisao"])}>
+          <option value="off">Desligada</option>
+          <option value="avisa">Avisa (padrão)</option>
+          <option value="bloqueia">Bloqueia</option>
+        </select>
       </Field>
       <Field label="Ciclo de vida do modelo local" hint={CICLOS.find((c) => c[0] === s.model_lifecycle)?.[2]}>
         <select className={input} value={s.model_lifecycle} onChange={(e) => set("model_lifecycle", e.target.value)}>

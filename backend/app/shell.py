@@ -35,6 +35,11 @@ OUTPUT_SINK: contextvars.ContextVar[Callable[[str], None] | None] = contextvars.
 CONV: contextvars.ContextVar[str] = contextvars.ContextVar("forja_conv", default="")
 
 
+def executa_do_projeto(root: Path, command: str, timeout: int = 60) -> tuple[int, str]:
+    """Comando do projeto (verify da regressão, comandos do board): no Docker o isolamento é o do runner."""
+    return exec_in(root, command, timeout)
+
+
 def exec_in(root: Path, command: str, timeout: int = 60) -> tuple[int, str]:
     """Roda `command` na pasta (host se possível, senão container) e devolve (exit code, saída). Sem ToolError."""
     host = workspace.to_host(root)

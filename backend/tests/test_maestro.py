@@ -377,7 +377,7 @@ def test_ferramentas_do_maestro_sao_executaveis(conv):
     for nome in ("plan_feature", "list_tasks", "update_task", "run_task"):
         assert get_tool(nome).name == nome
     texto = _asyncio.run(execute("plan_feature", {
-        "title": "X", "goal": "y", "tasks": [{"contract": {"goal": "fazer algo"}}]}))
+        "title": "X", "goal": "y", "tasks": [{"contract": {"goal": "fazer algo", "verify_command": "pytest -q"}}]}))
     assert "TASK-001" in texto
     assert "TASK-001" in _asyncio.run(execute("list_tasks", {}))
 
@@ -601,7 +601,7 @@ def test_resultado_sem_verificacao_ganha_revisao(conv, monkeypatch):
     """Sem comando que prove nada, a revisão do diff é o único parecer disponível."""
     monkeypatch.setattr(llm, "chat_stream", _fala())
 
-    async def revisao(root, task, paths):
+    async def revisao(root, task, paths, *_):
         return "revisor-3b", "VEREDITO: ajustar\nfalta tratar divisão por zero em calc.py"
 
     monkeypatch.setattr(subagents, "_review", revisao)
@@ -618,7 +618,7 @@ def test_resultado_verificado_nao_chama_revisao(conv, monkeypatch):
     monkeypatch.setattr(llm, "chat_stream", _fala())
     chamou = []
 
-    async def revisao(root, task, paths):
+    async def revisao(root, task, paths, *_):
         chamou.append(1)
         return "x", "y"
 
@@ -645,11 +645,21 @@ def test_run_task_so_paraleliza_fora_do_modo_sequencial(monkeypatch):
 
 def test_limite_de_workers_acompanha_a_configuracao(monkeypatch):
     """O semáforo fica em cache: sem o limite na chave, mudar MAX_WORKERS não teria efeito."""
-    monkeypatch.setattr(config, "MAX_WORKERS", 2)
-    a = agent._limite(_rt("TASK-001"))
-    monkeypatch.setattr(config, "MAX_WORKERS", 4)
-    b = agent._limite(_rt("TASK-001"))
-    assert a is not b and b._value == 4
+    from app import modelctl, perfis
+    monkeypatch.setattr(config, "PERFIL_HARDWARE", "performance")
+    monkeypatch.setattr(modelctl, "localai", None)  # sem servidor local: só o teto do perfil vale
+    perfis.reavaliar()
+    try:
+        monkeypatch.setattr(config, "MAX_WORKERS", 2)
+        a = agent._limite(_rt("TASK-001"))
+        monkeypatch.setattr(config, "MAX_WORKERS", 3)
+        b = agent._limite(_rt("TASK-001"))
+        assert a is not b and b._value == 3
+        monkeypatch.setattr(config, "MAX_WORKERS", 8)
+        assert agent._limite(_rt("TASK-001"))._value == 3   # E7: teto do perfil (Performance: 3)
+    finally:
+        monkeypatch.undo()
+        perfis.reavaliar()
 
 
 def test_arquivos_disjuntos_correm_juntos():
@@ -1274,6 +1284,12 @@ def test_maestro_fecha_tarefa_que_devolveu_para_a_fila_depois_de_conferir(tmp_pa
     taskdb.finish_attempt(taskdb.new_attempt("TASK-001", {"level": "capaz"}, "", conv), "failed", {}, error="verify")
     taskdb.set_status("TASK-001", "queued", conv)
     taskdb.set_status("TASK-001", "pending", conv)
+    with pytest.raises(ToolError, match="não há prova"):  # conferir exige ter rodado algo
+        taskdb.set_status("TASK-001", "completed", conv)
+    with db.session() as s:
+        s.add(db.Message(conversation_id=conv, role="tool", name="run_command", status="ok",
+                         meta={"arguments": {"command": "pytest -q"}}))
+        s.commit()
     assert taskdb.set_status("TASK-001", "completed", conv)["status"] == "completed"
 
 
@@ -1311,3 +1327,19 @@ def test_escrita_fora_do_contrato_vira_aviso():
     assert maestro.fora_do_contrato(mud, [".forja/knowledge/frontend.md"]) == []   # só o guia: sem declaração
     r = {"status": "unverified", "outside_contract": ["src/style.css"]}
     assert "fora do contrato (src/style.css)" in maestro._para_o_maestro(r)
+
+
+def test_worker_sem_conexao_deixa_a_tarefa_failed_e_redespachavel(conv, monkeypatch):
+    """Antes o erro do Worker (conexão caiu) deixava a tarefa em 'reviewing', como se tivesse entregue,
+    e a Maestro não conseguia devolvê-la para 'pending' para tentar de novo."""
+    async def cai(*a, **k):
+        raise llm.LLMError("Não foi possível conectar em https://ollama.com/v1: ConnectTimeout.")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(llm, "chat_stream", cai)
+    _plano(conv)
+    out, _ = _despacha(conv, "TASK-001")
+    assert out["meta"]["task_result"]["status"] == "error"
+    task = taskdb.get("TASK-001", conv)
+    assert task.status == "failed" and "conectar" in (task.blocked_reason or "")
+    assert taskdb.set_status("TASK-001", "pending", conv)["status"] == "pending"

@@ -4,10 +4,11 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { createPortal } from "react-dom";
-import type { Approval, AskQuestion, Attachment, Message, Preview, Task, ToolCall, Stats } from "../types";
+import type { Approval, AskQuestion, Attachment, Message, Preview, SlotImagem, SlotsPendentes, Task, ToolCall, Stats } from "../types";
 import { SourceChip, SourceList } from "./Sources";
 import { useStickyBottom } from "../useStickyBottom";
 import { Brain, Check, Chevron, Edit, ChevronDown, Clipboard, Split, Clock, Copy, Cube, Download, Eye, EyeOff, FolderOpen, Gauge, Shield, Tokens, X } from "./icons";
+import type { CardMini } from "./BoardView";
 
 /** Quem fornece isto ganha o botão "Testar" nos blocos de código (código, linguagem do bloco).
  * Só o Comparar fornece: no chat o bloco continua só com o copiar. */
@@ -291,6 +292,19 @@ export function ToolImages({ list, bare, modelSees }: { list: Attachment[]; bare
   );
 }
 
+/** Vídeo devolvido por uma ferramenta (video_generate): o mesmo player da aba Vídeo, compacto. */
+export function ToolVideos({ list, bare }: { list: Attachment[]; bare?: boolean }) {
+  const videos = list.filter((a) => a.kind === "video");
+  if (!videos.length) return null;
+  return (
+    <div className={bare ? "my-2 space-y-2" : "space-y-2 border-t border-line p-3"}>
+      {videos.map((a) => (
+        <video key={a.path} src={fileUrl(a)} controls className="max-w-md rounded-xl border border-line" />
+      ))}
+    </div>
+  );
+}
+
 const ROTULO_POR_TIPO: { casa: RegExp; rotulo: string }[] = [
   { casa: /sheet|excel|csv/, rotulo: "Planilha" },
   { casa: /word|document$/, rotulo: "Documento" },
@@ -498,7 +512,8 @@ export function aggregate(list: Stats[]): TurnStats {
   };
 }
 
-export type Turno = { stats: TurnStats | null; text: string; userId: number | null };
+// cards: os que a IA criou no board neste turno (board_card), desenhados no FIM da resposta, não no meio
+export type Turno = { stats: TurnStats | null; text: string; userId: number | null; cards: CardMini[] };
 
 /** Estatísticas por turno (todas as iterações até a próxima mensagem do usuário), chaveadas pelo
  *  índice da última resposta do turno — é onde a linha de estatísticas é desenhada. */
@@ -508,16 +523,21 @@ export function turnosDe(messages: Message[]): Map<number, Turno> {
   let text: string[] = [];
   let last = -1;
   let userId: number | null = null;
+  let cards: CardMini[] = [];
   const flush = () => {
-    if (last >= 0) out.set(last, { stats: acc.length ? aggregate(acc) : null, text: text.join("\n\n"), userId });
+    if (last >= 0) out.set(last, { stats: acc.length ? aggregate(acc) : null, text: text.join("\n\n"), userId, cards });
     acc = [];
     text = [];
+    cards = [];
     last = -1;
   };
   messages.forEach((m, i) => {
     if (m.role === "user") {
       flush();
       userId = m.id;
+    } else if (m.role === "tool" && m.meta?.board_card) {
+      const c = m.meta.board_card as CardMini;
+      if (!cards.some((x) => x.id === c.id)) cards.push(c);  // "já existe" repete o mesmo card
     } else if (m.role === "assistant") {
       last = i;
       if (m.meta?.stats) acc.push(m.meta.stats);
@@ -710,6 +730,7 @@ export function ToolBlock(props: {
       {!props.hideImages && result?.meta?.attachments && (
         <ToolImages list={result.meta.attachments} modelSees={result.meta.model_sees} />
       )}
+      {!props.hideImages && result?.meta?.attachments && <ToolVideos list={result.meta.attachments} />}
       {!props.hideImages && result?.meta?.attachments && (
         <div className="border-t border-line px-3 py-1">
           <ToolFiles list={result.meta.attachments} onOpen={props.onOpen} />
@@ -822,6 +843,12 @@ const ACTION: Record<string, string> = {
   edit_file: "Editou um arquivo",
   write_file: "Escreveu um arquivo",
   list_dir: "Olhou a pasta",
+  tree: "Olhou a árvore do projeto",
+  code_search: "Procurou no código",
+  board_card: "Criou card no board",
+  explore: "Explorou o código",
+  ast: "Leu a estrutura do código",
+  imports: "Conferiu os imports",
   search: "Procurou no projeto",
   web_search: "Pesquisou na web",
   fetch_url: "Abriu uma página",
@@ -908,6 +935,7 @@ export function ActivityGroup(props: {
   forceOpen?: boolean;
   renderTool: (call: ToolCall, queued: boolean) => React.ReactNode;
   onOpen?: (path: string, mode: "editor" | "reveal") => void;
+  onGerarImagens?: (p: SlotsPendentes) => void; // imagens_pendentes: leva a fila para a tela Imagens
 }) {
   const [open, setOpen] = useState(false);
   const isOpen = !!props.forceOpen || open;
@@ -962,7 +990,28 @@ export function ActivityGroup(props: {
         </div>
       )}
       <ToolImages list={shots} bare />
+      <ToolVideos list={shots} bare />
       <ToolFiles list={shots} onOpen={props.onOpen} />
+      {/* Como o screenshot: é resposta ao usuário, fica fora do grupo colapsado. */}
+      {props.onGerarImagens && tools.map((c) => {
+        const r = props.results.get(c.id);
+        const slots: SlotImagem[] | undefined = r?.meta?.imagens_pendentes?.slots;
+        const geradas = !!r?.meta?.imagens_pendentes?.geradas; // a fila já saiu: o botão só leva até elas
+        return r && slots ? (
+          <div key={c.id} className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+            <button
+              onClick={() => props.onGerarImagens!({ message_id: r.id, slots })}
+              title={geradas ? "Abre a conversa de Imagens destas imagens (não gera de novo)" : "Abre a tela Imagens com a fila dos slots"}
+              className={geradas
+                ? "rounded-full border border-line px-3 py-1 text-fg hover:bg-raised"
+                : "rounded-full bg-accent px-3 py-1 font-medium text-accent-fg hover:brightness-110"}
+            >
+              {geradas ? `Ver as ${slots.length} imagens` : `Gerar ${slots.length} imagens`}
+            </button>
+            <span className="min-w-0 truncate font-mono text-faint">{slots.map((s) => s.nome).join(" · ")}</span>
+          </div>
+        ) : null;
+      })}
     </div>
   );
 }
@@ -972,7 +1021,21 @@ const EVENT_STYLE: Record<string, string> = {
   error: "border-err/30 bg-err/[.08] text-fg-2",
   nudge: "border-accent-line text-fg-2",
   info: "border-line text-muted",
+  imagens: "border-accent-line text-muted whitespace-pre-wrap", // uma linha por imagem
 };
+
+/** agent.py: "... Tentando de novo em 2.0s (2/5)..." */
+export const TENTATIVA = /Tentando de novo.*\((\d+\/\d+)\)/;
+
+/** O aviso de reconexão ao modelo, um só, atualizado a cada tentativa. */
+export function Reconectando({ texto, n }: { texto: string; n: string }) {
+  return (
+    <CartaoEstado tom="info" compacto girando className="my-3">
+      <span className="shrink-0">Reconectando ao modelo… tentativa {n}</span>
+      <span className="min-w-0 truncate text-xs text-faint" title={texto}>{texto.split(" Tentando de novo")[0]}</span>
+    </CartaoEstado>
+  );
+}
 
 export function EventNotice({ m }: { m: Message }) {
   const kind = m.meta?.kind ?? "info";
@@ -996,6 +1059,9 @@ export function EventNotice({ m }: { m: Message }) {
     error: "Erro",
     nudge: "Lembrete automático ao modelo",
     info: "Info",
+    // a tela Imagens gerou, trocou ou otimizou as imagens que este chat pediu. Fica à vista (e não no
+    // grupo de avisos ao agente) porque chega com o chat parado, e é notícia para a pessoa também.
+    imagens: "Imagens do site",
   }[kind as string];
   return (
     <div className={`my-3 rounded-2xl border bg-surface px-4 py-2.5 text-sm ${EVENT_STYLE[kind] ?? EVENT_STYLE.info}`}>

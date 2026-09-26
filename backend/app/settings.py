@@ -11,7 +11,7 @@ import json
 import re
 from typing import Any
 
-from . import config, db
+from . import config, db, llm
 
 ENV_DEFAULTS: dict[str, Any] = {
     "providers": [copy.deepcopy(p) for p in config.PROVIDERS.values()],
@@ -43,16 +43,38 @@ ENV_DEFAULTS: dict[str, Any] = {
     "model_lifecycle": config.MODEL_LIFECYCLE,
     "maestro_model": {"provider": "", "model": ""},
     "maestro_visual": {"provider": "", "model": ""},
+    # E4: papéis auxiliares que podem ir para a nuvem (slot "nuvem") em vez de usar o modelo do principal.
+    # Desligados: o código sai da máquina.
+    "nuvem_por_papel": {"explorador": False, "revisor": False, "visual": False},
+    # E4: cache do prompt em disco (salvar/restaurar slot) e descarga do modelo local ocioso
+    "perfil_hardware": "auto",  # E4: auto | performance | balanced | low_vram
+    "cache_disco": True,
+    "cache_disco_gb": 4.0,
+    "descarregar_ocioso_min": 15,
     "maestro_browser": True,
     "auto_review": False,  # modo Automático: o modelo revisa o risco da ação em vez de perguntar
     "workers_do_maestro": False,
     "worker_especialidades": [dict(e) for e in config.ESPECIALIDADES_PADRAO],
+    "workspace_padrao": "",  # pasta de uma conversa nova de Agente/Maestro; vazio = escolher a cada conversa
+    # Sandbox dos processos do agente (sandbox.py): -1 = automático, 0 = sem limite
+    "sandbox_memoria_mb": config.SANDBOX_MEMORIA_MB,
+    "sandbox_processos": config.SANDBOX_PROCESSOS,
+    "sandbox_cpu": config.SANDBOX_CPU,
+    "sandbox_isolado": config.SANDBOX_ISOLADO,
+    "revisao": config.REVISAO,
+    "autonomo": {},
+    "mcp_servidor": config.MCP_SERVIDOR,
+    "mcp_permissao": config.MCP_PERMISSAO,
+    "sandbox_motor": config.SANDBOX_MOTOR,
+    "sandbox_wsl_distro": config.SANDBOX_WSL_DISTRO,
 }
 MAX_ESPECIALIDADES = 12
 
 LISTS = ("disabled_tools", "auto_approve_tools", "auto_approve_commands", "trusted_hooks")
 
 NUMBERS = {  # chave: (tipo, mínimo, máximo)
+    "cache_disco_gb": (float, 0, 1024),  # 0 desliga
+    "descarregar_ocioso_min": (int, 0, 1440),  # 0 = nunca
     "num_ctx": (int, 1024, 4_194_304),
     "max_iterations": (int, 1, 200),
     "max_file_bytes": (int, 1_000, 200_000_000),
@@ -65,6 +87,9 @@ NUMBERS = {  # chave: (tipo, mínimo, máximo)
     # Teto baixo de propósito: cada Worker é uma inferência inteira, e no local só cabe um.
     "max_workers": (int, 1, 8),
     "subagent_max_iterations": (int, 1, 100),
+    "sandbox_memoria_mb": (int, -1, 262_144),  # -1 automático, 0 sem limite
+    "sandbox_processos": (int, 0, 10_000),
+    "sandbox_cpu": (int, 0, 100),
 }
 TYPES = ("ollama", "lmstudio", "openai")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
@@ -99,6 +124,21 @@ def _especialidades(raw, provedores: set[str]) -> list[dict]:
         out.append({"id": eid, "nome": nome, "quando": str(e.get("quando") or "").strip()[:200],
                     "provider": provider, "model": model})
     return out
+
+
+def alterados() -> set[str]:
+    """Chaves que o usuário mudou (as únicas gravadas no banco): o perfil não passa por cima delas."""
+    with db.session() as s:
+        return {row.key for row in s.query(db.AppSetting.key).all()}
+
+
+def voltar_ao_perfil() -> None:
+    """Esquece os ajustes manuais dos valores que o perfil governa."""
+    from . import perfis
+    with db.session() as s:
+        s.query(db.AppSetting).filter(db.AppSetting.key.in_(perfis.GOVERNADOS)).delete(synchronize_session=False)
+        s.commit()
+    apply()
 
 
 def load() -> dict:
@@ -138,6 +178,21 @@ def apply(values: dict | None = None) -> dict:
     config.MODEL_LIFECYCLE = values["model_lifecycle"]
     config.MAESTRO_MODEL = dict(values["maestro_model"])
     config.MAESTRO_VISUAL = dict(values["maestro_visual"])
+    config.NUVEM_POR_PAPEL = {**ENV_DEFAULTS["nuvem_por_papel"], **(values.get("nuvem_por_papel") or {})}
+    config.CACHE_DISCO = bool(values["cache_disco"])
+    config.CACHE_DISCO_GB = float(values["cache_disco_gb"])
+    config.DESCARREGAR_OCIOSO_MIN = int(values["descarregar_ocioso_min"])
+    # E4: o perfil de hardware preenche o que o usuário não mexeu (só o mexido fica gravado no banco)
+    config.PERFIL_HARDWARE = values.get("perfil_hardware") or "auto"
+    from . import perfis
+    perfis.reavaliar()
+    do_perfil = perfis.valores()
+    mexidos = alterados()
+    if "cache_disco_gb" not in mexidos:
+        config.CACHE_DISCO_GB = float(do_perfil["cache_disco_gb"])
+    if "descarregar_ocioso_min" not in mexidos:
+        config.DESCARREGAR_OCIOSO_MIN = int(do_perfil["descarregar_ocioso_min"])
+    config.FATOR_TETOS = float(do_perfil["fator_tetos"])
     config.WORKER_ESPECIALIDADES = [dict(e) for e in values["worker_especialidades"]]
     config.MAESTRO_BROWSER = bool(values["maestro_browser"])
     config.AUTO_REVIEW = bool(values["auto_review"])
@@ -145,6 +200,17 @@ def apply(values: dict | None = None) -> dict:
     config.BROWSER_IDLE_MINUTES = int(values["browser_idle_minutes"])
     config.BROWSER_SCALE = int(values["browser_scale"])
     config.BROWSER_STREAM = values["browser_stream"]
+    config.WORKSPACE_PADRAO = values["workspace_padrao"] or None
+    config.SANDBOX_MEMORIA_MB = int(values["sandbox_memoria_mb"])
+    config.SANDBOX_PROCESSOS = int(values["sandbox_processos"])
+    config.SANDBOX_CPU = int(values["sandbox_cpu"])
+    config.SANDBOX_ISOLADO = values["sandbox_isolado"]
+    config.REVISAO = values["revisao"]
+    config.AUTONOMO = dict(values.get("autonomo") or {})
+    config.MCP_SERVIDOR = bool(values["mcp_servidor"])
+    config.MCP_PERMISSAO = values["mcp_permissao"]
+    config.SANDBOX_MOTOR = values["sandbox_motor"]
+    config.SANDBOX_WSL_DISTRO = values["sandbox_wsl_distro"]
     return values
 
 
@@ -155,6 +221,7 @@ def public(values: dict | None = None) -> dict:
         key = p.pop("api_key", "") or ""
         p["has_api_key"] = bool(key)
         p["api_key_hint"] = f"…{key[-4:]}" if key else ""
+    values["capacidades"] = {t: llm.indisponiveis(t) for t in llm.CAPACIDADES}  # a tela de Provedores mostra
     return values
 
 
@@ -181,8 +248,18 @@ def _providers(new: list, old: list) -> list:
         key = p.get("api_key")
         if key is None:
             key = previous.get(pid, {}).get("api_key", "")
+        janela = p.get("context_window")
+        if janela in ("", None, 0):
+            janela = None
+        else:
+            try:
+                janela = int(janela)
+            except (TypeError, ValueError):
+                raise SettingsError(f"Janela de contexto de '{pid}' precisa ser um número de tokens.") from None
+            if not 1024 <= janela <= 4_194_304:
+                raise SettingsError(f"Janela de contexto de '{pid}' fora do intervalo 1024–4194304.")
         out.append({"id": pid, "name": str(p.get("name") or pid)[:60], "type": p["type"], "url": url,
-                    "api_key": str(key)})
+                    "api_key": str(key), **({"context_window": janela} if janela else {})})
     return out
 
 
@@ -222,6 +299,15 @@ def validate(patch: dict, current: dict) -> dict:
                     raise SettingsError(f"Subagente '{slot}': provedor '{provider}' não existe.")
                 out[slot] = {"provider": provider, "model": model}
             values[key] = out
+        elif key == "perfil_hardware":
+            from .perfis import PERFIS
+            if raw not in PERFIS:
+                raise SettingsError(f"Perfil deve ser um de: {', '.join(PERFIS)}.")
+            values[key] = raw
+        elif key == "nuvem_por_papel":
+            if not isinstance(raw, dict):
+                raise SettingsError("'nuvem_por_papel' precisa ser um objeto {papel: bool}.")
+            values[key] = {p: bool(raw.get(p, values[key].get(p, False))) for p in ENV_DEFAULTS[key]}
         elif key == "worker_especialidades":
             values[key] = _especialidades(raw, {p["id"] for p in values["providers"]} | {"local"})
         elif key in ("maestro_model", "maestro_visual"):
@@ -231,7 +317,8 @@ def validate(patch: dict, current: dict) -> dict:
             if provider and provider not in {p["id"] for p in values["providers"]} | {"local"}:
                 raise SettingsError(f"Modelo da Maestro: provedor '{provider}' não existe.")
             values[key] = {"provider": provider, "model": model}
-        elif key in ("project_memory", "personal_memory", "maestro_browser", "workers_do_maestro", "auto_review"):
+        elif key in ("project_memory", "personal_memory", "maestro_browser", "workers_do_maestro", "auto_review",
+                     "mcp_servidor", "cache_disco"):
             values[key] = bool(raw)
         elif key == "project_memory_file":
             name = str(raw).strip() or "FORJA.md"
@@ -243,10 +330,51 @@ def validate(patch: dict, current: dict) -> dict:
             if raw not in LIFECYCLES:
                 raise SettingsError(f"model_lifecycle deve ser um de: {', '.join(LIFECYCLES)}.")
             values[key] = raw
+        elif key == "sandbox_motor":
+            from .sandbox import MOTORES
+            if raw not in MOTORES:
+                raise SettingsError(f"sandbox_motor deve ser um de: {', '.join(MOTORES)}.")
+            values[key] = raw
+        elif key == "sandbox_wsl_distro":
+            nome = str(raw or "").strip()
+            if nome and not all(c.isalnum() or c in "-_." for c in nome):
+                raise SettingsError("sandbox_wsl_distro: só o nome da distro (ex.: Ubuntu).")
+            values[key] = nome
+        elif key == "mcp_permissao":
+            from .policy import MODES
+            if raw not in MODES or raw == "plan":
+                raise SettingsError(f"mcp_permissao deve ser um de: {', '.join(m for m in MODES if m != 'plan')}.")
+            values[key] = raw
+        elif key == "autonomo":
+            from . import autonomo
+            try:
+                values[key] = autonomo.valida(raw)
+            except (ValueError, TypeError) as e:
+                raise SettingsError(str(e))
+        elif key == "revisao":
+            from .critico import MODOS as MODOS_REVISAO
+            if raw not in MODOS_REVISAO:
+                raise SettingsError(f"revisao deve ser um de: {', '.join(MODOS_REVISAO)}.")
+            values[key] = raw
+        elif key == "sandbox_isolado":
+            from .sandbox import MODOS_ISOLADO
+            if raw not in MODOS_ISOLADO:
+                raise SettingsError(f"sandbox_isolado deve ser um de: {', '.join(MODOS_ISOLADO)}.")
+            values[key] = raw
         elif key == "browser_stream":
             if raw not in ("png", "jpeg"):
                 raise SettingsError("browser_stream deve ser png ou jpeg.")
             values[key] = raw
+        elif key == "workspace_padrao":
+            from . import workspace
+            pasta = str(raw or "").strip()
+            if pasta:
+                try:
+                    workspace.resolve(pasta)
+                except workspace.WorkspaceError as e:
+                    raise SettingsError(str(e)) from None
+                pasta = workspace.normalize(pasta)
+            values[key] = pasta
         elif key == "searxng_url":
             url = str(raw).strip().rstrip("/")
             if not url.startswith(("http://", "https://")):

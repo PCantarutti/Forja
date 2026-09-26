@@ -588,7 +588,7 @@ async def read(_root: Path, args: dict) -> str:
         snap = await loc.aria_snapshot(mode="ai", timeout=ACT_TIMEOUT)
     except Exception as e:
         raise ToolError(_act_err(selector, e) if selector else f"Falha ao ler a página: {_err(e)}") from e
-    max_chars = max(1_000, min(int(args.get("max_chars") or 15_000), 100_000))
+    max_chars = max(1_000, min(int(args.get("max_chars") or config.teto(15_000, 0.15)), 100_000))  # E4
     more = (f"\n(truncado em {max_chars} de {len(snap)} caracteres; passe selector para focar numa região)"
             if len(snap) > max_chars else "")
     return f"{UNTRUSTED}{await _summary(page)}\n\n{snap[:max_chars]}{more}"
@@ -890,11 +890,22 @@ async def screenshot(_root: Path, args: dict) -> dict:
                 # tamanho do PAINEL (estreito e alto), não o override — o print "desktop" de 1280x720
                 # saía igual ao de celular, e a revisão visual julgava o desktop sem nunca vê-lo. A foto
                 # sai pela mesma sessão CDP que aplicou o tamanho.
-                r = await real["cdp"].send("Page.captureScreenshot",
-                                           {"format": "jpeg", "quality": JPEG_QUALITY, "fromSurface": True})
-                jpg = base64.b64decode(r["data"])
+                # Aba que não está desenhando (painel escondido, janela minimizada, PC bloqueado) nunca
+                # devolve a foto pelo CDP: aí quem fotografa é o Electron (capturePage desenha a view escondida).
+                try:
+                    r = await asyncio.wait_for(real["cdp"].send(
+                        "Page.captureScreenshot", {"format": "jpeg", "quality": JPEG_QUALITY, "fromSurface": True}), 5)
+                    jpg = base64.b64decode(r["data"])
+                except asyncio.TimeoutError:
+                    try:
+                        jpg = await s._m.host_shot(s.markers.get(id(page), ""))
+                    except (ToolError, asyncio.TimeoutError):
+                        raise ToolError("A aba não está sendo desenhada agora e o app não conseguiu fotografá-la. "
+                                        "Use browser_read ou browser_validate, que não dependem da tela.") from None
             else:
                 jpg = await page.screenshot(**comum)
+    except ToolError:
+        raise
     except Exception as e:
         raise ToolError((_act_err(alvo, e) if alvo else f"Falha no screenshot: {_err(e)}")) from e
     try:

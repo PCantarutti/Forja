@@ -58,7 +58,8 @@ def test_repeticao_lembra_antes_de_parar(monkeypatch):
     monkeypatch.setattr(agent.config, "MAX_ITERATIONS", 50)
     eventos = _roda(monkeypatch, stream)
     nudges = _textos(eventos, "nudge")
-    assert len(nudges) == 3  # 3ª, 5ª e 8ª
+    assert len(nudges) == 3  # 3ª, 5ª (intervenção da E16, com a chamada bloqueada) e 8ª
+    assert "Você está em loop" in nudges[1]
     assert any("Loop detectado: list_dir pedida 10 vezes" in t for t in _textos(eventos, "warning"))
 
 
@@ -127,16 +128,22 @@ def test_poda_mantem_os_ultimos_resultados_inteiros():
     grande = "A" * 5000 + "MEIO" + "Z" * 5000
     assert "[... meio do resultado podado ...]" in compact.podar(grande)
     assert compact.podar("curto") == "curto"
-    msgs = [db.Message(id=1, role="user", content="oi")]
-    for i in range(2, 8):
-        msgs.append(db.Message(id=i, role="assistant", content="", tool_calls=[
-            {"id": f"t{i}", "name": "read_file", "arguments": {}}]))
-        msgs.append(db.Message(id=100 + i, role="tool", tool_call_id=f"t{i}", name="read_file",
-                               status="ok", content=grande))
-    hist = agent.build_history(msgs, "native", podar=True)
-    tools = [m["content"] for m in hist if m["role"] == "tool"]
-    assert sum("podado" in t for t in tools) == len(tools) - compact.PODA_MANTEM
-    assert "MEIO" in tools[-1]
+    def conversa(n):
+        msgs = [db.Message(id=1, role="user", content="oi")]
+        for i in range(2, 2 + n):
+            msgs.append(db.Message(id=i, role="assistant", content="", tool_calls=[
+                {"id": f"t{i}", "name": "read_file", "arguments": {}}]))
+            msgs.append(db.Message(id=1000 + i, role="tool", tool_call_id=f"t{i}", name="read_file",
+                                   status="ok", content=grande))
+        tools = [m["content"] for m in agent.build_history(msgs, "native", podar=True) if m["role"] == "tool"]
+        return [("podado" in t) for t in tools]
+
+    # E4: em blocos de PODA_BLOCO. Com 6 resultados ainda não poda; com 14, os 8 primeiros; e com 15 o corte
+    # continua no mesmo lugar (o prefixo não muda a cada passo, e o cache do servidor vale).
+    assert not any(conversa(6))
+    com14, com15 = conversa(14), conversa(15)
+    assert sum(com14) == compact.PODA_BLOCO and not com14[-1]
+    assert com15[:14] == com14 and not com15[-1]
 
 
 def test_retomada_do_resumo_usa_checkpoint():
@@ -182,3 +189,15 @@ def test_retry_after_do_provedor_vale_ate_o_teto(monkeypatch):
     monkeypatch.setattr(agent.asyncio, "sleep", dorme)
     _roda(monkeypatch, stream)
     assert esperas and esperas[0] == agent.RETRY_MAX  # pediu 60s, o teto é 10s
+
+
+def test_dica_de_conexao_do_ollama_cloud_nao_fala_de_ollama_host(monkeypatch):
+    import httpx
+    from app import config, llm
+    monkeypatch.setitem(config.PROVIDERS, "nuvem-x", {"id": "nuvem-x", "name": "Ollama Cloud", "type": "ollama",
+                                                      "url": "https://ollama.com/v1", "api_key": "k"})
+    monkeypatch.setitem(config.PROVIDERS, "rede-x", {"id": "rede-x", "name": "Ollama", "type": "ollama",
+                                                     "url": "http://192.168.0.9:11434/v1", "api_key": ""})
+    nuvem = str(llm._conn_error("nuvem-x", httpx.ConnectTimeout("t")))
+    assert "Ollama Cloud" in nuvem and "internet" in nuvem and "OLLAMA_HOST" not in nuvem
+    assert "OLLAMA_HOST=0.0.0.0" in str(llm._conn_error("rede-x", httpx.ConnectTimeout("t")))

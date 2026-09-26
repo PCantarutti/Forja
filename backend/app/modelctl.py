@@ -12,9 +12,11 @@ descarregar. `CAPS` diz o que cada um aceita, e quem chama pergunta antes em vez
 from __future__ import annotations
 
 import asyncio
+import time
+from dataclasses import dataclass
 from typing import AsyncIterator, Callable
 
-from . import config
+from . import config, metricas
 from .tools import ToolError
 
 try:  # localai só existe no Forja desktop; no Docker não há modelo local embutido
@@ -179,6 +181,9 @@ async def ensure(spec: dict, out: dict | None = None,
 
     anterior = localai.status().get("alias") or ""
     out.update(swapped=True, previous=anterior, model=alvo)
+    if anterior:  # E4: o cache das conversas no slot vai para o disco antes de o modelo sair
+        from . import kvcache
+        await asyncio.to_thread(kvcache.salvar_todos)
     if anterior:
         yield _evento("unloading", previous=anterior, model=alvo)
     yield _evento("loading", previous=anterior, model=alvo)
@@ -186,6 +191,7 @@ async def ensure(spec: dict, out: dict | None = None,
     # `load` é síncrono e segura o _proc_lock por até LOAD_TIMEOUT; numa thread o event loop segue
     # publicando eventos e atendendo o botão Parar. Ele já descarrega o anterior sozinho.
     carga = (localai.load, caminho, None, temporario) if temporario else (localai.load, caminho)
+    t0 = time.monotonic()
     tarefa = asyncio.create_task(asyncio.to_thread(*carga))
     if cancel is not None:
         espera = asyncio.ensure_future(cancel.wait())
@@ -201,6 +207,7 @@ async def ensure(spec: dict, out: dict | None = None,
     except Exception as e:
         yield _evento("error", model=alvo)
         raise ToolError(f"Falha ao carregar '{alvo}': {e}") from e
+    metricas.registra("troca", de=anterior, para=alvo, segundos=round(time.monotonic() - t0, 2))  # E0
     yield _evento("ready", previous=anterior, model=alvo)
 
 
@@ -210,6 +217,8 @@ async def unload(motivo: str = "") -> AsyncIterator[dict]:
         return
     anterior = localai.status().get("alias") or ""
     yield _evento("unloading", previous=anterior, model="", reason=motivo)
+    from . import kvcache
+    await asyncio.to_thread(kvcache.salvar_todos)  # E4: salvar antes de perder
     await asyncio.to_thread(localai.unload)
     yield _evento("unloaded", previous=anterior, model="", reason=motivo)
 
@@ -284,3 +293,214 @@ async def after_task(spec: dict | None, maestro: dict | None = None) -> AsyncIte
         return
     async for ev in unload("unload_after_task"):
         yield ev
+
+
+# ------------------------------------------------------------------ política de execução (E4)
+# Uma função decide onde cada chamada ao LLM roda. Regra do plano inteiro: chamada auxiliar não troca o
+# modelo carregado nem toma o slot do principal por conta própria. O Worker é a única exceção (pode trocar),
+# e a E0 mediu o custo: numa máquina de 12 GB a troca Maestro <-> Worker gastou 39% do relógio (carga mais o
+# Maestro reprocessando o contexto inteiro a cada volta, porque os híbridos não restauram do disco).
+
+PAPEIS = ("principal", "worker", "explorador", "revisor", "visual", "lateral", "compactar", "embeddings", "juiz", "varredura")
+SLOT_PRINCIPAL = 0      # o principal (agente/Maestro) fica sempre no slot 0, com cache_prompt
+SLOT_AUXILIAR = 1       # auxiliar vai para o 1 quando o servidor tem mais de um slot
+_SLOTS: dict[int, int] = {}  # pid do llama-server -> nº de slots (pergunta ao servidor uma vez)
+
+
+@dataclass
+class Rota:
+    caminho: str            # mesmo-slot | outro-slot | mesmo-slot-sequencial | modelo-do-principal |
+                            # trocar-modelo | nuvem | externo | pular
+    spec: dict | None       # o modelo que de fato atende (None em "pular")
+    slot: int | None        # id_slot do llama-server (None: não fixa)
+    motivo: str
+
+    def texto(self, papel: str) -> str:
+        return f"{papel} → {self.caminho} ({self.motivo})"
+
+
+def slots_do_servidor() -> int:
+    """Quantos slots o llama-server carregado tem: o -np da configuração, ou o servidor diz (0 = automático)."""
+    if localai is None:
+        return 1
+    st = localai.status()
+    if not st.get("running"):
+        return 1
+    n = int((st.get("params") or {}).get("parallel") or 0)
+    if n >= 1:
+        return n
+    pid = int(st.get("pid") or 0)
+    if pid not in _SLOTS:
+        try:
+            import httpx
+            r = httpx.get(f"http://127.0.0.1:{config.LOCAL_PORT}/slots", timeout=3)
+            _SLOTS[pid] = max(1, len(r.json())) if r.status_code == 200 else 1
+        except Exception:
+            _SLOTS[pid] = 1
+    return _SLOTS[pid]
+
+
+def _local_carregado() -> dict | None:
+    if localai is None:
+        return None
+    st = localai.status()
+    return {"provider": config.LOCAL_PROVIDER["id"], "model": st["alias"]} if st.get("running") and st.get("alias") else None
+
+
+def workers_possiveis(pedidos: int) -> dict:
+    """E7: quantos Workers rodam juntos sem tirar o cache do Maestro. O slot 0 é dele; no modelo local, cada
+    Worker precisa de outro slot, e a janela por slot não pode ficar abaixo do mínimo do Worker. O teto do
+    perfil de hardware (Low VRAM: 1) vale por cima. Nunca menos que 1."""
+    from . import perfis
+    n, motivos = max(1, int(pedidos or 1)), []
+    teto = int(perfis.valores().get("max_workers") or 1)
+    if n > teto:
+        n = teto
+        motivos.append(f"perfil {perfis.rotulo()}: até {teto}")
+    janela = None
+    if localai is not None and (st := localai.status()).get("running"):
+        slots = slots_do_servidor()
+        if n > max(1, slots - 1):
+            n = max(1, slots - 1)
+            motivos.append(f"o servidor tem {slots} slot(s) e o slot {SLOT_PRINCIPAL} é do Maestro")
+        prm = st.get("params") or {}
+        janela = localai.ctx_por_requisicao(st.get("ctx") or prm.get("ctx"), {**prm, "parallel": slots})
+    return {"pedidos": max(1, int(pedidos or 1)), "possiveis": n, "motivo": "; ".join(motivos),
+            "janela_por_slot": janela, "min_ctx": config.WORKER_MIN_CTX}
+
+
+def custo_da_volta() -> str:
+    """Quanto custa voltar ao modelo carregado depois de uma troca: com cache em disco que restaura, só
+    carregar + restaurar; senão, carregar + reprocessar o contexto inteiro (o que dominou a E0)."""
+    if localai is None or not (st := localai.status()).get("running") or not st.get("path"):
+        return "nada carregado"
+    from . import kvcache
+    ok, porque = kvcache.suportado(st["path"], st.get("params") or {})
+    if kvcache.ligado() and ok:
+        return "a volta custa carregar + restaurar o cache do disco"
+    return f"a volta custa carregar + reprocessar o contexto ({porque or 'cache em disco desligado'})"
+
+
+def _nuvem(papel: str) -> dict | None:
+    """O slot "nuvem" dos subagentes, se o usuário liberou este papel para a nuvem."""
+    if not (getattr(config, "NUVEM_POR_PAPEL", {}) or {}).get(papel):
+        return None
+    spec = (getattr(config, "SUBAGENTS", {}) or {}).get("nuvem") or {}
+    return spec if spec.get("provider") and spec.get("model") else None
+
+
+def como_rodar(papel: str, pedido: dict | None) -> Rota:
+    """Onde a chamada de `papel` roda, para quem pediu `pedido` ({provider, model}). Nunca carrega nada:
+    quem recebe "trocar-modelo" chama `ensure`. `metricas` registra cada decisão (E10)."""
+    rota = _decide(papel, pedido)
+    from . import perfis  # E4: o motivo cita o perfil ativo (a E10 mostra por execução)
+    rota.motivo = f"{rota.motivo} [perfil {perfis.rotulo()}]"
+    metricas.registra("rota", papel=papel, caminho=rota.caminho, modelo=(rota.spec or {}).get("model"),
+                      slot=rota.slot, motivo=rota.motivo)
+    return rota
+
+
+def _decide(papel: str, pedido: dict | None) -> Rota:
+    carregado = _local_carregado()
+    pedido = pedido if pedido and pedido.get("model") else None
+    if papel == "principal":
+        if pedido and gerenciavel(pedido):
+            return Rota("mesmo-slot", pedido, SLOT_PRINCIPAL, "principal fica no slot fixo, com cache_prompt")
+        return Rota("externo", pedido, None, "o provedor cuida do cache")
+    if pedido and not gerenciavel(pedido):
+        # E13-B: Ollama/LM Studio local carregam o modelo pedido sozinhos, derrubando o que estava lá. Chamada
+        # auxiliar não troca de modelo: usa o carregado (o Worker pode trocar, como no llama.cpp).
+        from . import llm
+        if papel not in ("principal", "worker") and (atual := llm.carregado_externo(pedido["provider"])) \
+                and atual != pedido["model"]:
+            return Rota("modelo-do-principal", {"provider": pedido["provider"], "model": atual}, None,
+                        f"{pedido['model']} não está carregado no servidor e chamada auxiliar não troca de modelo")
+        return Rota("externo", pedido, None, "provedor fora do Forja (nuvem, Ollama, LM Studio)")
+    if pedido and carregado and pedido["model"] == carregado["model"]:
+        n = slots_do_servidor()
+        if n > 1:
+            return Rota("outro-slot", pedido, SLOT_AUXILIAR, f"mesmo modelo, slot {SLOT_AUXILIAR} de {n}")
+        return Rota("mesmo-slot-sequencial", pedido, SLOT_PRINCIPAL,
+                    "mesmo modelo com um slot só (-np 1): espera o principal e divide o cache com ele")
+    # Daqui em diante o pedido é outro modelo local (ou nenhum): a regra é não trocar.
+    if papel == "worker" and pedido:
+        return Rota("trocar-modelo", pedido, None, f"o Worker pode trocar de modelo, em lote; {custo_da_volta()}")
+    if nuvem := _nuvem(papel):
+        return Rota("nuvem", nuvem, None, "este papel está liberado para a nuvem nas configurações")
+    if pedido and not carregado:
+        return Rota("trocar-modelo", pedido, None, "nenhum modelo carregado: carregar não derruba ninguém")
+    if papel in ("visual", "embeddings"):
+        return Rota("pular", None, None, "sem VRAM para carregar o modelo junto: o Forja roda um modelo por "
+                                         "vez, e trocar no meio do trabalho derrubaria o principal")
+    if carregado:
+        n = slots_do_servidor()
+        return Rota("modelo-do-principal", carregado, SLOT_AUXILIAR if n > 1 else SLOT_PRINCIPAL,
+                    f"o pedido ({pedido['model']}) não está carregado e chamada auxiliar não troca de modelo"
+                    if pedido else "usa o modelo carregado")
+    return Rota("pular", None, None, "nenhum modelo disponível")
+
+# ------------------------------------------------------------------ descarga por ociosidade (E4)
+OCIOSO: dict = {}   # último descarregado por ociosidade: {"alias", "path", "quando", "carga_s"}
+
+
+def em_uso() -> bool:
+    """Algo usando o modelo agora: execução de agente/Maestro/Worker, subagente em segundo plano, carga ou
+    geração de imagem. Execução parada numa aprovação conta como ociosa só depois do dobro do tempo."""
+    from . import agent, llm
+    limite = int(getattr(config, "DESCARREGAR_OCIOSO_MIN", 15)) * 60
+    for run in list(agent.RUNS.values()):
+        if run.finished:
+            continue
+        if run.approvals and time.monotonic() - llm.ULTIMO_USO["t"] < 2 * limite:
+            return True
+        if not run.approvals:
+            return True
+    return bool(localai and (localai.image_busy() or localai._loading))
+
+
+def externo_ocioso() -> dict | None:
+    """E13-B: o modelo de um Ollama local sem uso há N minutos (a descarga do llama.cpp é a de baixo)."""
+    from . import llm
+    minutos = int(getattr(config, "DESCARREGAR_OCIOSO_MIN", 15))
+    u = llm.ULTIMO_EXTERNO
+    if minutos <= 0 or not u.get("model") or em_uso() or time.monotonic() - u["t"] < minutos * 60:
+        return None
+    return dict(u)
+
+
+def precisa_descarregar() -> bool:
+    minutos = int(getattr(config, "DESCARREGAR_OCIOSO_MIN", 15))
+    if minutos <= 0 or localai is None or not localai.status().get("running"):
+        return False
+    from . import llm
+    return not em_uso() and time.monotonic() - llm.ULTIMO_USO["t"] > minutos * 60
+
+
+async def vigia_ociosidade(intervalo: float = 60) -> None:
+    """A cada minuto, como a varredura do navegador: modelo local sem uso há N minutos sai da VRAM (o cache das
+    conversas vai para o disco antes). A próxima mensagem carrega de novo (agent._garante_modelo)."""
+    while True:
+        await asyncio.sleep(intervalo)
+        if (u := externo_ocioso()) is not None:  # E13-B: Ollama local também sai da VRAM
+            from . import llm
+            if await asyncio.to_thread(llm.descarrega_externo, u["provider"], u["model"]):
+                metricas.registra("ociosidade", alias=u["model"], provedor=u["provider"])
+            llm.ULTIMO_EXTERNO.clear()
+        try:
+            if precisa_descarregar():
+                st = localai.status()
+                from pathlib import Path
+                gb = Path(st["path"]).stat().st_size / 2**30 if st.get("path") else 0
+                OCIOSO.update(alias=st.get("alias"), path=st.get("path"), quando=time.time(),
+                              carga_s=round(float(localai.read_config().get("speed") or 0) * gb))  # s/GB medido
+                async for _ in unload("ociosidade"):
+                    pass
+                metricas.registra("ociosidade", alias=st.get("alias"))
+        except Exception as e:  # a vigia nunca morre por um erro de uma volta
+            print(f"Forja: descarga por ociosidade falhou: {e}", flush=True)
+
+
+def recarregar_sob_demanda(spec: dict | None) -> bool:
+    """A conversa quer um modelo local e não há nenhum carregado (descarregado por ociosidade, ou o app
+    acabou de abrir): carregar de novo não derruba ninguém."""
+    return bool(spec) and gerenciavel(spec) and localai is not None and not localai.status().get("running")

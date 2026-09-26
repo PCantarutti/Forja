@@ -26,12 +26,17 @@ export type Approval = {
 
 /** O que está rodando agora: turno do agente e delegações por conversa, e processos vivos. */
 export type Activity = {
-  conversations: { id: number; running: boolean; subagents: number; servers: number; waiting?: number; paused?: boolean; alertas?: number }[];
+  conversations: { id: number; running: boolean; subagents: number; servers: number; waiting?: number; paused?: boolean; alertas?: number;
+    run?: string }[];  // id do turno mais recente (rodando ou recém-terminado)
   servers: number;
   local?: boolean;  // modelo local carregado no llama-server
+  local_alias?: string;  // qual: o seletor com "IA local" segue o que está carregado
+  lista?: string;  // carimbo das conversas: mudou (outro aparelho), a barra lateral recarrega
+  board?: string;  // carimbo do board de issues: card mudou ou varredura começou/terminou
 };
 
-export type Attachment = { path: string; name: string; size: number; mime: string; kind: "image" | "text" | "file" };
+export type Attachment = { path: string; name: string; size: number; mime: string; kind: "image" | "text" | "file" | "video";
+  fps?: number; quadros?: number }; // só em vídeo gerado (video_generate): o player conta quadros com isso
 
 export type Message = {
   id: number;
@@ -50,12 +55,13 @@ export type Conversation = {
   id: number;
   title: string;
   updated_at: string;
-  kind?: "chat" | "agent" | "maestro" | "imagem" | "comparar" | "pesquisa";
+  kind?: "chat" | "agent" | "maestro" | "imagem" | "video" | "comparar" | "pesquisa";
   workspace?: string | null;
   workspace_label?: string;
   pinned?: boolean;
   archived?: boolean;
   snippet?: string; // trecho que casou na busca por conteúdo
+  origem?: { conv_id: number; message_id: number } | null; // Imagens aberta pela IA (skill gerar-imagens)
 };
 
 /** Arquivo alterado pelo agente nesta conversa (checkpoints), com diff do antes para o agora. */
@@ -267,6 +273,7 @@ export type LlamaParams = {
   cache_type_k: string;
   cache_type_v: string;
   kv_unified: boolean;
+  swa_full?: boolean;
   no_kv_offload: boolean;
   mlock: boolean;
   mmap: boolean;
@@ -287,8 +294,11 @@ export type LocalModel = {
   mtime: number;
   shards: number; // > 1 = modelo dividido em vários arquivos
   folder: string;
-  kind: "chat" | "image";
-  params?: ImageParams; // só nos modelos de imagem: ajustes próprios daquele modelo
+  kind: "chat" | "image" | "video";
+  params?: ImageParams; // só nos modelos de imagem e vídeo: ajustes próprios daquele modelo
+  variante?: string; // só nos de vídeo: qual Wan é (chave de REQUISITOS no backend)
+  chave?: string; // caminho normalizado, o mesmo das medições de tempo
+  dim?: number; // dimensão do modelo de vídeo (a LoRA precisa ter a mesma)
   req?: ImageReq | null; // GGUF só-unet (Qwen-Image, Flux): arquivos que ele precisa à parte
   falta?: string[]; // chaves de `req.precisa` sem arquivo configurado
   falta_edicao?: string[]; // idem, contando o que a edição (-r) pede a mais
@@ -314,6 +324,16 @@ export type ImageParams = {
   te_cpu: "" | "gerar" | "editar" | "sempre";
   preview: "" | "none" | "proj" | "tae" | "vae";  // prévia no card enquanto gera ("" = automática)
   taesd: string;
+  // vídeo (Wan)
+  frames: number; // 4k+1
+  fps: number;
+  flow_shift: number; // 0 = automático
+  clip_vision: string;
+  high_noise_model: string; // Wan2.2 A14B: o par HighNoise
+  high_noise_steps: number; // -1 = automático
+  high_noise_cfg: number; // 0 = o mesmo CFG
+  variante: string; // "" = pelo nome do arquivo
+  loras: { path: string; peso: number }[]; // LoRAs aplicadas (vídeo)
 };
 
 /** Metadados lidos do cabeçalho do .gguf. */
@@ -400,6 +420,35 @@ export type ImageReq = {
   precisa: Record<string, [string, string]>; // chave -> [o que baixar, link]
   edita?: Record<string, [string, string]>; // só nos que editam imagem: o que a edição pede a mais
   sugere: Partial<ImageParams>;
+  video?: boolean;
+  modos?: ModoVideo[]; // só nos de vídeo: o que a variante sabe fazer
+  multiplo?: number; // largura e altura precisam ser múltiplos disto
+  resolucoes?: Record<string, [number, number]>; // de treino, na horizontal ("480p": [832, 480])
+  quadros_treino?: number; // o clipe mais longo do treino
+};
+
+/** Texto → vídeo, imagem → vídeo, primeiro e último quadro (pelo número de quadros dados: 0, 1, 2). */
+export type ModoVideo = "t2v" | "i2v" | "flf2v";
+
+/** LoRA nas pastas: `dim` casa com o `dim` do modelo; `passos` > 0 = destilada (acelerador). */
+export type LoraArquivo = LocalModel & { wan: boolean; dim: number; rank: number; ruido: "" | "high" | "low"; passos: number };
+
+/** Kit de download de um Wan: o modelo e as peças que a variante pede, com o que já está no disco. */
+export type VideoKit = {
+  auto?: boolean; // montado sozinho da busca do Hugging Face (não é da lista curada)
+  repo?: string;
+  id: string;
+  nome: string;
+  resumo: string;
+  variante: string;
+  modos: ModoVideo[];
+  arquivos: { repo: string; path: string; gb: number; papel: string; presente: boolean; quant?: string }[];
+  quant: string; // a quantização do modelo neste kit (a maior que cabe, a do disco ou a escolhida)
+  opcoes: { quant: string; gb: number; cabe: boolean | null; presente?: boolean }[];
+  erro?: string; // sem Hugging Face: não dá para saber tamanhos nem baixar
+  gb_modelo: number; // o maior modelo de difusão: é o que precisa caber na VRAM
+  gb_total: number;
+  gb_falta: number;
 };
 
 export type ImageOpts = {
@@ -428,6 +477,17 @@ export type ImageOpts = {
   hires_denoise?: number;
   hires_upscaler?: string; // "Latent", "Lanczos" ou o caminho de um ESRGAN
   descarte_dias: number; // prazo das imagens reprovadas em descartadas/ (0 = guardar para sempre)
+  // vídeo (Wan)
+  frames: number; // 4k+1
+  fps: number;
+  flow_shift: number; // 0 = automático
+  clip_vision: string;
+  high_noise_model: string; // Wan2.2 A14B: o par HighNoise
+  high_noise_steps: number; // -1 = automático
+  high_noise_cfg: number; // 0 = o mesmo CFG
+  variante: string; // "" = pelo nome do arquivo
+  loras: { path: string; peso: number }[]; // LoRAs aplicadas (vídeo)
+  ampliacao?: { origem: string; fator: number; modelo: string; suavizar: boolean; prompt?: string; forca?: number }; // tomada que é ampliação de outra (prompt/forca: redesenho)
 };
 
 /** Uma variação dentro de um lote da seção Imagens. */
@@ -441,13 +501,24 @@ export type LoteImagem = {
   error: string;
   progress?: number; // 0..1, passo da amostragem enquanto gera
   preview?: string; // prévia do passo atual (só com o modo de prévia do modelo ligado)
+  fase?: string; // ampliação SeedVR2 em andamento: "iniciando o ComfyUI", "ampliando"
+  width?: number; // tamanho próprio do slot (skill gerar-imagens); nas outras vale o do lote
+  height?: number;
+  w?: number; // tamanho real do arquivo, quando a alta resolução mudou o do pedido
+  h?: number;
   com_previa?: boolean; // o modelo gera com prévia: o card não usa o líquido, nem antes da 1ª
   s_passo?: number; // segundos por passo, lido do sd-cli
   restante?: number; // segundos até o fim da amostragem
-  fase?: string; // ampliação SeedVR2 em andamento: "iniciando o ComfyUI", "ampliando"
-  w?: number; // tamanho real do arquivo, quando a alta resolução mudou o do pedido
-  h?: number;
+  nome?: string; // slot da skill gerar-imagens: o arquivo mora no projeto, no caminho que o código aponta
+  destino?: string; // presente = é a versão que o site mostra (o arquivo está no caminho do slot)
+  slot?: string; // variação de um slot, fora do site: "Usar no site" troca com a do destino
+  prompt?: string; // prompt próprio do slot/variação (o do pedido do lote vale para as demais)
+  unidade?: string; // "quadro" na ampliação (s/quadro); sem ela, passo
 };
+
+/** Um slot registrado pela ferramenta imagens_pendentes (meta.imagens_pendentes do resultado). */
+export type SlotImagem = { nome: string; caminho: string; rel: string; prompt: string; largura: number | null; altura: number | null };
+export type SlotsPendentes = { message_id: number; slots: SlotImagem[] };
 
 /** meta da mensagem do assistente num lote (a thread do backend vai preenchendo `images`). */
 export type LoteMeta = {
@@ -456,6 +527,7 @@ export type LoteMeta = {
   seed_mode: SeedMode;
   opts: Partial<ImageOpts> & { ampliacao?: { origem: string; fator: number; modelo: string; prompt?: string; forca?: number } }; // ampliação de outra imagem (prompt/forca: redesenho)
   images: LoteImagem[];
+  variacao_de?: string; // variações de um slot: vivem no modal dele, não como lote na tela
 };
 
 /** meta da mensagem do usuário num lote. */
@@ -470,6 +542,7 @@ export type RuntimeInfo = {
   backends: string[]; // o que dá para baixar
   available: { backend: string; exe: string; version: string }[]; // o que já está no disco
   chosen: string; // escolhido à mão em Configurações › Runtime ("" = automático)
+  mb?: number; // ComfyUI: o tamanho do download (o pacote da marca da GPU)
 };
 
 /** Memória da máquina: é o que diz se um modelo cabe na GPU, na RAM, ou em lugar nenhum. */
@@ -483,7 +556,8 @@ export type Hardware = {
 };
 
 export type LocalState = {
-  runtimes: { llama: RuntimeInfo; sd: RuntimeInfo };
+  aviso_padroes?: boolean;  // E4: padrões de cache novos, avisar uma vez
+  runtimes: { llama: RuntimeInfo; sd: RuntimeInfo; ffmpeg: RuntimeInfo; comfy: RuntimeInfo };
   models: LocalModel[];
   server: {
     running: boolean;
@@ -515,7 +589,15 @@ export type LocalState = {
   last: string;
   image: ImageOpts;
   image_dir: string; // pasta onde as imagens do painel são salvas
+  video_dir: string; // pasta dos vídeos da aba Vídeo
   image_models: LocalModel[];
+  video: ImageOpts; // padrões da aba Vídeo
+  video_models: LocalModel[];
+  gpu_video: { nome?: string; gb?: number; folga?: number }; // a GPU que o sd.cpp usa ({} sem runtime)
+  // quanto cada vídeo levou nesta máquina, por modelo e tamanho: base da estimativa
+  tempos_video: { model: string; w: number; h: number; frames: number; passos: number; s_passo: number; s_total: number }[];
+  loras: LoraArquivo[]; // .safetensors que são LoRA, com o que os tensores dizem deles
+  ampliadores: LocalModel[]; // ESRGAN (.pth) da ampliação de vídeo
   port: number;
 };
 
@@ -527,6 +609,10 @@ export type HfModel = {
   updated: string;
   gated: boolean;
   tags: string[];
+  // só na busca de vídeo
+  variante?: string;
+  variante_nome?: string;
+  modos?: ModoVideo[];
 };
 
 /** Ficha de um repositório na janela de busca. */
@@ -546,7 +632,8 @@ export type HfRepo = {
   files: HfFile[];
   readme: string;
 };
-export type HfFile = { path: string; size: number; quant: string; shards: number };
+export type HfFile = { path: string; size: number; quant: string; shards: number; papel?: string;
+  tipo?: "esrgan" | "seedvr2" | "spandrel" | "vae"; subpasta?: string }; // tipo/subpasta: só na busca de ampliação
 
 // ------------------------------------------------------------------ Maestro
 // A Maestro planeja e verifica; os Workers implementam. O estado real vive no SQLite do backend

@@ -1,19 +1,20 @@
 import asyncio
 import hashlib
 import json
+import secrets
 import tempfile
 from contextlib import asynccontextmanager
 
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
                                StreamingResponse)
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from . import (baterias, checkpoints, compact, comparar, config, db, documentos, gitops, goals, imagegen, llm,
+from . import (baterias, board, board_auto, convencoes, mcp_servidor, metricas, checkpoints, compact, comparar, config, db, documentos, gitops, goals, imagegen, llm,
                lotes, lsp,
                mcp_client, memory, mirror, modelctl, pesquisa, policy, projstate, relatorio, runner, settings,
                shell, skills, subagents, taskdb, terminal, uploads, workspace)
@@ -35,12 +36,14 @@ async def lifespan(_app):
     lotes.reap()  # lotes de imagem que ficaram "gerando" quando o backend caiu no meio
     lotes.limpar_descartadas()  # imagens reprovadas que já passaram do prazo
     checkpoints.podar_antigos()  # desfazer de mais de um mês atrás: o banco não cresce para sempre
+    metricas.poda()  # métricas com mais de 60 dias
     # Espelho em Markdown: gera o que falta (banco anterior ao espelho) e limpa .md órfão.
     print(f"Forja: conversas espelhadas em {mirror.ROOT} ({mirror.sync()} arquivo(s) gerado(s))", flush=True)
     # MCP conecta em background: npx/uvx podem demorar e a API não deve esperar (o painel mostra "connecting").
     task = asyncio.create_task(mcp_client.start())
     vivas.add(task)
-    yield
+    async with mcp_servidor.gerente():  # /mcp: o Claude controlando o Forja; o gerente vive com o app
+        yield
     task.cancel()
     await asyncio.gather(*vivas, return_exceptions=True)  # sem isto, "Task exception was never retrieved"
     shell.close_local()     # servidores que o agente subiu DENTRO do container
@@ -51,6 +54,9 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="Forja", lifespan=lifespan)
+# /mcp fora de /api: tem o próprio porteiro (token fixo do MCP + interruptor), não o token da interface.
+from starlette.routing import Route  # noqa: E402
+app.router.routes.append(Route("/mcp", endpoint=mcp_servidor.PORTEIRO, methods=["GET", "POST", "DELETE"]))
 
 
 # ------------------------------------------------------------------ fronteira da API
@@ -394,7 +400,21 @@ async def get_activity():
                 entrada(int(s["conv"]))["servers"] += 1
     except Exception:  # runner fora do ar não pode derrubar a barra lateral
         pass
-    return {"conversations": list(por_conversa.values()), "servers": vivos, "local": False}
+    # Carimbo da lista de conversas: conversa criada, apagada ou renomeada em outro aparelho recarrega a barra.
+    with db.session() as s:
+        n, maior, ultima = s.execute(select(func.count(db.Conversation.id), func.max(db.Conversation.id),
+                                            func.max(db.Conversation.updated_at))).one()
+    try:  # card em andamento cuja conversa acabou vai para Revisão; o carimbo avisa as telas do board
+        await asyncio.to_thread(board.acompanha)
+        quadro = await asyncio.to_thread(board.carimbo)
+    except Exception:
+        quadro = ""
+    try:
+        await board_auto.tique()  # backlog automático (no loop: o Iniciar precisa dele)
+    except Exception as e:  # nunca derruba o /api/activity, que é o pulso das telas
+        print(f"Forja: board automático: {e}", flush=True)
+    return {"conversations": list(por_conversa.values()), "servers": vivos, "local": False,
+            "lista": f"{n}-{maior}-{ultima}", "board": quadro}
 
 
 @app.post("/api/servers/clear")
@@ -1565,6 +1585,12 @@ async def start_run(conv_id: int, body: RunBody):
         raise HTTPException(400, f"permission deve ser um de {', '.join(policy.MODES)}")
     if body.effort not in ("baixo", "medio", "alto", "maximo", "extremo"):
         raise HTTPException(400, "effort deve ser baixo, medio, alto, maximo ou extremo")
+    with db.session() as s:
+        espelho = mcp_servidor.eh_espelho(_get_conv(s, conv_id))
+    if espelho:  # conversa do Claude (MCP): o que o usuário escreve vai para a caixa de entrada dele
+        if not (body.content or "").strip():
+            raise HTTPException(400, "Escreva a mensagem para o Claude.")
+        return _sse(mcp_servidor.recebe_do_usuario(conv_id, body.content), 0)
     if active_run(conv_id):
         raise HTTPException(409, "Esta conversa já tem uma execução em andamento")
     with db.session() as s:
@@ -1625,6 +1651,12 @@ async def queue_message(run_id: str, body: dict):
     run = _get_run(run_id)
     if run.finished:
         raise HTTPException(409, "A execução já terminou; envie normalmente")
+    with db.session() as s:
+        espelho = mcp_servidor.eh_espelho(s.get(db.Conversation, run.conv_id))
+    if espelho:  # conversa do Claude com o Run dele aberto: a fala vai para a caixa de entrada dele, não para a fila
+        for ev in mcp_servidor.guarda_para_o_claude(run.conv_id, content):
+            await run.publish(ev)
+        return {"ok": True, "pending": 0, "claude": True}
     run.queue.append(content)
     await run.publish({"type": "queued", "content": content, "pending": len(run.queue)})
     return {"ok": True, "pending": len(run.queue)}
@@ -1786,3 +1818,267 @@ def maestro_models():
             "slots": subagents.configured(), "active": subagents.ativas(),
             "especialidades": config.WORKER_ESPECIALIDADES, "workers_do_maestro": config.WORKERS_DO_MAESTRO,
             "maestro_model": config.MAESTRO_MODEL}
+
+
+# ------------------------------------------------------------------ vindo do Forja Desktop (board, métricas, trabalho autônomo, skills, MCP)
+
+def _board(fn, *a):
+    # Iniciar e Reabrir disparam um Run, que precisa do laço de eventos: por isso aqueles endpoints são
+    # async (endpoint síncrono roda numa thread, e o Run.start falhava com "no running event loop").
+    try:
+        return fn(*a)
+    except (board.BoardError, workspace.WorkspaceError) as e:
+        raise HTTPException(400, str(e))
+
+
+class AutonomoBody(BaseModel):
+    ligado: bool
+
+
+class SkillBody(BaseModel):
+    name: str
+    description: str = ""
+    prompt: str
+    antigo: str = ""  # nome anterior, quando a pessoa renomeia na tela
+
+
+@app.get("/api/board/projetos")
+def board_projetos():
+    """Pastas que já tiveram conversa de agente/Maestro ou card, pela raiz do projeto: o seletor do board."""
+    vistos: dict[str, float] = {}
+    with db.session() as s:
+        for w, quando in s.execute(select(db.Conversation.workspace, func.max(db.Conversation.updated_at))
+                                   .where(db.Conversation.kind.in_(("agent", "maestro")),
+                                          db.Conversation.workspace.is_not(None))
+                                   .group_by(db.Conversation.workspace)):
+            try:
+                p = board.projeto_de(w)
+            except workspace.WorkspaceError:
+                continue  # pasta que não existe mais
+            vistos[p] = max(vistos.get(p, 0), quando.timestamp() if quando else 0)
+        for (p,) in s.execute(select(db.Issue.projeto).distinct()):
+            vistos.setdefault(p, 0)
+    return [{"projeto": p, "nome": Path(p).name} for p in sorted(vistos, key=lambda k: -vistos[k])]
+
+
+@app.get("/api/board")
+def board_listar(pasta: str):
+    projeto = _board(board.projeto_de, pasta)
+    from . import board_ia
+    return {"projeto": projeto, "issues": board.listar(projeto), "varredura": board.estado_varredura(projeto),
+            "varredura_ia": board_ia.estado(projeto), "aceite_ia": board_ia.aceite(projeto),
+            "comandos": board.comandos_do_projeto(Path(projeto)) or convencoes.comandos(Path(projeto)), "board_card": board.board_card_ligado(projeto),
+            "vinculadas": len(board.vinculadas(projeto))}
+
+
+@app.post("/api/board/issues")
+def board_criar(body: dict):
+    projeto = _board(board.projeto_de, str(body.get("pasta") or ""))
+    return _board(board.criar, projeto, {k: v for k, v in body.items() if k not in ("pasta", "impressao")})[0]
+
+
+@app.get("/api/board/issues/{issue_id}")
+def board_pega(issue_id: int):
+    return _board(board.pega, issue_id)
+
+
+@app.patch("/api/board/issues/{issue_id}")
+def board_atualizar(issue_id: int, body: dict):
+    return _board(board.atualizar, issue_id, body)
+
+
+@app.delete("/api/board/issues/{issue_id}")
+def board_apagar(issue_id: int):
+    board.apagar(issue_id)
+    return {"ok": True}
+
+
+@app.post("/api/board/issues/{issue_id}/rejeitar")
+def board_rejeitar(issue_id: int, body: dict):
+    return _board(board.rejeitar, issue_id, body.get("motivo"))
+
+
+@app.post("/api/board/issues/{issue_id}/iniciar")
+async def board_iniciar(issue_id: int, body: dict):
+    return _board(board.iniciar, issue_id, body.get("modo"))
+
+
+@app.post("/api/board/issues/{issue_id}/reabrir")
+async def board_reabrir(issue_id: int, body: dict):
+    return _board(board.reabrir, issue_id, body.get("comentario"))
+
+
+@app.post("/api/board/varrer")
+def board_varrer(body: dict):
+    return _board(board.varrer, str(body.get("pasta") or ""))
+
+
+@app.post("/mcp/hook")
+async def mcp_hook(request: Request):
+    """Hook do Claude Code (forja_hook.py): o pedido, a resposta e as ferramentas dele entram na conversa-espelho.
+    Fora de /api: autentica pelo token fixo do MCP, não pelo da interface."""
+    if not secrets.compare_digest(request.headers.get("x-forja-token") or "-", mcp_servidor.token()):
+        raise HTTPException(401, "Token do Forja ausente ou errado.")
+    try:
+        dados = await request.json()
+    except ValueError:
+        raise HTTPException(400, "JSON inválido.") from None
+    return await mcp_servidor.hook(dados if isinstance(dados, dict) else {})
+
+
+@app.get("/api/mcp/servidor")
+def mcp_servidor_config():
+    return mcp_servidor.configuracao()
+
+
+@app.post("/api/mcp/servidor/token")
+def mcp_servidor_token():
+    mcp_servidor.rotaciona()
+    mcp_servidor.grava_endereco()
+    return mcp_servidor.configuracao()
+
+
+@app.post("/api/mcp/servidor/hooks")
+def mcp_servidor_hooks(body: dict):
+    """Instala os hooks no Claude Code do projeto (clique do usuário na tela: grava .claude/settings.local.json)."""
+    try:
+        return mcp_servidor.instala_hooks(str(body.get("pasta") or ""))
+    except (ValueError, OSError, workspace.WorkspaceError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/board/varrer-ia")
+async def board_varrer_ia(body: dict):
+    """E15-B: varredura com IA em segundo plano (incremental, prioridade mínima, até 20 cards)."""
+    from . import board_ia
+    return _board(board_ia.varrer, str(body.get("pasta") or ""), bool(body.get("forcar")))
+
+
+@app.post("/api/board/mais")
+def board_mais(body: dict):
+    from . import board_ia
+    return _board(board_ia.trazer_mais, str(body.get("pasta") or ""))
+
+
+@app.post("/api/board/pedir")
+async def board_pedir(body: dict):
+    """'Pedir à IA': conversa de agente que procura bugs/melhorias/ideias e cria os cards (board_card)."""
+    return _board(board.pedir_ia, str(body.get("pasta") or ""), str(body.get("foco") or "tudo"),
+                  str(body.get("subpasta") or ""))
+
+
+@app.post("/api/board/ia")
+def board_ia(body: dict):
+    """Liga/desliga o board_card neste board: desligado, o agente não cria card sozinho (nem vê a ferramenta)."""
+    projeto = _board(board.projeto_de, str(body.get("pasta") or ""))
+    return {"board_card": board.define_board_card(projeto, bool(body.get("ligado")))}
+
+
+@app.get("/api/board/auto")
+def board_auto_estado(pasta: str):
+    return board_auto.estado(_board(board.projeto_de, pasta))
+
+
+@app.post("/api/board/auto")
+def board_auto_define(body: dict):
+    """Executar backlog automaticamente (E15-C): só liga com as travas satisfeitas (sandbox e git)."""
+    projeto = _board(board.projeto_de, str(body.get("pasta") or ""))
+    return _board(board_auto.define, projeto, bool(body.get("ligado")), body.get("por_dia"))
+
+
+@app.get("/api/board/vinculos")
+def board_vinculos(pasta: str):
+    projeto = _board(board.projeto_de, pasta)
+    return {"projeto": projeto, "vinculadas": board.vinculadas(projeto), "sugestoes": board.sugestoes(projeto)}
+
+
+@app.post("/api/board/vinculos")
+def board_vincular(body: dict):
+    projeto = _board(board.projeto_de, str(body.get("pasta_board") or ""))
+    _board(board.vincular, projeto, str(body.get("pasta") or ""))
+    return board_vinculos(projeto)
+
+
+@app.delete("/api/board/vinculos")
+def board_desvincular(pasta: str):
+    board.desvincular(pasta)
+    return {"ok": True}
+
+
+@app.get("/api/perfil")
+async def perfil_hardware():
+    """E4: perfil de hardware vigente (e por quê), os valores dele, o que o usuário mudou por cima e, quando o
+    modelo principal não cabe inteiro na GPU, os GGUFs já baixados que cabem."""
+    from . import perfis
+    v = perfis.vigente()
+    rec = await asyncio.to_thread(perfis.recomendados) if v["perfil"] == "low_vram" else []
+    return {**v, "rotulo": perfis.rotulo(), "valores": perfis.valores(), "nomes": perfis.NOMES,
+            "alterados": sorted(set(perfis.GOVERNADOS) & settings.alterados()),
+            "workers": modelctl.workers_possiveis(int(getattr(config, "MAX_WORKERS", 1))),
+        "recomendados": rec}
+
+
+@app.get("/api/conversations/{conv_id}/autonomo")
+def conversa_autonomo(conv_id: int):
+    """E16-C: trabalho autônomo nesta conversa, mais as opções globais."""
+    from . import autonomo
+    return {"ligado": autonomo.ligado(conv_id), "opcoes": autonomo.opcoes()}
+
+
+@app.put("/api/conversations/{conv_id}/autonomo")
+def conversa_autonomo_define(conv_id: int, body: AutonomoBody):
+    from . import autonomo
+    autonomo.define(conv_id, body.ligado)
+    return {"ligado": autonomo.ligado(conv_id), "opcoes": autonomo.opcoes()}
+
+
+@app.get("/api/metricas")
+async def metricas_resumo(dias: int = 7):
+    """E10: o que a tela de métricas mostra (sucesso na 1ª tentativa, cache do principal, rotas, trocas...)."""
+    return await asyncio.to_thread(metricas.resumo, max(1, min(dias, 60)))
+
+
+@app.get("/api/perfil/workers")
+def perfil_workers(n: int = 1):
+    """E7: quantos de `n` Workers rodam juntos agora (slots do servidor, perfil) e a janela de cada slot."""
+    return modelctl.workers_possiveis(n)
+
+
+@app.post("/api/perfil/voltar")
+def perfil_voltar():
+    """Esquece os ajustes manuais dos valores que o perfil governa."""
+    settings.voltar_ao_perfil()
+    return {"ok": True}
+
+
+@app.post("/api/comparar/{message_id}/revisor")
+def comparar_revisor(message_id: int, body: dict):
+    """Liga ({"revisor": {"provider","model"}}) ou desliga ({"revisor": null}) a revisão automática."""
+    try:
+        return comparar.definir_revisor(message_id, body.get("revisor"))
+    except ToolError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.get("/api/skills")
+def skills_config():
+    """Configurações › Skills: as do Forja, as do usuário (editáveis) e as do projeto da pasta padrão."""
+    return {"skills": skills.para_configuracoes(workspace.default_root()),
+            "pasta": str(skills.pastas(Path("."))[0])}
+
+
+@app.put("/api/skills")
+def skills_salvar(body: SkillBody):
+    try:
+        return skills.salvar_do_usuario(body.name, body.description, body.prompt, body.antigo)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/skills/{nome}")
+def skills_apagar(nome: str):
+    try:
+        skills.apagar_do_usuario(nome)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
