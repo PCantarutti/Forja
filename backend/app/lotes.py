@@ -264,6 +264,8 @@ def _validar_ampliacao(path: str, fator: int, modelo: str) -> None:
         raise ToolError("Amplie uma imagem PNG, JPG ou WebP.")
     if not _existe(path):
         raise ToolError("Esse arquivo não existe (ou não está acessível).")
+    if modelo and not amp.tipo_local(modelo) and not amp.tipo_checkpoint(modelo) and amp.modelo_de_imagem(modelo):
+        return  # redesenho pelo sd-cli: não precisa do ComfyUI
     if modelo and (amp.tipo_local(modelo) in ("seedvr2", "spandrel") or amp.tipo_checkpoint(modelo)):
         if not amp.comfy_dir():
             raise ToolError("Falta o ComfyUI (motor do SeedVR2 e dos DAT/HAT/SwinIR): instale pelo Forja Desktop, "
@@ -315,7 +317,7 @@ def prompt_da_imagem(conteudo: str, meta: dict | None) -> str:
 def _redesenho(modelo: str, prompt: str, forca: float | None) -> dict:
     """Redesenhar (checkpoint de imagem): o prompt e a força vão junto da ampliação (Continuar refaz igual)."""
     from . import ampliar as amp
-    if not (modelo and amp.tipo_checkpoint(modelo)):
+    if not (modelo and (amp.tipo_checkpoint(modelo) or amp.modelo_de_imagem(modelo))):
         return {}
     f = amp.FORCA_PADRAO if forca is None else float(forca)
     if not 0.05 <= f <= 0.9:

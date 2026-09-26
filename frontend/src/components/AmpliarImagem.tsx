@@ -6,7 +6,7 @@ import { btnPrimary } from "./ImagensUi";
 /** O que o backend acha nas pastas de modelos: ESRGAN (rápido, sd-cli) e SeedVR2 (difusão, pelo ComfyUI portátil que
  *  o Forja Desktop instala). Mesma rota do desktop. */
 type Ampliadores = {
-  no_disco: { path: string; name: string; tipo: "esrgan" | "seedvr2" | "spandrel" | "redesenhar" }[];
+  no_disco: { path: string; name: string; tipo: "esrgan" | "seedvr2" | "spandrel" | "redesenhar"; motor?: "comfy" | "sd" }[];
   comfy: { instalado: string };
   erro: string;
 };
@@ -31,7 +31,8 @@ export function PainelAmpliar(props: {
   }, []);
   // SeedVR2 só com o ComfyUI do desktop instalado; nunca é o padrão (leva minutos)
   // SeedVR2 e DAT/HAT/SwinIR (spandrel) rodam no ComfyUI: só aparecem com ele instalado
-  const metodos = (cat?.no_disco ?? []).filter((m) => m.tipo === "esrgan" || !!cat?.comfy?.instalado);
+  // o redesenho pelo sd-cli (Qwen-Image, Flux) não precisa do ComfyUI
+  const metodos = (cat?.no_disco ?? []).filter((m) => m.tipo === "esrgan" || m.motor === "sd" || !!cat?.comfy?.instalado);
   const escolhido = modelo ?? metodos.find((m) => m.tipo === "esrgan")?.path ?? "";
   const tipo = metodos.find((m) => m.path === escolhido)?.tipo;
   const pesado = tipo === "seedvr2";

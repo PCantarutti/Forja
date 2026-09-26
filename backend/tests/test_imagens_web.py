@@ -246,7 +246,7 @@ def test_ampliar_imagem_lanczos_e_esrgan_que_nao_amplia(cfg, monkeypatch):
     with zipfile.ZipFile(esrgan, "w") as z:
         z.writestr("archive/data.pkl", b"conv_first.weight body.0.rdb1.conv1.weight")
     ampliar._achados.cache_clear()
-    assert [x["name"] for x in ampliar.catalogo()["no_disco"]] == ["RealESRGAN_x4plus"]
+    assert [x["name"] for x in ampliar.catalogo()["no_disco"] if x["tipo"] != "redesenhar"] == ["RealESRGAN_x4plus"]
     m = _fim(lotes.ampliar(m["id"], item["path"], 2, host(esrgan))["id"])
     assert m["status"] == "erro" and "mesmo tamanho" in m["meta"]["images"][0]["error"]
     assert "'-M' 'upscale'" in rf.comandos[-1][1] and "'--backend' 'vulkan0'" in rf.comandos[-1][1]
@@ -270,7 +270,7 @@ def test_seedvr2_e_esrgan_antigo_no_catalogo_e_o_driver_pelo_runner(cfg, monkeyp
     _safetensors(m / "seedvr2_3b_fp16.safetensors", ["blocks.0.ada.txt.attn_gate"])
     _safetensors(m / "qualquer-vae.safetensors", ["decoder.up_blocks.0.upsamplers.0.upscale_conv.weight"])
     ampliar._achados.cache_clear()
-    assert {x["name"]: x["tipo"] for x in ampliar.catalogo()["no_disco"]} == {"4x-UltraSharp": "esrgan", "seedvr2_3b_fp16": "seedvr2"}
+    assert {x["name"]: x["tipo"] for x in ampliar.catalogo()["no_disco"] if x["tipo"] != "redesenhar"} == {"4x-UltraSharp": "esrgan", "seedvr2_3b_fp16": "seedvr2"}
     seed = host(m / "seedvr2_3b_fp16.safetensors")
     src = cfg / "a.png"
     Image.new("RGB", (5, 4)).save(src)

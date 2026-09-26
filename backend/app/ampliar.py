@@ -201,12 +201,51 @@ def _achados(_tick: int) -> tuple[dict, ...]:
             if chave in vistos:
                 continue
             tipo = tipo_local(host)  # pelo cabeçalho (8 bytes + o JSON), não pelo nome nem pelo tamanho
-            if not tipo and tipo_checkpoint(host):
-                tipo = "redesenhar"  # SD 1.5/SDXL completo: redesenha a imagem em alta resolução
             if tipo and tipo != "vae":
                 vistos.add(chave)
                 out.append({"path": host, "name": f.stem, "tipo": tipo})
+    # Redesenhar: os modelos de imagem da aba Imagens (arquivos locais). SD 1.5/SDXL de arquivo único pelo ComfyUI (por
+    # blocos); o resto (Qwen-Image, Flux, GGUF), pelo sd-cli
+    for m in imagegen.modelos():  # a lista da aba Imagens aqui inclui os próprios ampliadores: saem pelo conteúdo
+        if m.get("motor") != "api" and not tipo_local(m["path"]):
+            out.append({"path": m["path"], "name": m["name"], "tipo": "redesenhar",
+                        "motor": "comfy" if tipo_checkpoint(m["path"]) else "sd"})
     return tuple(out)
+
+
+def modelo_de_imagem(path: str) -> bool:
+    """Um modelo local da aba Imagens (o sd-cli gera com ele): redesenha pelo sd-cli quando o ComfyUI não abre."""
+    return not tipo_local(path) and any(m["path"] == path and m.get("motor") != "api" for m in imagegen.modelos())
+
+
+def _redesenhar_sd(entrada: str, saida: str, fator: int, modelo: str, prompt: str, forca: float, job_id: str,
+                   progresso=None) -> dict:
+    """Como no desktop: Lanczos até o tamanho final (múltiplo de 16) e o modelo refaz por cima pelo sd-cli, no runner
+    (a imagem de partida vai para a pasta de imagens, que o sistema do usuário enxerga)."""
+    from PIL import Image
+    with Image.open(_c(entrada)) as im:
+        alvo = (im.width * int(fator), im.height * int(fator))
+        W, H = (alvo[0] + 15) // 16 * 16, (alvo[1] + 15) // 16 * 16
+        base = im.convert("RGB").resize((W, H), Image.LANCZOS)
+    inicio = f"{imagegen.out_dir()}/.forja/redesenho-{uuid.uuid4().hex[:8]}.png"
+    _c(inicio).parent.mkdir(parents=True, exist_ok=True)
+    base.save(_c(inicio))
+    if progresso:
+        progresso("redesenhando", None)
+
+    def passo(feito: int, total: int, _s: float) -> None:
+        if progresso and total:
+            progresso(None, feito / total)
+    try:
+        imagegen.generate(prompt or "high quality, detailed, sharp", saida,
+                          {"model": modelo, "width": W, "height": H, "seed": 42, "vae_tiling": True,
+                           "_init": inicio, "_strength": forca}, job_id, (), passo)
+    finally:
+        _c(inicio).unlink(missing_ok=True)
+    if (W, H) != alvo:
+        with Image.open(_c(saida)) as im:
+            im.crop((0, 0, *alvo)).save(_c(saida))
+    return {"w": alvo[0], "h": alvo[1]}
 
 
 def catalogo() -> dict:
@@ -312,6 +351,8 @@ def ampliar_imagem(entrada: str, saida: str, fator: int, modelo: str = "", job_i
     if ck:  # redesenhar: blocos de 1024 no SDXL, 768 no SD 1.5 (o tamanho em que cada um foi treinado)
         return _comfy(entrada, saida, fator, modelo, job_id, progresso, "redesenhar", prompt, forca,
                       1024 if ck == "sdxl" else 768)
+    if modelo and modelo_de_imagem(modelo):
+        return _redesenhar_sd(entrada, saida, fator, modelo, prompt, forca, job_id, progresso)
     with Image.open(_c(entrada)) as im:
         w, h = im.size
         alvo = (w * int(fator), h * int(fator))

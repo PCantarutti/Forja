@@ -592,6 +592,8 @@ def argv(exe: str, prompt: str, out: str, o: dict, refs: list[str] | tuple = ())
         a += ["--vae-tiling"]
     if o.get("hires"):
         a += hires(o)
+    if o.get("_init"):  # redesenho (ampliar.py): a imagem de partida e quanto o modelo pode mudar
+        a += ["-i", str(o["_init"]), "--strength", f"{float(o.get('_strength') or 0.4):g}"]
     if o.get("te_cpu") in ("sempre", "editar" if refs else "gerar"):
         a += ["--backend", f"{_gpu(exe)},te=cpu"]
     modo = modo_previa(o) if o.get("_preview") else None
