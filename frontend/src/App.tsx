@@ -60,6 +60,7 @@ import { ArrowUp, ChevronDown, Edit, ExternalLink, FolderOpen, Laptop, Paperclip
 import type { Activity, Approval, Attachment, BrowserState, Conversation, Draft, MaestroBoard, Message, ModelPhase, RunnerStatus, Settings, Skill, Stats, SubState, Task, ToolCall, ToolsSent } from "./types";
 import MaestroView, { ABAS_MAESTRO, SO_MAESTRO } from "./components/MaestroView";
 import Saudacao from "./components/Saudacao";
+import AberturaSobreposta, { useAbertura } from "./components/AberturaSobreposta";
 
 /** Notificação do sistema quando o Forja não está em foco (execução terminou, aprovação pendente).
  * "Sem foco", não "minimizada": com a janela só atrás de outro programa, document.hidden é falso e o
@@ -1174,8 +1175,8 @@ export default function App() {
     if (s.action === "changes") abrir("changes");
   }
 
-  // Primeiro prompt de uma conversa vazia: a logo da saudação toca a abertura do app antes da conversa.
-  const [abertura, setAbertura] = useState(false);
+  // Primeiro prompt de uma conversa vazia: a abertura do app toca por cima (a conversa não espera).
+  const ab = useAbertura();
 
   async function send(texto?: string, skill = false): Promise<void> {
     const content = (texto ?? input).trim();
@@ -1200,7 +1201,7 @@ export default function App() {
     }
     setError("");
     setInput("");
-    if (!messages.length) setAbertura(true);
+    if (!messages.length) ab.disparar();
     const files = attachments;
     setAttachments([]);
     let id: number;
@@ -1742,10 +1743,9 @@ export default function App() {
     }}
   >
     <div className="mx-auto max-w-3xl px-5 py-6">
-      {((!messages.length && !draft) || abertura) && (
+      {!messages.length && !draft && !running && !ab.voo && (
         <Saudacao
-          animando={abertura}
-          onFimAnimacao={() => setAbertura(false)}
+          ref={ab.saudacao}
           titulo="Olá!"
           sub="Como posso ajudar hoje?"
           nota={
@@ -1772,7 +1772,8 @@ export default function App() {
         />
       )}
 
-      {!abertura && conversaDe(messages, { draft, status, stats: running ? liveStats : null, fase })}
+      {ab.voo && <AberturaSobreposta voo={ab.voo} onFim={ab.fim} />}
+      {conversaDe(messages, { draft, status, stats: running ? liveStats : null, fase })}
       <div ref={fimDoChat} />
     </div>
   </div>

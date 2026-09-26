@@ -14,6 +14,7 @@ import MascaraEditor, { type ModoPintura } from "./MascaraEditor";
 import { Modal } from "./Modal";
 import ModelPicker from "./ModelPicker";
 import Saudacao from "./Saudacao";
+import AberturaSobreposta, { useAbertura } from "./AberturaSobreposta";
 
 const POLL_MS = 1500; // só enquanto um lote roda; fora disso a tela fica parada
 // O modelo que reescreve o prompt é separado do modelo do Chat: quem gera imagem costuma querer
@@ -77,6 +78,7 @@ export default function ImagensView(props: {
   onError: (e: string) => void;
   onConversationChanged: () => void;
 }) {
+  const ab = useAbertura();  // abertura no primeiro envio da tela vazia
   const [st, setSt] = useState<EstadoImagens | null>(null);
   const [abrirMotor, setAbrirMotor] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -215,6 +217,7 @@ export default function ImagensView(props: {
     try {
       // O que está na tela também vira o padrão da ferramenta image_generate do agente.
       await api.put("/imagens/ajustes", { ...o, model: models[0] });
+      if (!lotes.length) ab.disparar();
       const conv = await props.ensureConversation();
       await api.post(`/imagens/${conv}/gerar`, {
         prompt,
@@ -350,8 +353,9 @@ export default function ImagensView(props: {
       />
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-[1400px] px-5 py-4">
-          {!lotes.length && (
+          {!lotes.length && !ab.voo && (
             <Saudacao
+              ref={ab.saudacao}
               titulo="Imagens"
               sub="Descreva, gere várias, fique com as boas."
               nota={
@@ -368,6 +372,7 @@ export default function ImagensView(props: {
             />
           )}
 
+          {ab.voo && <AberturaSobreposta voo={ab.voo} onFim={ab.fim} />}
           {lotes.map(({ pedido, resposta }, i) => (
             <Lote
               key={resposta.id}
