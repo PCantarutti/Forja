@@ -362,6 +362,6 @@ def test_redesenhar_com_checkpoint_sdxl_pelo_comfyui(cfg, monkeypatch):
 def test_alta_resolucao_vai_para_o_sd_cli():
     """Hires fix como no desktop: escala, denoise e ampliador; o ESRGAN vai como pasta + nome sem extensão."""
     from app import imagegen
-    assert imagegen.hires({}) == ["--hires", "--hires-scale", "1.5", "--hires-denoising-strength", "0.45", "--hires-upscaler", "Latent"]
+    assert imagegen.hires({}) == ["--hires", "--hires-scale", "1.5", "--hires-denoising-strength", "0.45", "--hires-upscaler", "Lanczos"]
     a = imagegen.hires({"hires_scale": 2, "hires_upscaler": "C:\\Modelos\\up\\4x-UltraSharp.pth"})
     assert a[a.index("--hires-upscalers-dir") + 1] == "C:/Modelos/up" and a[-1] == "4x-UltraSharp" and "2" in a

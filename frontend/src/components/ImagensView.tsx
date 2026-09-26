@@ -1207,9 +1207,9 @@ function AltaResolucao(props: { o: ImageOpts; set: <K extends keyof ImageOpts>(k
                    onChange={(e) => set("hires_denoise", Number(e.target.value))} className={numeroCaixa} />
           </Caixa>
           <Caixa rotulo="Ampliador">
-            <select value={o.hires_upscaler || "Latent"} onChange={(e) => set("hires_upscaler", e.target.value)} className={`${numeroCaixa} -ml-1 cursor-pointer`}>
-              <option value="Latent">Latente</option>
+            <select value={o.hires_upscaler || "Lanczos"} onChange={(e) => set("hires_upscaler", e.target.value)} className={`${numeroCaixa} -ml-1 cursor-pointer`}>
               <option value="Lanczos">Lanczos</option>
+              <option value="Latent">Latente (pede denoise alto)</option>
               {esrgans.map((m) => <option key={m.path} value={m.path}>{m.name}</option>)}
             </select>
           </Caixa>

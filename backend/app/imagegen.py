@@ -59,7 +59,8 @@ DEFAULT_IMAGE = {
     "offload": False, "flash_attn": False, "vae_tiling": False,
     # alta resolução (hires fix do sd-cli), como no desktop: escala, denoise da 2ª passada e o ampliador ("Latent",
     # "Lanczos" ou o caminho de um ESRGAN)
-    "hires": False, "hires_scale": 1.5, "hires_denoise": 0.45, "hires_upscaler": "Latent",
+    # ampliador padrão Lanczos: o "Latent" (o padrão do sd-cli) deixou fantasmas no Qwen-Image 2.1 com denoise 0,45
+    "hires": False, "hires_scale": 1.5, "hires_denoise": 0.45, "hires_upscaler": "Lanczos",
     "te_cpu": "",   # "" (nunca), "gerar", "editar" ou "sempre": codificador de texto na CPU
     "preview": "",  # "" (automática), "none", "proj", "tae", "vae"
     "taesd": "",
@@ -557,7 +558,7 @@ def hires(o: dict) -> list[str]:
     resolve com o nome curto 8.3, que daqui do container não dá para pedir)."""
     a = ["--hires", "--hires-scale", f"{float(o.get('hires_scale') or 1.5):g}",
          "--hires-denoising-strength", f"{float(o.get('hires_denoise') or 0.45):g}"]
-    amp = str(o.get("hires_upscaler") or "Latent")
+    amp = str(o.get("hires_upscaler") or "Lanczos")
     if amp.lower().endswith((".pth", ".safetensors")):
         pasta, _, nome = amp.replace("\\", "/").rpartition("/")
         return a + ["--hires-upscalers-dir", pasta, "--hires-upscaler", nome.rsplit(".", 1)[0]]
