@@ -1,4 +1,5 @@
 import { createContext, memo, useContext, useEffect, useRef, useState } from "react";
+import CartaoEstado, { botaoEstado, botaoEstadoPrimario } from "./CartaoEstado";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -978,9 +979,12 @@ export function EventNotice({ m }: { m: Message }) {
   if (kind === "tasks") return <TasksCard tasks={m.meta?.tasks ?? []} />;
   if (kind === "summary")
     return (
-      <details className="my-3 rounded-xl border border-line bg-surface px-4 py-2.5 text-sm text-muted">
-        <summary className="cursor-pointer select-none">
-          Contexto compactado: o histórico anterior foi resumido para caber na janela do modelo
+      <details className="group/c my-3 rounded-xl border border-line px-3 py-[9px] text-[12.5px] text-muted">
+        <summary className="flex cursor-pointer list-none items-center gap-2 select-none">
+          <span>Contexto compactado</span>
+          <span className="truncate text-faint">o histórico anterior foi resumido para caber na janela do modelo</span>
+          <span className="ml-auto shrink-0 text-faint group-open/c:hidden">expandir ▾</span>
+          <span className="ml-auto hidden shrink-0 text-faint group-open/c:inline">recolher ▴</span>
         </summary>
         <div className="mt-2 border-t border-line pt-2">
           <Markdown text={m.content} />
@@ -1118,8 +1122,8 @@ export function QuestionCard(props: { questions: AskQuestion[]; done?: Message; 
   const sel = picked[at] ?? [];
   const livre = (texts[at] ?? "").trim();
   const last = at === qs.length - 1;
-  const primary = "rounded-full bg-accent px-4 py-1.5 text-sm font-medium text-accent-fg hover:brightness-110 disabled:opacity-40";
-  const secondary = "rounded-full border border-line px-4 py-1.5 text-sm text-fg hover:bg-raised";
+  const primary = botaoEstadoPrimario;
+  const secondary = botaoEstado;
 
   function toggle(label: string) {
     setPicked((p) =>
@@ -1141,16 +1145,14 @@ export function QuestionCard(props: { questions: AskQuestion[]; done?: Message; 
   }
 
   return (
-    <div className={`my-3 overflow-hidden rounded-2xl border ${decided ? "border-line" : "border-amber-500/50"} bg-surface`}>
-      <div className="flex items-start gap-2 border-b border-line px-4 py-2.5 text-sm">
+    <div className={`my-3 overflow-hidden rounded-[14px] border ${decided ? "border-line" : "border-accent-line"} bg-surface`}>
+      <div className="flex items-start gap-2 border-b border-line px-3.5 py-2.5 text-[13px]">
         {decided ? (
-          <span className="text-fg">{qs.length > 1 ? "Perguntas do agente" : "Pergunta do agente"}</span>
+          <b className="font-semibold text-fg">{qs.length > 1 ? "O agente perguntou" : "O agente perguntou"}</b>
         ) : (
           <>
-            <span className="mt-0.5 shrink-0 font-mono text-[11px] text-amber-300">
-              {at + 1}/{qs.length}
-            </span>
-            <span className="font-medium text-fg">{q.question}</span>
+            <b className="shrink-0 font-semibold text-fg">O agente pergunta</b>
+            {qs.length > 1 && <span className="mt-px shrink-0 font-mono text-[11px] text-accent-text">{at + 1}/{qs.length}</span>}
             {q.header && <span className="ml-auto shrink-0 pl-2 text-xs text-faint">{q.header}</span>}
           </>
         )}
@@ -1173,7 +1175,8 @@ export function QuestionCard(props: { questions: AskQuestion[]; done?: Message; 
         </div>
       ) : (
         <>
-          <div className="space-y-2 p-4">
+          <div className="space-y-1.5 px-3.5 py-3">
+            <div className="pb-1 text-[13px] text-fg-2">{q.question}</div>
             {q.options.map((o, i) => {
               const on = sel.includes(o.label);
               const vis = parteOpcao(o);
@@ -1181,7 +1184,7 @@ export function QuestionCard(props: { questions: AskQuestion[]; done?: Message; 
                 <button
                   key={i}
                   onClick={() => toggle(o.label)}
-                  className={`flex w-full items-start gap-3 rounded-xl border px-3 py-2.5 text-left ${on ? "border-fg/50 bg-raised" : "border-line hover:bg-raised/60"}`}
+                  className={`flex w-full items-start gap-3 rounded-[8px] border px-2.5 py-1.5 text-left ${on ? "border-accent bg-accent/[.08]" : "border-line hover:bg-raised/60"}`}
                 >
                   <span className="min-w-0 flex-1">
                     <span className="block text-sm text-fg">{vis.label}</span>
@@ -1198,9 +1201,9 @@ export function QuestionCard(props: { questions: AskQuestion[]; done?: Message; 
             {!!q.options.length && (
               <button
                 onClick={() => livreRef.current?.focus()}
-                className="flex w-full items-center gap-3 rounded-xl border border-line px-3 py-2.5 text-left hover:bg-raised/60"
+                className="flex w-full items-center gap-3 rounded-[8px] border border-dashed border-line-strong px-2.5 py-1.5 text-left text-faint hover:bg-raised/60 hover:text-fg"
               >
-                <span className="flex-1 text-sm text-fg">Outro</span>
+                <span className="flex-1 text-sm">Outra resposta…</span>
                 <span className="grid size-4 shrink-0 place-items-center rounded-full border border-line text-[10px] text-faint">
                   {q.options.length + 1}
                 </span>
@@ -1218,7 +1221,7 @@ export function QuestionCard(props: { questions: AskQuestion[]; done?: Message; 
                 }
               }}
               placeholder="Digite sua própria resposta aqui"
-              className="w-full rounded-xl border border-line bg-raised px-3 py-2 text-sm text-fg focus:outline-none"
+              className="w-full rounded-[8px] border border-line bg-bg px-2.5 py-1.5 text-sm text-fg focus:border-focus focus:outline-none"
             />
             <div className="flex items-center gap-2 pt-1">
               {at > 0 && (
