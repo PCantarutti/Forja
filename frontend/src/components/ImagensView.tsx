@@ -13,6 +13,7 @@ import { colunasPara, distribuir } from "./mosaico";
 import MascaraEditor, { type ModoPintura } from "./MascaraEditor";
 import { Modal } from "./Modal";
 import ModelPicker from "./ModelPicker";
+import Saudacao from "./Saudacao";
 
 const POLL_MS = 1500; // só enquanto um lote roda; fora disso a tela fica parada
 // O modelo que reescreve o prompt é separado do modelo do Chat: quem gera imagem costuma querer
@@ -350,21 +351,21 @@ export default function ImagensView(props: {
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-[1400px] px-5 py-4">
           {!lotes.length && (
-            <div className="mt-[18vh] text-center">
-              <div className="text-3xl font-semibold">Imagens</div>
-              <div className="text-3xl text-faint">Descreva, gere várias, fique com as boas.</div>
-              <p className="mx-auto mt-4 max-w-lg text-sm text-muted">
-                {semRuntime || semModelo ? (
-                  <>
-                    Nenhum modelo ainda. Aponte o sd-cli e a pasta dos seus modelos (roda na sua GPU pelo
+            <Saudacao
+              titulo="Imagens"
+              sub="Descreva, gere várias, fique com as boas."
+              nota={
+                semRuntime || semModelo ? (
+                  <span>
+                    <span className="text-warn">Nenhum modelo ainda.</span> Aponte o sd-cli e a pasta dos seus modelos (roda na sua GPU pelo
                     forja-runner) ou adicione um modelo de nuvem.{" "}
-                    <button className="underline text-fg" onClick={() => setAbrirMotor(true)}>Motor e modelos</button>
-                  </>
+                    <button className="text-fg underline" onClick={() => setAbrirMotor(true)}>Motor e modelos</button>
+                  </span>
                 ) : (
-                  "As reprovadas vão para a subpasta descartadas/ e somem sozinhas depois do prazo — nada é apagado na hora."
-                )}
-              </p>
-            </div>
+                  "As reprovadas vão para descartadas/ e somem sozinhas depois do prazo — nada é apagado na hora."
+                )
+              }
+            />
           )}
 
           {lotes.map(({ pedido, resposta }, i) => (
