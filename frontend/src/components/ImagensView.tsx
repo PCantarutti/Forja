@@ -7,8 +7,9 @@ import { BotaoEnviar, CaixaPrompt, DireitaPrompt, RodapePrompt, campoPrompt, lar
 import { btn, btnPrimary, campo, Field, input, Num, SAMPLERS } from "./ImagensUi";
 import ImagensMotor, { type EstadoImagens } from "./ImagensMotor";
 import { Lightbox } from "./MessageView";
-import { Modal } from "./Modal";
+import { colunasPara, distribuir } from "./mosaico";
 import MascaraEditor, { type ModoPintura } from "./MascaraEditor";
+import { Modal } from "./Modal";
 import ModelPicker from "./ModelPicker";
 
 const POLL_MS = 1500; // só enquanto um lote roda; fora disso a tela fica parada
@@ -45,6 +46,31 @@ const A_REFAZER: LoteImagem["status"][] = ["interrompida", "pendente", "cancelad
 
 const MAX_REFS = 10;  // Qwen-Image 2.1; o backend barra também
 const urlDa = (p: string) => `/api/imagens/arquivo?path=${encodeURIComponent(p)}`;
+/** Largura/altura do lote, presa entre 1:2 e 2.4:1 para um banner não virar fita. */
+const proporcaoDe = (opts?: { width?: number; height?: number }) =>
+  opts?.width && opts?.height ? Math.min(2.4, Math.max(0.5, opts.width / opts.height)) : 1;
+
+/** Galeria em mosaico: colunas independentes, cada cartão na coluna mais baixa (ver mosaico.ts). */
+function Mosaico({ proporcoes, children }: { proporcoes: number[]; children: React.ReactNode[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [n, setN] = useState(4);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setN(colunasPara(e.contentRect.width)));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const chave = proporcoes.join();
+  const cols = useMemo(() => distribuir(proporcoes, n), [chave, n]);
+  return (
+    <div ref={ref} className="flex items-start gap-3">
+      {cols.map((c, i) => (
+        <div key={i} className="flex min-w-0 flex-1 flex-col gap-3">{c.map((k) => children[k])}</div>
+      ))}
+    </div>
+  );
+}
 const rodando = (m: Message) => m.role === "assistant" && m.status === "running";
 
 export default function ImagensView(props: {
@@ -820,11 +846,12 @@ function Lote(props: {
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
+      <Mosaico proporcoes={imagens.map(() => proporcaoDe(meta.opts))}>
         {imagens.map((img) => (
           <Cartao
             key={img.path}
             img={img}
+            proporcao={proporcaoDe(meta.opts)}
             marcada={sel.has(img.path)}
             onMarcar={() =>
               setSel((s) => {
@@ -843,7 +870,7 @@ function Lote(props: {
             origem={(props.pedido.meta as PedidoMeta | null)?.refs?.[0] ?? meta.opts.ampliacao?.origem}
           />
         ))}
-      </div>
+      </Mosaico>
 
       <div className="mt-2.5 flex flex-wrap items-center gap-2 text-xs">
         {viva ? (
@@ -997,8 +1024,10 @@ function Cartao(props: {
   onEditar: () => void;
   onAmpliar: () => void;
   origem?: string; // edição: a imagem que está sendo editada aparece por trás enquanto gera
+  proporcao?: number; // largura/altura do lote (1 = quadrada)
 }) {
   const { img } = props;
+  const ar = { aspectRatio: String(props.proporcao ?? 1) };
   const temArquivo = ["pronta", "mantida", "descartada"].includes(img.status);
   // Com prévia, a imagem fica inteira à vista: o andamento vai num anel no lugar da bolinha de marcar
   // (que aparece ali quando ela fica pronta) e o número no rodapé. Sem prévia, o líquido por cima.
@@ -1016,12 +1045,13 @@ function Cartao(props: {
           src={urlDa(img.path)}
           alt={`semente ${img.seed}`}
           onClick={props.onZoom}
-          className={`aspect-square w-full cursor-zoom-in object-cover ${
+          style={ar}
+          className={`w-full cursor-zoom-in object-cover ${
             img.status === "descartada" ? "opacity-40 grayscale" : ""
           }`}
         />
       ) : (
-        <div className="relative grid aspect-square w-full place-items-center overflow-hidden">
+        <div style={ar} className="relative grid w-full place-items-center overflow-hidden">
           {/* A prévia do passo atual e, até ela chegar, a imagem em edição. */}
           {img.status !== "erro" && (
             <Fundo
