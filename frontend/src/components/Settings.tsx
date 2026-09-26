@@ -63,14 +63,26 @@ type Memory = {
   raw?: string;
 };
 
-const TABS = ["Aplicativo", "Geral", "Provedores", "Subagentes", "Maestro", "Ferramentas", "Permissões", "MCP", "Memória"] as const;
+const TABS = ["Aplicativo", "Tema", "Geral", "Provedores", "Subagentes", "Maestro", "Ferramentas", "Permissões", "MCP", "Memória"] as const;
 type Tab = (typeof TABS)[number];
-// Navegação agrupada do redesign ("Aplicativo" = tema, destaque, fonte e iniciais).
+// Navegação agrupada do redesign ("Tema" = cores, destaque e fonte; "Aplicativo" = iniciais).
 const GRUPOS: { titulo: string; tabs: Tab[] }[] = [
-  { titulo: "App", tabs: ["Aplicativo", "Geral"] },
+  { titulo: "App", tabs: ["Aplicativo", "Tema", "Geral"] },
   { titulo: "Modelos", tabs: ["Provedores", "Subagentes", "Maestro"] },
   { titulo: "Agente", tabs: ["Ferramentas", "Permissões", "MCP", "Memória"] },
 ];
+
+// O subtítulo ao lado do nome da aba, no cabeçalho (como no design).
+const SUBTITULO: Partial<Record<Tab, string>> = {
+  Aplicativo: "Como o app aparece para você",
+  Tema: "Cores, destaque e fonte",
+  Geral: "Prompt, limites e navegador",
+  Provedores: "Onde os modelos rodam",
+  Subagentes: "delegate_task: o agente escolhe o nível",
+  Maestro: "Planeja, despacha e valida",
+  Ferramentas: "O que está desligado não vai no tools nem no prompt",
+  MCP: "mcp.json na pasta de dados",
+};
 
 const input = "w-full rounded-[9px] border border-line bg-surface px-3 py-1.5 text-[13px] text-fg focus:border-focus focus:outline-none";
 const btn = "rounded-[9px] border border-line px-3 py-1.5 text-[12.5px] text-fg hover:bg-raised";
@@ -102,7 +114,7 @@ function Field({ label, hint, children, div }: { label: string; hint?: string; c
   );
 }
 
-/** Tema, destaque, fonte e iniciais: aplicam na hora, sem Salvar. */
+/** Tema, destaque e fonte: aplicam na hora, sem Salvar. */
 function Aparencia() {
   const [a, setA] = useState(lerAparencia);
   const muda = (p: Partial<typeof a>) => {
@@ -135,10 +147,6 @@ function Aparencia() {
           {a.destaque && <button type="button" className={btn} onClick={() => muda({ destaque: null })}>Usar a do tema</button>}
         </div>
       </Field>
-      <Field label="Iniciais" hint="O círculo no pé do trilho de seções. Até 3 letras.">
-        <input className={`${input} w-24 font-mono uppercase`} maxLength={3} value={a.iniciais}
-               onChange={(e) => muda({ iniciais: e.target.value.toUpperCase() })} />
-      </Field>
       <Field div label="Fonte" hint="Interface e código (números, caminhos, sementes).">
         <div className="grid gap-2">
           {FONTES.map((f) => (
@@ -149,6 +157,23 @@ function Aparencia() {
             </button>
           ))}
         </div>
+      </Field>
+    </div>
+  );
+}
+
+/** As iniciais do círculo no pé do trilho (ficam no localStorage, junto da aparência). */
+function Iniciais() {
+  const [a, setA] = useState(lerAparencia);
+  return (
+    <div className="max-w-3xl">
+      <Field label="Iniciais" hint="O círculo no pé do trilho de seções. Até 3 letras.">
+        <input className={`${input} w-24! font-mono uppercase`} maxLength={3} value={a.iniciais}
+               onChange={(e) => {
+                 const n = { ...a, iniciais: e.target.value.toUpperCase() };
+                 setA(n);
+                 salvarAparencia(n);
+               }} />
       </Field>
     </div>
   );
@@ -247,7 +272,8 @@ export default function Settings(props: {
 
         <div className="flex min-w-0 flex-1 flex-col">
           <header className="flex items-center gap-3 border-b border-line px-6 py-3.5">
-            <h2 className="flex-1 text-[17px] font-semibold text-fg">{tab}</h2>
+            <h2 className="text-[17px] font-semibold text-fg">{tab}</h2>
+            <span className="min-w-0 flex-1 truncate text-[12.5px] text-faint">{SUBTITULO[tab]}</span>
             {error && <span className="truncate text-sm text-err">{error}</span>}
             {descartar && (
               <span className="inline-flex items-center gap-1.5 text-xs">
@@ -264,6 +290,8 @@ export default function Settings(props: {
 
           <div className="flex-1 overflow-y-auto px-6 py-2">
             {tab === "Aplicativo" ? (
+              <Iniciais />
+            ) : tab === "Tema" ? (
               <Aparencia />
             ) : !s ? (
               <div className="text-muted">Carregando…</div>
@@ -340,7 +368,7 @@ export default function Settings(props: {
             <button onClick={props.onClose} className={btn}>
               {Object.keys(dirty).length ? "Cancelar" : "Fechar"}
             </button>
-            {!["MCP", "Memória", "Aplicativo"].includes(tab) && (
+            {!["MCP", "Memória", "Aplicativo", "Tema"].includes(tab) && (
               <button className={btnPrimary} disabled={busy || !Object.keys(dirty).length} onClick={() => save()}>
                 Salvar
               </button>
