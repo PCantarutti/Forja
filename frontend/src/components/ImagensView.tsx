@@ -291,6 +291,8 @@ export default function ImagensView(props: {
       {pintando && (
         <MascaraEditor src={urlDa(pintando)} onClose={() => setPintando(null)} onPronta={(png, modo) => usarPintura(pintando, png, modo)} />
       )}
+      <div className="flex min-h-0 flex-1">
+      <div className="flex min-w-0 flex-1 flex-col">
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-5xl px-5 py-6">
           {!lotes.length && (
@@ -364,21 +366,6 @@ export default function ImagensView(props: {
             <ImagensMotor st={st} onMudou={carregarLocal} onError={mostrarErro} onFechar={() => setAbrirMotor(false)} />
           )}
 
-          {abrirAjustes && (
-            <Ajustes
-              onMotor={() => setAbrirMotor(true)}
-              st={st}
-              o={o}
-              set={set}
-              models={models}
-              onModels={setModels}
-              divisao={divisao}
-              seedMode={seedMode}
-              onSeedMode={setSeedMode}
-              onError={mostrarErro}
-              onFechar={() => setAbrirAjustes(false)}
-            />
-          )}
 
           <CaixaPrompt>
             {refs.length > 0 && (
@@ -483,7 +470,7 @@ export default function ImagensView(props: {
                 <Sliders className="size-3.5" />
                 {models.length ? `${models.length} modelo${models.length > 1 ? "s" : ""}` : "Escolher modelo"}
               </button>
-              <label className={`${pilula} focus-within:border-[#555]`} title="Quantas variações gerar">
+              <label className={`${pilula} focus-within:border-focus`} title="Quantas variações gerar">
                 <Copy className="size-3.5" />
                 <input
                   type="number"
@@ -525,6 +512,23 @@ export default function ImagensView(props: {
             O sd.cpp gera uma imagem por vez e libera a memória no fim — um lote é uma fila.
           </p>
         </div>
+      </div>
+      </div>
+      {abrirAjustes && (
+        <Ajustes
+          onMotor={() => setAbrirMotor(true)}
+          st={st}
+          o={o}
+          set={set}
+          models={models}
+          onModels={setModels}
+          divisao={divisao}
+          seedMode={seedMode}
+          onSeedMode={setSeedMode}
+          onError={mostrarErro}
+          onFechar={() => setAbrirAjustes(false)}
+        />
+      )}
       </div>
     </>
   );
@@ -576,9 +580,9 @@ function Ajustes(props: {
   }
 
   return (
-    <div className="mb-2 rounded-2xl border border-line bg-surface p-3.5 text-xs">
-      <div className="mb-2.5 flex items-center gap-2">
-        <span className="font-medium text-fg">Ajustes da geração</span>
+    <aside className="flex w-[292px] shrink-0 flex-col overflow-y-auto border-l border-line bg-side p-4 text-xs">
+      <div className="mb-3 flex items-center gap-2">
+        <span className="font-mono text-[10.5px] font-medium tracking-[.08em] text-faint uppercase">Ajustes da geração</span>
         <button onClick={props.onMotor} className="ml-2 underline text-muted hover:text-fg">
           Motor e modelos
         </button>
@@ -587,7 +591,7 @@ function Ajustes(props: {
         </button>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-2">
+      <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-2.5">
           <Field label="Modelos" hint="Marque mais de um para dividir as variações entre eles.">
             <div className="flex max-h-40 flex-col gap-1 overflow-y-auto rounded-lg border border-line p-1.5">
@@ -596,7 +600,7 @@ function Ajustes(props: {
                 const ativo = props.models.includes(m.path);
                 return (
                   <label key={m.path} className="flex cursor-pointer items-center gap-2 rounded-md px-1 py-0.5 hover:bg-raised">
-                    <input type="checkbox" checked={ativo} onChange={() => alternar(m.path)} className="accent-white" />
+                    <input type="checkbox" checked={ativo} onChange={() => alternar(m.path)} className="accent-[var(--accent)]" />
                     <span className={`min-w-0 flex-1 truncate ${ativo ? "text-fg" : "text-muted"}`} title={m.path}>
                       {m.name}
                     </span>
@@ -622,7 +626,7 @@ function Ajustes(props: {
                       set("width", p.width);
                       set("height", p.height);
                     }}
-                    className={`rounded-full px-2.5 py-0.5 ${ativo ? "bg-raised text-fg" : "text-muted hover:text-fg"}`}
+                    className={`rounded-full px-2.5 py-0.5 ${ativo ? "bg-accent-soft text-accent-text" : "text-muted hover:bg-raised hover:text-fg"}`}
                   >
                     {p.label}
                   </button>
@@ -654,7 +658,7 @@ function Ajustes(props: {
                 <button
                   key={s.id}
                   onClick={() => props.onSeedMode(s.id)}
-                  className={`rounded-full px-2.5 py-0.5 ${props.seedMode === s.id ? "bg-raised text-fg" : "text-muted hover:text-fg"}`}
+                  className={`rounded-full px-2.5 py-0.5 ${props.seedMode === s.id ? "bg-accent-soft text-accent-text" : "text-muted hover:bg-raised hover:text-fg"}`}
                 >
                   {s.label}
                 </button>
@@ -690,7 +694,7 @@ function Ajustes(props: {
           </div>
         </div>
       </div>
-    </div>
+    </aside>
   );
 }
 
@@ -849,7 +853,18 @@ function Lote(props: {
           </button>
         ) : (
           aprovaveis.length > 0 && (
-            <>
+            <div className="sticky bottom-3 z-10 flex w-full flex-wrap items-center gap-2 rounded-[14px] border border-line-strong bg-surface px-3.5 py-2.5 shadow-float">
+              <span className="text-[13px] font-medium text-fg">{sel.size} marcada{sel.size === 1 ? "" : "s"}</span>
+              <span className="text-faint">as outras vão para <span className="font-mono">descartadas/</span></span>
+              <span className="flex-1" />
+              {sel.size > 0 && (
+                <button className={btn} onClick={() => setSel(new Set())}>
+                  Limpar seleção
+                </button>
+              )}
+              <button className={btn} onClick={() => setSel(new Set(aprovaveis.map((i) => i.path)))}>
+                Marcar todas
+              </button>
               <button
                 className={btnPrimary}
                 disabled={salvando}
@@ -861,15 +876,7 @@ function Lote(props: {
                   ? `Manter ${sel.size} · descartar ${aprovaveis.length - sel.size}`
                   : `Descartar todas (${aprovaveis.length})`}
               </button>
-              <button className={btn} onClick={() => setSel(new Set(aprovaveis.map((i) => i.path)))}>
-                Marcar todas
-              </button>
-              {sel.size > 0 && (
-                <button className={btn} onClick={() => setSel(new Set())}>
-                  Limpar seleção
-                </button>
-              )}
-            </>
+            </div>
           )
         )}
         {!viva && faltam > 0 && (
@@ -969,7 +976,7 @@ function rotuloSementes(sementes: number[], modo: SeedMode): string {
 }
 
 function Chip({ children }: { children: React.ReactNode }) {
-  return <span className="rounded-full bg-raised px-2 py-0.5">{children}</span>;
+  return <span className="rounded-[5px] bg-raised px-2 py-0.5 font-mono text-[11px] text-fg-2">{children}</span>;
 }
 
 /** O prompt de partida do redesenho: o da geração; numa ampliação, o do redesenho dela; o nome de arquivo de uma
@@ -1001,7 +1008,7 @@ function Cartao(props: {
   return (
     <figure
       className={`group relative overflow-hidden rounded-xl border ${
-        props.marcada ? "border-emerald-500" : "border-line"
+        props.marcada ? "border-accent ring-[3px] ring-accent/15" : "border-line"
       } bg-raised`}
     >
       {temArquivo ? (
@@ -1060,14 +1067,14 @@ function Cartao(props: {
           onClick={props.onMarcar}
           title={props.marcada ? "Desmarcar" : "Marcar para manter"}
           className={`absolute left-2 top-2 grid size-6 place-items-center rounded-full border ${
-            props.marcada ? "border-emerald-400 bg-emerald-500 text-black" : "border-line bg-black/60 text-transparent hover:text-white"
+            props.marcada ? "border-accent bg-accent text-accent-fg" : "border-white/30 bg-black/55 text-transparent hover:text-white"
           }`}
         >
           <Check className="size-3.5" />
         </button>
       )}
 
-      <figcaption className="flex items-center gap-1.5 px-2 py-1.5 text-[11px]">
+      <figcaption className="flex items-center gap-1.5 px-2 py-1.5 font-mono text-[11px]">
         <span className={`min-w-0 flex-1 truncate ${CORES[img.status]}`} title={`${img.model_name} · ${img.path}`}>
           {img.model_name || "—"}
         </span>

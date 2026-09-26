@@ -1,7 +1,15 @@
 import { Component, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import "@fontsource-variable/atkinson-hyperlegible-next";
+import "@fontsource-variable/jetbrains-mono";
+import "@fontsource-variable/ibm-plex-sans";
+import "@fontsource/ibm-plex-mono/400.css";
+import "@fontsource/ibm-plex-mono/500.css";
 import "./index.css";
+import { aplicarAparencia, lerAparencia } from "./aparencia";
+
+aplicarAparencia(lerAparencia());
 
 /**
  * Sem isto, um erro de render derruba a árvore inteira e sobra a página vazia (tela preta que não
@@ -34,7 +42,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { erro: Error | n
           <div className="flex gap-2">
             <button
               onClick={() => location.reload()}
-              className="rounded-full bg-fg px-4 py-1.5 text-sm font-medium text-black hover:bg-white"
+              className="rounded-full bg-accent px-4 py-1.5 text-sm font-medium text-accent-fg hover:brightness-110"
             >
               Recarregar
             </button>

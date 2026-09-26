@@ -24,12 +24,13 @@ import Trajetoria from "./components/Trajetoria";
 import TodosBar from "./components/TodosBar";
 import Confirma from "./components/Confirma";
 import { LogoMark } from "./components/Logo";
+import { lerAparencia } from "./aparencia";
 import {
-  EffortMenu,
   ModeWarning,
   nextPermission,
-  PermissionMenu,
-  SectionTabs,
+  ModeEffortMenu,
+  SectionRail,
+  SECOES,
   type Permission,
   type Section,
 } from "./components/Controls";
@@ -418,6 +419,32 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("forja.sidebar", sidebarHidden ? "hidden" : "visible");
   }, [sidebarHidden]);
+
+  const [iniciais, setIniciais] = useState(() => lerAparencia().iniciais);
+  useEffect(() => {
+    const h = () => setIniciais(lerAparencia().iniciais);
+    window.addEventListener("forja-aparencia", h);
+    return () => window.removeEventListener("forja-aparencia", h);
+  }, []);
+
+  // Atalhos do shell: Ctrl 1–7 troca de seção, Ctrl , abre Configurações, Ctrl K vai para a busca.
+  const atalhos = useRef<(e: KeyboardEvent) => void>(() => {});
+  atalhos.current = (e) => {
+    if (!e.ctrlKey || e.altKey || e.shiftKey) return;
+    const n = Number(e.key);
+    if (n >= 1 && n <= SECOES.length) changeSection(SECOES[n - 1].id);
+    else if (e.key === ",") setShowSettings(true);
+    else if (e.key.toLowerCase() === "k") {
+      setSidebarHidden(false);
+      setTimeout(() => document.getElementById("busca-conversas")?.focus(), 0);
+    } else return;
+    e.preventDefault();
+  };
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => atalhos.current(e);
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
 
   useEffect(() => {
     if (pendingWs) localStorage.setItem("forja.workspace", pendingWs);
@@ -1426,7 +1453,7 @@ export default function App() {
                 return (
                   <div key={m.id} className="group my-6 flex flex-col items-end">
                     {!so && editing?.id === m.id ? (
-                      <div className="w-full rounded-3xl border border-line bg-surface p-3">
+                      <div className="w-full rounded-[18px] border border-focus bg-surface p-3">
                         <textarea
                           autoFocus
                           rows={Math.min(10, editing.text.split("\n").length + 1)}
@@ -1435,7 +1462,7 @@ export default function App() {
                           className="w-full resize-none bg-transparent text-[15px] text-fg focus:outline-none"
                         />
                         <div className="mt-2 flex justify-end gap-2">
-                          <button onClick={() => setEditing(null)} className="rounded-full border border-line px-4 py-1.5 text-sm text-fg hover:bg-raised">
+                          <button onClick={() => setEditing(null)} className="rounded-[9px] border border-line px-4 py-1.5 text-sm text-fg hover:bg-raised">
                             Cancelar
                           </button>
                           <button
@@ -1444,7 +1471,7 @@ export default function App() {
                               setEditing(null);
                               if (text) rewindAndRun(m.id, false, text);
                             }}
-                            className="rounded-full bg-fg px-4 py-1.5 text-sm font-medium text-black hover:bg-white"
+                            className="rounded-[9px] bg-accent px-4 py-1.5 text-sm font-medium text-accent-fg hover:brightness-110"
                           >
                             Enviar de novo
                           </button>
@@ -1453,7 +1480,7 @@ export default function App() {
                     ) : (
                       <>
                         {!!m.content && (
-                          <div className="max-w-[85%] rounded-3xl bg-raised px-5 py-2.5 whitespace-pre-wrap">{m.content}</div>
+                          <div className="max-w-[85%] rounded-[22px] bg-raised px-[18px] py-2.5 text-[14.5px] leading-[1.65] whitespace-pre-wrap">{m.content}</div>
                         )}
                         <Attachments list={m.meta?.attachments ?? []} />
                         {!so && <div className="mt-1 flex opacity-0 transition group-hover:opacity-100">
@@ -1580,7 +1607,7 @@ export default function App() {
               );
             })}
             {!so && rewindAsk?.conv === currentId && (
-              <div className="my-4 rounded-2xl border border-line bg-surface p-3 text-sm">
+              <div className="my-4 rounded-xl border border-line bg-surface p-3 text-sm">
                 <p className="text-amber-300">
                   O agente alterou {rewindAsk.files.length} arquivo(s) a partir desta mensagem. Desfazer essas alterações também?
                 </p>
@@ -1588,11 +1615,11 @@ export default function App() {
                   {rewindAsk.files.map((f) => <li key={f}>• {f}</li>)}
                 </ul>
                 <div className="flex gap-2">
-                  <button className="rounded-full border border-line px-3 py-1 text-fg hover:bg-raised"
+                  <button className="rounded-[9px] border border-line px-3 py-1 text-fg hover:bg-raised"
                           onClick={() => rewindAndRun(rewindAsk.messageId, rewindAsk.keep, rewindAsk.content, true)}>
                     Desfazer os arquivos
                   </button>
-                  <button className="rounded-full border border-line px-3 py-1 text-fg hover:bg-raised"
+                  <button className="rounded-[9px] border border-line px-3 py-1 text-fg hover:bg-raised"
                           onClick={() => rewindAndRun(rewindAsk.messageId, rewindAsk.keep, rewindAsk.content, false)}>
                     Manter os arquivos
                   </button>
@@ -1876,10 +1903,14 @@ export default function App() {
               }}
             />
           </label>
-          {agentica && (
-            <PermissionMenu value={settings.permission} onChange={changePermission} running={running} />
-          )}
-          <EffortMenu value={settings.effort} onChange={(effort) => update({ effort })} semExtremo={section === "maestro"} />
+          <ModeEffortMenu
+            permission={agentica ? settings.permission : undefined}
+            onPermission={agentica ? changePermission : undefined}
+            effort={settings.effort}
+            onEffort={(effort) => update({ effort })}
+            running={running}
+            semExtremo={section === "maestro"}
+          />
           <ContextRing
             used={summary.used}
             max={summary.max}
@@ -1907,7 +1938,7 @@ export default function App() {
                 <button
                   onClick={() => send()}
                   title="Enviar para a fila (o agente recebe no próximo passo)"
-                  className="grid size-9 place-items-center rounded-full border border-line text-fg hover:bg-raised"
+                  className="grid size-9 place-items-center rounded-[11px] border border-line text-fg hover:bg-raised"
                 >
                   <ArrowUp />
                 </button>
@@ -1935,6 +1966,19 @@ export default function App() {
 
   return (
     <div className="flex h-full">
+      <SectionRail
+        value={section}
+        onChange={changeSection}
+        listHidden={sidebarHidden}
+        onShowList={() => setSidebarHidden(false)}
+        logo={<img src="/favicon.svg" alt="Forja" className="size-full" />}
+        pe={
+          <button onClick={() => setShowSettings(true)} title="Configurações · Ctrl ,"
+                  className="grid size-[30px] place-items-center rounded-full bg-raised text-[11px] font-semibold text-fg-2 hover:text-fg">
+            {iniciais}
+          </button>
+        }
+      />
       {!sidebarHidden && (
       <Sidebar
         section={section}
@@ -1986,19 +2030,6 @@ export default function App() {
         <div className="arrasta livre-controles flex h-12 shrink-0 items-center gap-2 px-3">
           {/* Esquerda: título, pasta e atalhos; direita: botões do painel (tudo numa faixa só, como no Claude Desktop). */}
           <div className="flex min-w-0 flex-1 items-center gap-2">
-          {sidebarHidden && (
-            // Ocupa a largura da barra lateral (w-64) menos o px-3 e o gap-2 desta faixa: o título fica
-            // no mesmo x com a barra aberta ou fechada.
-            <div className="w-[calc(16rem-0.5rem)] shrink-0">
-              <SectionTabs
-                value={section}
-                onChange={changeSection}
-                sidebarHidden={sidebarHidden}
-                onToggleSidebar={() => setSidebarHidden(false)}
-              />
-            </div>
-          )}
-          <Laptop className="size-4 shrink-0 text-muted" />
           <span className="truncate text-sm font-medium text-fg" title={conv?.title}>
             {conv?.title ?? "Nova conversa"}
           </span>
@@ -2007,7 +2038,7 @@ export default function App() {
             onClick={chooseFolder}
             disabled={running || picking}
             title={`Pasta de trabalho: ${wsLabel}\nClique para trocar`}
-            className="inline-flex max-w-56 shrink-0 items-center gap-1 rounded-md bg-raised px-2 py-0.5 text-xs text-muted hover:text-fg disabled:opacity-50"
+            className="inline-flex max-w-56 shrink-0 items-center gap-1 rounded-[7px] border border-line bg-raised px-2 py-[3px] font-mono text-[11.5px] text-fg-2 hover:border-focus hover:text-fg disabled:opacity-50"
           >
             <span className="truncate">
               {picking ? "escolhendo…" : folderName(conv ? conv.workspace ?? config.default_workspace : pendingWs ?? config.default_workspace)}
@@ -2017,19 +2048,19 @@ export default function App() {
           )}
           {agentica && runner?.online && (
             <>
-              <button onClick={() => openPath(".", "editor")} title="Abrir a pasta da conversa no editor" className="rounded-md p-1 text-faint hover:bg-raised hover:text-fg">
+              <button onClick={() => openPath(".", "editor")} title="Abrir a pasta da conversa no editor" className="rounded-[7px] p-1.5 text-faint hover:bg-raised hover:text-fg">
                 <ExternalLink className="size-3.5" />
               </button>
-              <button onClick={() => openPath(".", "reveal")} title="Abrir a pasta no Explorer" className="rounded-md p-1 text-faint hover:bg-raised hover:text-fg">
+              <button onClick={() => openPath(".", "reveal")} title="Abrir a pasta no Explorer" className="rounded-[7px] p-1.5 text-faint hover:bg-raised hover:text-fg">
                 <FolderOpen className="size-3.5" />
               </button>
             </>
           )}
           {agentica && section !== "maestro" && currentId !== null && (
-            <div className="ml-1 flex shrink-0 items-center rounded-md border border-line p-0.5 text-xs" role="tablist" aria-label="Visão da conversa">
+            <div className="ml-1 flex shrink-0 items-center rounded-[9px] border border-line p-0.5 text-xs" role="tablist" aria-label="Visão da conversa">
               {(["chat", "trajetoria"] as const).map((v) => (
                 <button key={v} role="tab" aria-selected={vista === v} onClick={() => setVista(v)}
-                  className={`rounded px-2 py-0.5 ${vista === v ? "bg-raised text-fg" : "text-muted hover:text-fg"}`}>
+                  className={`rounded-[7px] px-2.5 py-1 ${vista === v ? "bg-raised font-medium text-fg" : "text-muted hover:text-fg"}`}>
                   {v === "chat" ? "Chat" : "Trajetória"}
                 </button>
               ))}

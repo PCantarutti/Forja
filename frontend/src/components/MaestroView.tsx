@@ -74,7 +74,7 @@ function emOrdemDeLeitura(tasks: MaestroTask[]): MaestroTask[] {
 }
 
 const card = "rounded-xl border border-line bg-panel";
-const titulo = "px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-faint";
+const titulo = "px-3 py-2 font-mono text-[10.5px] font-medium uppercase tracking-[.08em] text-faint";
 
 const gb = (n?: number | null) => (n == null ? "—" : `${(n / 1024 ** 3).toFixed(1)} GB`);
 const dur = (s?: number | null) => (s == null ? "" : s < 60 ? `${Math.round(s)}s` : `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, "0")}`);
@@ -379,7 +379,7 @@ export default function MaestroView(props: {
                    onSalvarLayout={mostraSalvarPadrao ? () => setPerguntaPadrao(true) : undefined} />
       </div>
       {perguntaPadrao && (
-        <Modal onClose={() => setPerguntaPadrao(false)} label="Salvar layout como padrão" className="w-[min(28rem,92vw)] rounded-2xl border border-line bg-surface p-5 shadow-2xl">
+        <Modal onClose={() => setPerguntaPadrao(false)} label="Salvar layout como padrão" className="w-[min(28rem,92vw)] rounded-xl border border-line bg-surface p-5 shadow-popover">
           <h2 className="text-sm font-medium">Salvar este layout como padrão?</h2>
           <p className="mt-2 text-xs leading-relaxed text-muted">
             Conversas novas da Maestro vão começar com os blocos e os painéis nesta posição, neste tamanho e
@@ -391,7 +391,7 @@ export default function MaestroView(props: {
               Cancelar
             </button>
             <button
-              className="rounded-full bg-fg px-3 py-1.5 font-medium text-black hover:bg-white"
+              className="rounded-[9px] bg-accent px-3 py-1.5 font-medium text-accent-fg hover:brightness-110"
               onClick={() => {
                 salvarPadrao();
                 setPerguntaPadrao(false);
@@ -1110,7 +1110,7 @@ function EditorContrato(props: {
     Object.fromEntries(LISTAS_CONTRATO.map(([k]) => [k, (c[k] ?? []).join("\n")])));
   const [slot, setSlot] = useState(props.t.model_slot ?? "");
   const [max, setMax] = useState(props.t.max_attempts);
-  const campo = "w-full rounded-md border border-line bg-raised px-2 py-1 text-xs text-fg focus:border-[#555] focus:outline-none";
+  const campo = "w-full rounded-md border border-line bg-raised px-2 py-1 text-xs text-fg focus:border-focus focus:outline-none";
   const salvar = () =>
     props.onSalvar({
       contract: {
@@ -1167,7 +1167,7 @@ function EditorContrato(props: {
                  onChange={(e) => setMax(Math.min(10, Math.max(1, Number(e.target.value) || 1)))} />
         </label>
         <button onClick={salvar}
-                className="ml-auto rounded-full bg-fg px-3 py-1 text-xs font-medium text-black hover:bg-white disabled:opacity-40"
+                className="ml-auto rounded-[9px] bg-accent px-3 py-1 text-xs font-medium text-accent-fg hover:brightness-110 disabled:opacity-40"
                 disabled={!goal.trim()}>
           Salvar contrato
         </button>
