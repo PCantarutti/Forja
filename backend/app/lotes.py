@@ -222,6 +222,10 @@ def _trabalhar(conv_id: int, message_id: int, prompt: str, opts: dict, job_id: s
                 imagegen.generate(prompt, item["path"], {**opts, "model": item["model"], "seed": item["seed"]},
                                   job_id, refs or [], progresso, previa)
                 item["status"] = "pronta"
+                if opts.get("hires"):  # o tamanho final é o do sd-cli (escala arredondada por ele): o do arquivo
+                    from PIL import Image
+                    with Image.open(_c(item["path"])) as im:
+                        item["w"], item["h"] = im.size
             except Exception as e:
                 cancelada = downloads.cancelled(job_id)
                 item["status"] = "cancelada" if cancelada else "erro"

@@ -661,6 +661,7 @@ function Ajustes(props: {
               ))}
             </div>
           </Field>
+          <AltaResolucao o={o} set={set} onError={props.onError} />
           {props.seedMode !== "aleatoria" && (
             <Num label="Semente base" value={o.seed} onChange={(v) => set("seed", v)} hint="0 = sorteia uma e anota" />
           )}
@@ -770,8 +771,8 @@ function Lote(props: {
         <Modal label="Ampliar imagem" onClose={() => setAmpliando(null)} className="w-full max-w-sm rounded-2xl border border-line bg-surface p-4">
           <p className="mb-3 text-sm text-fg">Ampliar imagem</p>
           <PainelAmpliar
-            w={meta.opts.width ?? 0}
-            h={meta.opts.height ?? 0}
+            w={imagens.find((i) => i.path === ampliando)?.w ?? meta.opts.width ?? 0}
+            h={imagens.find((i) => i.path === ampliando)?.h ?? meta.opts.height ?? 0}
             prompt={promptDaImagem(props.pedido)}
             onError={props.onError}
             enviar={async (c) => {
@@ -793,6 +794,9 @@ function Lote(props: {
       <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[11px] text-faint">
         {meta.opts.width && <Chip>{`${meta.opts.width}×${meta.opts.height}`}</Chip>}
         {meta.opts.steps !== undefined && <Chip>{`${meta.opts.steps} passos`}</Chip>}
+        {meta.opts.hires && (
+          <Chip>{`alta resolução ${fmtNum(meta.opts.hires_scale ?? 1.5)}× · denoise ${fmtNum(meta.opts.hires_denoise ?? 0.45)}`}</Chip>
+        )}
         {meta.opts.cfg !== undefined && <Chip>{`CFG ${meta.opts.cfg}`}</Chip>}
         {meta.opts.sampler && <Chip>{meta.opts.sampler}</Chip>}
         <button
@@ -978,6 +982,55 @@ function promptDaImagem(pedido: Message): string {
   const amp = (pedido.meta as { ampliacao?: { prompt?: string } } | null)?.ampliacao;
   if (!amp) return pedido.content;
   return amp.prompt || (/\.(png|jpe?g|webp)$/i.test(pedido.content) ? "" : pedido.content);
+}
+
+const fmtNum = (n: number) => String(n).replace(".", ",");
+
+/** Alta resolução (hires fix do sd-cli): o modelo gera, a imagem é ampliada e ele redesenha por cima com o denoise.
+ *  Os ESRGAN do disco (pelo conteúdo do arquivo) entram como ampliador, além do Latent e do Lanczos. */
+function AltaResolucao(props: { o: ImageOpts; set: <K extends keyof ImageOpts>(k: K, v: ImageOpts[K]) => void; onError: (e: string) => void }) {
+  const { o, set } = props;
+  const [esrgans, setEsrgans] = useState<{ path: string; name: string }[]>([]);
+  useEffect(() => {
+    if (!o.hires) return;
+    api.get<{ no_disco: { path: string; name: string; tipo: string }[] }>("/local/video/ampliadores")
+      .then((c) => setEsrgans(c.no_disco.filter((m) => m.tipo === "esrgan")))
+      .catch((e) => props.onError(e.message));
+  }, [o.hires]);
+  const escala = o.hires_scale ?? 1.5;
+  const denoise = o.hires_denoise ?? 0.45;
+  return (
+    <Field label="Alta resolução" hint="Gera no tamanho acima, amplia e o próprio modelo redesenha por cima: mais detalhe, bem mais tempo.">
+      <label className="flex items-center gap-2 text-muted">
+        <input type="checkbox" checked={!!o.hires} onChange={(e) => set("hires", e.target.checked)} className="accent-white" />
+        Ligada {o.hires && <span className="text-faint">· sai {Math.round(o.width * escala)}×{Math.round(o.height * escala)}</span>}
+      </label>
+      {o.hires && (
+        <div className="mt-2 flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-1">
+            <span className="mr-1 text-faint">Escala</span>
+            {[1.5, 2].map((f) => (
+              <button key={f} onClick={() => set("hires_scale", f)}
+                className={`rounded-full px-2.5 py-0.5 ${escala === f ? "bg-raised text-fg" : "text-muted hover:text-fg"}`}>
+                {fmtNum(f)}×
+              </button>
+            ))}
+          </div>
+          <label className="flex flex-col gap-1">
+            <span className="flex text-faint"><span className="flex-1">Denoise</span><span className="tabular-nums text-fg">{fmtNum(denoise)}</span></span>
+            <input type="range" min={0.2} max={0.7} step={0.05} value={denoise} onChange={(e) => set("hires_denoise", Number(e.target.value))} />
+            <span className="flex text-[11px] text-faint"><span className="flex-1">mantém, só limpa</span><span>inventa detalhe</span></span>
+          </label>
+          <select className={input} value={o.hires_upscaler || "Latent"} onChange={(e) => set("hires_upscaler", e.target.value)}
+            title="Como amplia antes da 2ª passada">
+            <option value="Latent">Ampliar no latente (padrão)</option>
+            <option value="Lanczos">Lanczos</option>
+            {esrgans.map((m) => <option key={m.path} value={m.path}>{m.name} (ESRGAN)</option>)}
+          </select>
+        </div>
+      )}
+    </Field>
+  );
 }
 
 function Cartao(props: {

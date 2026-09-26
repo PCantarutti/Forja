@@ -57,6 +57,9 @@ DEFAULT_IMAGE = {
     "steps": 20, "cfg": 7.0, "width": 512, "height": 512, "sampler": "euler_a", "negative": "",
     "seed": 0,      # 0 = aleatória
     "offload": False, "flash_attn": False, "vae_tiling": False,
+    # alta resolução (hires fix do sd-cli), como no desktop: escala, denoise da 2ª passada e o ampliador ("Latent",
+    # "Lanczos" ou o caminho de um ESRGAN)
+    "hires": False, "hires_scale": 1.5, "hires_denoise": 0.45, "hires_upscaler": "Latent",
     "te_cpu": "",   # "" (nunca), "gerar", "editar" ou "sempre": codificador de texto na CPU
     "preview": "",  # "" (automática), "none", "proj", "tae", "vae"
     "taesd": "",
@@ -548,6 +551,19 @@ def modo_previa(o: dict) -> str | None:
     return modo
 
 
+def hires(o: dict) -> list[str]:
+    """As flags da alta resolução (mesma regra do desktop). Um ESRGAN vai como pasta + nome sem extensão, que é como o
+    sd-cli acha o modelo; o caminho é o do sistema do usuário (com acento, o sd-cli não abre: ponytail, o desktop
+    resolve com o nome curto 8.3, que daqui do container não dá para pedir)."""
+    a = ["--hires", "--hires-scale", f"{float(o.get('hires_scale') or 1.5):g}",
+         "--hires-denoising-strength", f"{float(o.get('hires_denoise') or 0.45):g}"]
+    amp = str(o.get("hires_upscaler") or "Latent")
+    if amp.lower().endswith((".pth", ".safetensors")):
+        pasta, _, nome = amp.replace("\\", "/").rpartition("/")
+        return a + ["--hires-upscalers-dir", pasta, "--hires-upscaler", nome.rsplit(".", 1)[0]]
+    return a + ["--hires-upscaler", amp]
+
+
 def argv(exe: str, prompt: str, out: str, o: dict, refs: list[str] | tuple = ()) -> list[str]:
     """Argumentos do sd-cli, com os caminhos do sistema do usuário (é lá que ele roda)."""
     a = [exe, "-p", prompt, "-o", str(out),
@@ -574,6 +590,8 @@ def argv(exe: str, prompt: str, out: str, o: dict, refs: list[str] | tuple = ())
         a += ["--diffusion-fa"]
     if o.get("vae_tiling"):
         a += ["--vae-tiling"]
+    if o.get("hires"):
+        a += hires(o)
     if o.get("te_cpu") in ("sempre", "editar" if refs else "gerar"):
         a += ["--backend", f"{_gpu(exe)},te=cpu"]
     modo = modo_previa(o) if o.get("_preview") else None
