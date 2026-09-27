@@ -1,0 +1,15 @@
+# Inicia o forja-picker no login (Linux). Instalar:
+#   sed "s#/caminho/do/forja#$PWD#" tools/forja-picker.service > ~/.config/systemd/user/forja-picker.service
+#   systemctl --user enable --now forja-picker
+[Unit]
+Description=Forja picker
+# Precisa da sessão gráfica (DISPLAY/WAYLAND_DISPLAY) para abrir o zenity/kdialog.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 /caminho/do/forja/tools/forja_picker.py
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,12 @@
+# Inicia o forja-runner no login (Linux). Instalar:
+#   sed "s#/caminho/do/forja#$PWD#" tools/forja-runner.service > ~/.config/systemd/user/forja-runner.service
+#   systemctl --user enable --now forja-runner
+[Unit]
+Description=Forja runner
+
+[Service]
+ExecStart=/usr/bin/python3 /caminho/do/forja/tools/forja_runner.py
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

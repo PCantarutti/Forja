@@ -17,5 +17,8 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install --with-deps --only-shell chromium \
  && rm -rf /var/lib/apt/lists/*
 COPY . .
+# O volume forja-data nasce com o dono e o modo deste /data: 777 deixa rodar com qualquer UID
+# (FORJA_UID no Linux). /data/home é a home desse usuário (FORJA_HOME).
+RUN mkdir -p /data/home && chmod -R 777 /data
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

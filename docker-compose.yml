@@ -5,7 +5,11 @@ services:
     build: ./backend
     restart: unless-stopped
     init: true  # colhe zumbis do Chromium e dos dev servers (setsid nohup) reparentados ao PID 1
+    # Linux: FORJA_UID/FORJA_GID = seu `id -u`/`id -g`, senão os arquivos que o agente cria na sua
+    # pasta nascem com dono root. Vazio = root (Windows/Docker Desktop, onde o dono não importa).
+    user: "${FORJA_UID:-0}:${FORJA_GID:-0}"
     environment:
+      HOME: ${FORJA_HOME:-/root}  # usuário não-root precisa de uma home gravável (npm, uv, git)
       WORKSPACE_ROOT: /workspace
       WORKSPACE_HOST: ${WORKSPACE_PATH}
       # Discos do Windows visíveis no seletor de pasta. Para outro disco, some aqui e em volumes (ex.: D=/host/d).

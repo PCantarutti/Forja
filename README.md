@@ -21,7 +21,7 @@ Ambiente de desenvolvimento pessoal com agente de IA **local**. Uma interface we
 
 ## Requisitos
 
-- Windows 11 com **Docker Desktop** (backend WSL2)
+- Windows 11 com **Docker Desktop** (backend WSL2), ou **Linux** com Docker Engine e o plugin compose (veja [Linux](#linux))
 - **Ollama** ou **LM Studio** rodando no host, com um modelo que saiba usar ferramentas (testado com Qwen3.6-35B-A3B)
 
 ## Setup
@@ -35,6 +35,27 @@ docker compose up -d --build
 Abra http://localhost:7001. No topo, escolha o provider e o modelo, selecione **Agente** e peça, por exemplo: *"crie calc.py com funções soma e multiplicacao"*.
 
 Para atualizar depois de mudar o código, rode `docker compose up -d --build` de novo. As conversas ficam no volume `forja-data`.
+
+### Linux
+
+O compose é o mesmo; o que muda é o `.env`:
+
+```bash
+cp .env.linux.example .env
+sed -i "s#/home/voce#$HOME#; s#^FORJA_UID=.*#FORJA_UID=$(id -u)#; s#^FORJA_GID=.*#FORJA_GID=$(id -g)#" .env
+docker compose up -d --build
+```
+
+- **Dono dos arquivos**: `FORJA_UID`/`FORJA_GID` fazem o backend rodar com o seu usuário. Sem eles, tudo o que o agente cria na sua pasta nasce com dono root. Se o volume `forja-data` já existia de quando o backend rodava como root, ajuste uma vez: `docker compose run --rm -u 0 backend chmod -R 777 /data`.
+- **Sua home no seletor**: `HOST_DRIVE_C=/home/voce` monta a home em `/host/c` e `HOST_MOUNTS=/home/voce=/host/c` traduz os caminhos. Outra raiz (ex.: `/mnt/dados`) entra como mais um volume e mais um par no `HOST_MOUNTS`, separado por vírgula.
+- **Comandos no seu sistema e seletor de pasta**: instale os dois serviços de usuário, que sobem o [forja-runner](#forja-runner-comandos-e-servidores-no-seu-sistema) e o [forja-picker](#forja-picker-seletor-de-pasta-do-sistema) no login:
+
+  ```bash
+  mkdir -p ~/.config/systemd/user
+  for s in runner picker; do sed "s#/caminho/do/forja#$PWD#" tools/forja-$s.service > ~/.config/systemd/user/forja-$s.service; done
+  systemctl --user daemon-reload && systemctl --user enable --now forja-runner forja-picker
+  ```
+- **Modelo local**: Ollama e LM Studio para Linux usam a GPU direto no host; o container não precisa de GPU. O `llama-server` do llama.cpp também serve: aponte o `LMSTUDIO_URL` para ele (`http://host.docker.internal:8080/v1`).
 
 ## Ferramentas
 
@@ -60,7 +81,7 @@ Com o **forja-runner** ligado (veja abaixo), o `run_command` executa **no seu si
 
 ### forja-runner (comandos e servidores no seu sistema)
 
-`tools/forja_runner.py` (só Python padrão) roda **no seu sistema** e recebe do backend os comandos do agente. No Windows, `tools/forja-picker.cmd` já inicia o picker e o runner juntos; no Linux/macOS, `python3 tools/forja_runner.py &`.
+`tools/forja_runner.py` (só Python padrão) roda **no seu sistema** e recebe do backend os comandos do agente. No Windows, `tools/forja-picker.cmd` já inicia o picker e o runner juntos; no Linux, o serviço `tools/forja-runner.service` (veja [Linux](#linux)); no macOS, `python3 tools/forja_runner.py &`.
 
 - **Token**: gerado na primeira execução em `config/runner-token`. A pasta `config/` é montada no container, então o backend lê o mesmo arquivo; nada para copiar. Toda chamada exige o token.
 - **Rede**: o container só alcança o host por `host.docker.internal`, por isso o runner escuta em `0.0.0.0:3002` (mude com `FORJA_RUNNER_BIND`/`FORJA_RUNNER_PORT`; no `.env` do Forja, `FORJA_RUNNER_URL`). Mantenha a porta fechada no firewall para redes públicas.
@@ -182,16 +203,7 @@ Como no Claude Desktop, cada conversa tem a sua pasta. Ela aparece no chip ao la
 O Forja roda no Docker e a interface roda no navegador, e nenhum dos dois consegue abrir o Explorer e receber o caminho da pasta. Por isso existe um ajudante pequeno, `tools/forja_picker.py` (só Python padrão), que roda **no seu sistema**. Ele escuta só em `127.0.0.1:3001` e só atende a interface do Forja: pedidos vindos de outros sites são recusados.
 
 - **Windows**: dê dois cliques em `tools/forja-picker.cmd` (roda sem janela; inicia o picker e o runner). Se só o runner estiver ligado, o botão *Abrir seletor do sistema* sobe o picker sozinho. Para abrir junto com o Windows: `Win+R` → `shell:startup` → cole um atalho para esse `.cmd`.
-- **Linux**: `python3 tools/forja_picker.py &`. Usa o `zenity` (GNOME) ou o `kdialog` (KDE). Sem eles, usa o Tk (`sudo apt install python3-tk`). Para iniciar no login, crie um serviço de usuário:
-
-  ```ini
-  # ~/.config/systemd/user/forja-picker.service
-  [Service]
-  ExecStart=/usr/bin/python3 /caminho/do/forja/tools/forja_picker.py
-  [Install]
-  WantedBy=default.target
-  ```
-  e rode `systemctl --user enable --now forja-picker`.
+- **Linux**: `python3 tools/forja_picker.py &`. Usa o `zenity` (GNOME) ou o `kdialog` (KDE). Sem eles, usa o Tk (`sudo apt install python3-tk`). Para iniciar no login, use o serviço `tools/forja-picker.service` (veja [Linux](#linux)).
 - **macOS**: `python3 tools/forja_picker.py &` (usa o `choose folder` do sistema).
 
 Se o ajudante não estiver rodando, o chip abre o **seletor interno** do Forja: discos montados, pastas recentes e caminho digitado. Ele avisa como ligar o ajudante e tem o botão *Abrir seletor do sistema*. Porta e origens: `FORJA_PICKER_PORT` e `FORJA_ORIGINS` no ajudante, e `FORJA_PICKER_URL` no `.env` do Forja.
@@ -204,7 +216,7 @@ Se o ajudante não estiver rodando, o chip abre o **seletor interno** do Forja: 
 
 **Outro disco** (ex.: `D:`): em `docker-compose.yml`, acrescente o volume `- D:/:/host/d` no backend e defina `HOST_MOUNTS=C=/host/c,D=/host/d` no `.env`.
 
-**Linux**: monte a sua home (ou outra raiz) e diga o prefixo: volume `- /home/voce:/host/home` e `HOST_MOUNTS=/home/voce=/host/home`. O formato é `prefixo-no-seu-sistema=pasta-no-container`, e vale mais de um separado por vírgula. O mais específico ganha. O `HOST_DRIVE_C` só faz sentido no Windows: no Linux, apague essa linha do compose. Para **não** expor o disco inteiro, troque `HOST_DRIVE_C=C:/` por uma pasta (ex.: `C:/Users/pedro`). Aí o seletor só enxerga o que está dentro dela, mas os caminhos continuam começando em `C:/`.
+**Linux**: `HOST_DRIVE_C=/home/voce` e `HOST_MOUNTS=/home/voce=/host/c` no `.env` (já vêm no `.env.linux.example`), sem mexer no compose. O formato do `HOST_MOUNTS` é `prefixo-no-seu-sistema=pasta-no-container`, e vale mais de um separado por vírgula. O mais específico ganha. No Windows, para **não** expor o disco inteiro, troque `HOST_DRIVE_C=C:/` por uma pasta (ex.: `C:/Users/pedro`). Aí o seletor só enxerga o que está dentro dela, mas os caminhos continuam começando em `C:/`.
 
 ## Checkpoints (desfazer alterações)
 
@@ -342,6 +354,8 @@ Antes de cada chamada, o Forja estima o tamanho do prompt. Se passar de `COMPACT
 | `WORKSPACE_PATH` | `C:/Users/pedro/Dev/forja-workspace` | Pasta de trabalho **padrão** (conversas sem pasta escolhida) |
 | `HOST_DRIVE_C` | `C:/` | O que do Windows aparece como disco `C:` no seletor de pasta (pode ser uma subpasta) |
 | `HOST_MOUNTS` | `C=/host/c` | O que está montado no container, como `prefixo=pasta` (ex.: `C=/host/c`, `/home/voce=/host/home`) |
+| `FORJA_UID` / `FORJA_GID` | `0` (root) | Usuário do backend no container. No Linux, o seu `id -u`/`id -g`, para os arquivos criados pelo agente ficarem seus |
+| `FORJA_HOME` | `/root` | Home desse usuário no container. Com `FORJA_UID`, use `/data/home` |
 | `FORJA_PICKER_URL` | `http://127.0.0.1:3001` | Endereço do forja-picker, visto pelo navegador |
 | `FORJA_PORT` | `7001` | Porta da interface no host |
 | `FORJA_RUNNER_URL` | `http://host.docker.internal:3002` | forja-runner (comandos e servidores no seu sistema). Vazio = sempre no container |
