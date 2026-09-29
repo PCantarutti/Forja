@@ -22,7 +22,7 @@ from .agent import RUNS, Run, RunRequest, _load, _save, active_run
 from .parsing import split_think
 from .browser import MANAGER
 from .tools import REGISTRY, ToolError
-from . import design_modelos, design_revisao
+from . import design_modelos, design_repo, design_revisao
 
 
 settings.apply()
@@ -984,6 +984,12 @@ def design_estilo(conv_id: int, body: DesignEstiloBody):
         raise HTTPException(400, str(e))
 
 
+@app.get("/api/design-git")
+def design_git():
+    """O Design guarda as versões com o git do sistema: a tela avisa como instalar quando falta."""
+    return design_repo.status_git()
+
+
 class DesignOperacaoBody(BaseModel):
     op: str
     fids: list[str]
@@ -1664,6 +1670,7 @@ async def bulk_conversations(body: BulkBody):
     for cid in closed:
         await MANAGER.close(str(cid))
         mirror.remove(cid)
+        design_repo.apagar(cid)  # projeto de design: a pasta dele vai junto
     return {"ok": True, "done": done, "skipped": skipped}
 
 
@@ -1984,6 +1991,7 @@ async def delete_conversation(conv_id: int):
         s.delete(c)
         s.commit()
     mirror.remove(conv_id)  # o .md espelhado vai junto
+    design_repo.apagar(conv_id)  # projeto de design: a pasta dele (repositório, fotos, imagens da skill)
     await MANAGER.close(str(conv_id))  # a sessão do navegador morre com a conversa
     return {"ok": True}
 
