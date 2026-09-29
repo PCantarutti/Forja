@@ -9,14 +9,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response,
                                StreamingResponse)
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from . import (baterias, board, board_auto, convencoes, mcp_servidor, metricas, checkpoints, compact, comparar, config, db, documentos, gitops, goals, imagegen, llm,
                lotes, lsp,
-               mcp_client, memory, mirror, modelctl, pesquisa, policy, projstate, relatorio, runner, settings,
+               mcp_client, memory, mirror, modelctl, pesquisa, design, policy, projstate, relatorio, runner, settings,
                shell, skills, subagents, taskdb, terminal, uploads, workspace)
 from .agent import RUNS, Run, RunRequest, _load, _save, active_run
 from .parsing import split_think
@@ -845,6 +845,244 @@ def comparar_placar():
     return comparar.placar()
 
 
+# ------------------------------------------------------------------ design (chat + canvas)
+
+class DesignModelo(BaseModel):
+    provider: str = ""
+    model: str = ""
+
+
+class DesignBody(BaseModel):
+    pedido: str = ""
+    provider: str = ""     # modelo de reserva, para a etapa sem escolha própria
+    model: str = ""
+    modelos: dict[str, DesignModelo] = {}   # plano | geracao | edicao
+    fids: list[str] = []   # elementos selecionados no canvas: edita só esses fragmentos
+    rota: str = "auto"     # auto | plano | tokens | secao | documento
+    secao: str = ""        # rota secao: qual (nova se não existir)
+    comentarios: list[int] = []   # aplicar estes comentários pendentes numa chamada só
+    esforco: str = "baixo"
+    sistema: str = ""      # design system escolhido para o plano (id)
+
+
+class DesignAprovarBody(BaseModel):
+    plano: dict
+    provider: str = ""
+    model: str = ""
+    modelos: dict[str, DesignModelo] = {}
+    esforco: str = "baixo"
+
+
+class DesignComentarioBody(BaseModel):
+    fids: list[str]
+    texto: str
+
+
+class DesignTextoBody(BaseModel):
+    fid: str
+    html: str
+
+
+def _design_modelos(body) -> dict:
+    reserva = {"provider": body.provider, "model": body.model}
+    return {k: (body.modelos[k].model_dump() if k in body.modelos and body.modelos[k].model else reserva)
+            for k in ("plano", "geracao", "edicao")}
+
+
+class DesignVersaoBody(BaseModel):
+    versao: int
+
+
+def _sse_design(message_id: int) -> StreamingResponse:
+    """Mesmo desenho da pesquisa: retrato inteiro (com o parcial) por tick."""
+    async def stream():
+        while True:
+            try:
+                estado = design.estado(message_id)
+            except ToolError as e:
+                yield f"data: {json.dumps({'erro': str(e)}, ensure_ascii=False)}\n\n"
+                return
+            yield f"data: {json.dumps(estado, ensure_ascii=False)}\n\n"
+            if estado["status"] != "rodando":
+                return
+            await asyncio.sleep(design.TICK)
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/design/{conv_id}")
+def design_projeto(conv_id: int):
+    try:
+        return design.projeto(conv_id)
+    except ToolError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/design/{conv_id}/gerar")
+async def design_gerar(conv_id: int, body: DesignBody):
+    try:
+        msg = design.start(conv_id, body.pedido, _design_modelos(body), body.fids, body.rota, body.secao,
+                           body.comentarios, body.esforco, body.sistema)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+    return _sse_design(msg["id"])
+
+
+@app.post("/api/design/{message_id}/aprovar")
+async def design_aprovar(message_id: int, body: DesignAprovarBody):
+    try:
+        design.aprovar(message_id, body.plano, _design_modelos(body), body.esforco)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+    return _sse_design(message_id)
+
+
+@app.post("/api/design/{conv_id}/comentarios")
+def design_comentar(conv_id: int, body: DesignComentarioBody):
+    try:
+        return design.comentar(conv_id, body.fids, body.texto)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/design/{conv_id}/comentarios/{comentario_id}/descartar")
+def design_descartar(conv_id: int, comentario_id: int):
+    try:
+        return design.descartar(conv_id, comentario_id)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/design/{conv_id}/texto")
+def design_texto(conv_id: int, body: DesignTextoBody):
+    """Edição inline no canvas (duplo clique): vai direto para a fonte, sem modelo."""
+    try:
+        return design.editar_texto(conv_id, body.fid, body.html)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+class DesignTokensBody(BaseModel):
+    tokens: dict[str, str]
+
+
+class DesignPastaBody(BaseModel):
+    pasta: str = ""
+
+
+class DesignSistemaBody(BaseModel):
+    pasta: str = ""
+    nome: str = ""
+    provider: str = ""
+    model: str = ""
+    esforco: str = "baixo"
+
+
+@app.post("/api/design/{conv_id}/tokens")
+def design_tokens(conv_id: int, body: DesignTokensBody):
+    """Painel de ajustes (sliders): só o :root, sem modelo."""
+    try:
+        return design.ajustar_tokens(conv_id, body.tokens)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/design/{conv_id}/imagens")
+def design_imagens_gerar(conv_id: int):
+    """Registra os slots pendentes pela ferramenta da skill gerar-imagens; devolve a conversa de Imagens."""
+    from . import design_imagens
+    try:
+        return design_imagens.registrar(conv_id)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/design/{conv_id}/handoff")
+async def design_handoff(conv_id: int, body: DesignPastaBody):
+    """Pacote na pasta do projeto para o Agente implementar; devolve o pedido pronto para ele."""
+    from . import design_export
+    try:
+        p = design.projeto(conv_id)
+        return await design_export.handoff(p["html"], p["titulo"], body.pasta)
+    except (ToolError, workspace.WorkspaceError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/design-sistemas")
+def design_sistemas():
+    from . import design_sistema
+    return design_sistema.listar()
+
+
+@app.post("/api/design-sistemas/extrair")
+async def design_sistema_extrair(body: DesignSistemaBody):
+    from . import design_sistema
+    try:
+        return await design_sistema.extrair(body.pasta, body.nome, {"provider": body.provider, "model": body.model},
+                                            body.esforco)
+    except (ToolError, workspace.WorkspaceError) as e:
+        raise HTTPException(400, str(e))
+    except llm.LLMError as e:
+        raise HTTPException(502, str(e))
+
+
+@app.delete("/api/design-sistemas/{sid}")
+def design_sistema_apagar(sid: str):
+    from . import design_sistema
+    return design_sistema.apagar(sid)
+
+
+@app.post("/api/design/{conv_id}/sistema/{sid}")
+def design_sistema_aplicar(conv_id: int, sid: str):
+    """Aplica um design system num design que já existe: tokens, CSS dos componentes e a marca."""
+    try:
+        return design.aplicar_sistema(conv_id, sid)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/design/{conv_id}/exportar")
+async def design_exportar(conv_id: int, formato: str = "html", fids: bool = False, slide: int = 1,
+                          viewport: str = "desktop"):
+    """Baixa a versão atual: html (limpo, data-fid opcional), pdf (um slide por página) ou png."""
+    from urllib.parse import quote
+    from . import design_export
+    try:
+        p = design.projeto(conv_id)
+        dados, tipo, nome = await design_export.exportar(p["html"], p["titulo"], formato, fids, slide, viewport)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+    return Response(dados, media_type=tipo,
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(nome)}"})
+
+
+@app.get("/api/design/{message_id}/stream")
+def design_stream(message_id: int):
+    return _sse_design(message_id)
+
+
+@app.post("/api/design/{message_id}/cancelar")
+def design_cancelar(message_id: int):
+    return design.cancelar(message_id)
+
+
+@app.post("/api/design/{conv_id}/ir")
+def design_ir(conv_id: int, body: DesignVersaoBody):
+    try:
+        return design.ir_para(conv_id, body.versao)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/design/{conv_id}/restaurar")
+def design_restaurar(conv_id: int, body: DesignVersaoBody):
+    try:
+        return design.restaurar(conv_id, body.versao)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
 # ------------------------------------------------------------------ pesquisa profunda
 
 
@@ -1126,8 +1364,8 @@ def create_conversation(body: dict | None = None):
         except workspace.WorkspaceError as e:
             raise HTTPException(400, str(e))
     kind = (body or {}).get("kind") or "agent"
-    if kind not in ("chat", "agent", "maestro", "imagem", "comparar", "pesquisa"):
-        raise HTTPException(400, "kind deve ser chat, agent, maestro, imagem, comparar ou pesquisa")
+    if kind not in ("chat", "agent", "maestro", "imagem", "comparar", "pesquisa", "design"):
+        raise HTTPException(400, "kind deve ser chat, agent, maestro, imagem, comparar, pesquisa ou design")
     with db.session() as s:
         c = db.Conversation(workspace=folder, kind=kind)
         s.add(c)

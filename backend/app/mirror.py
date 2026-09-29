@@ -21,7 +21,8 @@ from . import config, db, workspace
 
 ROOT = Path(config.DB_PATH).parent / "conversas"  # /data no container, ao lado do banco
 DIRS = {"agent": "forja-code", "chat": "forja-chat", "comparar": "forja-comparacoes",
-        "pesquisa": "forja-pesquisas"}
+        "pesquisa": "forja-pesquisas",
+        "design": "forja-designs"}
 
 # Proibidos em nome de arquivo no Windows, mais os de controle.
 _PROIBIDOS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
