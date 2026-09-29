@@ -12,19 +12,26 @@ export type Modo = "view" | "inspect" | "comment" | "edit" | "editText";   // co
 export const PROPS_EDITAVEIS = ["color", "background-color", "font-size", "font-weight", "font-family", "line-height", "letter-spacing",
   "text-align", "padding", "margin", "border-radius", "border", "width", "height", "opacity", "gap"] as const;
 export type Pin = { fid: string; n: number };
+/** Um nó do painel Camadas: em ordem de documento, com a profundidade. */
+export type NoArvore = { fid: string; tag: string; cls: string; sec: string; texto: string; nivel: number; oculto: boolean };
 export type Problema = { fid: string | null; tipo: string; detalhe: string; gravidade: "erro" | "aviso"; rotulo: string };
 
 /** iframe → app. `select` traz o principal (último clicado) e a seleção inteira em `itens`. */
 export type DoCanvas =
   | { type: "ready" }
   | { type: "hover"; fid: string | null; rect: Rect | null }
-  | { type: "select"; fid: string | null; rect: Rect | null; tag: string; path: NoCaminho[]; itens: Item[]; estilo: Record<string, string> }
+  | { type: "select"; fid: string | null; rect: Rect | null; tag: string; path: NoCaminho[]; itens: Item[]; estilo: Record<string, string>;
+      href: string | null }
+  | { type: "mover"; fids: string[]; alvo: string; onde: "antes" | "depois" }     // arrastou no modo Editar
+  | { type: "redimensionar"; fid: string; w: number | null; h: number | null }   // puxou uma alça
   | { type: "textEdited"; fid: string; html: string }
   | { type: "pin"; n: number }
   | { type: "slides"; atual: number; total: number }
   | { type: "tela"; nome: string }                          // o runtime do protótipo trocou de tela
+  | { type: "pagina"; nome: string }                        // o runtime do site com páginas trocou de página
   | { type: "auditoria"; itens: Problema[]; escopo: string }
-  | { type: "atalho"; acao: "inspect" | "comentar" | "undo" | "redo" | "sair" };
+  | { type: "atalho"; acao: "inspect" | "comentar" | "undo" | "redo" | "sair" | "apagar" | "duplicar" }
+  | { type: "arvore"; nos: NoArvore[] };
 
 /** app → iframe. `highlight` define a seleção (o iframe responde com `select`). */
 export type ParaCanvas =
@@ -34,9 +41,12 @@ export type ParaCanvas =
   | { type: "showPins"; pins: Pin[] }
   | { type: "setSlide"; n: number }
   | { type: "setTela"; nome: string }
+  | { type: "setPagina"; nome: string }
   | { type: "auditar" }
   | { type: "setMulti"; on: boolean }        // cada clique soma/tira da seleção (como Shift/Ctrl+clique)
   | { type: "semelhantes"; fid: string }
+  | { type: "arvore" }                        // pede os nós para o painel Camadas
+  | { type: "realce"; fid: string | null }    // hover vindo de fora (linha do painel)
   | { type: "setTokens"; tokens: Record<string, string> }   // prévia dos sliders; {} limpa
   | { type: "setEstilo"; fids: string[]; estilos: Record<string, string> }   // prévia do modo Editar ("" tira)
   | { type: "patch"; fid: string; html: string };
@@ -64,8 +74,16 @@ export function lerMensagem(e: MessageEvent, janela: Window | null | undefined):
       return (d.fid === null || eTexto(d.fid)) && eRect(d.rect) && eTexto(d.tag) && Array.isArray(d.path) &&
         d.path.every((n: any) => eItem(n) && eTexto(n.sec)) && Array.isArray(d.itens) && d.itens.every(eItem)
         ? { type: "select", fid: d.fid, rect: d.rect, tag: d.tag, path: d.path, itens: d.itens,
-            estilo: Object.fromEntries(PROPS_EDITAVEIS.filter((k) => eTexto(d.estilo?.[k]) && d.estilo[k].length < 300).map((k) => [k, d.estilo[k]])) }
+            estilo: Object.fromEntries(PROPS_EDITAVEIS.filter((k) => eTexto(d.estilo?.[k]) && d.estilo[k].length < 300).map((k) => [k, d.estilo[k]])),
+            href: eTexto(d.href) && d.href.length < 3000 ? d.href : null }
         : null;
+    case "mover":
+      return Array.isArray(d.fids) && d.fids.length <= 60 && d.fids.every(eTexto) && eTexto(d.alvo) && ["antes", "depois"].includes(d.onde)
+        ? { type: "mover", fids: d.fids, alvo: d.alvo, onde: d.onde } : null;
+    case "redimensionar": {
+      const n = (v: any) => v === null || (typeof v === "number" && v > 0 && v < 20000);
+      return eTexto(d.fid) && n(d.w) && n(d.h) ? { type: "redimensionar", fid: d.fid, w: d.w, h: d.h } : null;
+    }
     case "textEdited":
       return eTexto(d.fid) && eTexto(d.html) && d.html.length < 200_000 ? { type: "textEdited", fid: d.fid, html: d.html } : null;
     case "pin":
@@ -74,12 +92,17 @@ export function lerMensagem(e: MessageEvent, janela: Window | null | undefined):
       return Array.isArray(d.itens) && d.itens.length <= 200 && d.itens.every((x: any) => x && (x.fid === null || eTexto(x.fid)) &&
         eTexto(x.tipo) && eTexto(x.detalhe) && ["erro", "aviso"].includes(x.gravidade) && eTexto(x.rotulo))
         ? { type: "auditoria", itens: d.itens, escopo: eTexto(d.escopo) ? d.escopo : "" } : null;
+    case "arvore":
+      return Array.isArray(d.nos) && d.nos.length <= 3000 && d.nos.every((n: any) => eItem(n) && eTexto(n.sec) && eTexto(n.texto)
+        && Number.isInteger(n.nivel) && typeof n.oculto === "boolean") ? { type: "arvore", nos: d.nos } : null;
     case "tela":
       return eTexto(d.nome) && d.nome.length < 80 ? { type: "tela", nome: d.nome } : null;
+    case "pagina":
+      return eTexto(d.nome) && d.nome.length < 80 ? { type: "pagina", nome: d.nome } : null;
     case "slides":
       return Number.isInteger(d.atual) && Number.isInteger(d.total) ? { type: "slides", atual: d.atual, total: d.total } : null;
     case "atalho":
-      return ["inspect", "comentar", "undo", "redo", "sair"].includes(d.acao) ? { type: "atalho", acao: d.acao } : null;
+      return ["inspect", "comentar", "undo", "redo", "sair", "apagar", "duplicar"].includes(d.acao) ? { type: "atalho", acao: d.acao } : null;
   }
   return null;
 }
@@ -120,7 +143,9 @@ function inspetor() {
     const r = el.getBoundingClientRect();
     return { x: r.x, y: r.y, w: r.width, h: r.height };
   };
-  const item = (e: Element) => ({ fid: e.getAttribute("data-fid") || "", tag: e.tagName.toLowerCase(), cls: (e.getAttribute("class") || "").trim() });
+  // fx-<fid> é a classe que o modo Editar põe para as regras por largura: não é do design
+  const classes = (e: Element) => (e.getAttribute("class") || "").split(/\s+/).filter((c) => c && !c.startsWith("fx-"));
+  const item = (e: Element) => ({ fid: e.getAttribute("data-fid") || "", tag: e.tagName.toLowerCase(), cls: classes(e).join(" ") });
   const caminho = (el: Element) => {
     const out = [];
     for (let e: Element | null = el; e && e !== document.documentElement; e = e.parentElement)
@@ -169,6 +194,14 @@ function inspetor() {
   etiqueta.style.cssText = `position:fixed;display:none;font:11px/1.6 ui-monospace,monospace;color:#fff;background:${AZUL};padding:0 5px;border-radius:3px;white-space:nowrap`;
   camada.appendChild(etiqueta);
   let temporarios: HTMLElement[] = [];
+  let realceFora = false;   // hover pedido pelo painel Camadas (vale em qualquer modo)
+  // modo Editar: puxando uma alça, ou arrastando a seleção para outro lugar
+  let redim: { el: HTMLElement; dir: string; x0: number; y0: number; w0: number; h0: number; w: number | null; h: number | null } | null = null;
+  let arrasto: { x0: number; y0: number; ativo: boolean; alvo: Element | null; onde: "antes" | "depois" } | null = null;
+  let engoleClique = false;
+  const linha = document.createElement("div");
+  linha.style.cssText = `position:fixed;display:none;background:${AZUL};border-radius:2px;box-shadow:0 0 0 1px #fff`;
+  camada.appendChild(linha);
 
   const posiciona = (d: HTMLElement, el: Element | null) => {
     if (!el) return void (d.style.display = "none");
@@ -176,7 +209,7 @@ function inspetor() {
     Object.assign(d.style, { display: "block", left: `${r.x}px`, top: `${r.y}px`, width: `${r.width}px`, height: `${r.height}px` });
   };
   const desenha = () => {
-    posiciona(caixaHover, escolhendo() && hover && !editando && !sel.includes(hover.getAttribute("data-fid") || "") ? hover : null);
+    posiciona(caixaHover, (escolhendo() || realceFora) && hover && !editando && !sel.includes(hover.getAttribute("data-fid") || "") ? hover : null);
     temporarios.forEach((d) => d.remove());
     temporarios = sel.map((f) => {
       const d = caixa("solid");
@@ -202,6 +235,24 @@ function inspetor() {
       temporarios.push(b);
     }
     const primeiro = sel.length ? porFid(sel[sel.length - 1]) : null;
+    if (modo === "edit" && sel.length === 1 && primeiro && !editando && !arrasto) {
+      const r = primeiro.getBoundingClientRect();
+      for (const [dir, x, y, cursor] of [["e", r.right, r.top + r.height / 2, "ew-resize"], ["s", r.left + r.width / 2, r.bottom, "ns-resize"],
+                                         ["se", r.right, r.bottom, "nwse-resize"]] as const) {
+        const h = document.createElement("div");
+        h.setAttribute("data-alca", dir);
+        h.style.cssText = `position:fixed;left:${x - 5}px;top:${y - 5}px;width:10px;height:10px;background:#fff;border:2px solid ${AZUL};` +
+          `border-radius:2px;box-sizing:border-box;pointer-events:auto;cursor:${cursor}`;
+        h.onmousedown = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const b = primeiro.getBoundingClientRect();
+          redim = { el: primeiro as HTMLElement, dir, x0: e.clientX, y0: e.clientY, w0: b.width, h0: b.height, w: null, h: null };
+        };
+        camada.appendChild(h);
+        temporarios.push(h);
+      }
+    }
     if (primeiro && !editando) {
       const r = primeiro.getBoundingClientRect();
       const n = item(primeiro);
@@ -217,11 +268,16 @@ function inspetor() {
     const t = el?.closest("body > [data-tela]");   // protótipo: idem com a tela
     const irTela = (window as { forjaIrTela?: (n: string) => void }).forjaIrTela;
     if (t && !t.hasAttribute("data-tela-atual") && irTela) irTela(t.getAttribute("data-section") || "");
+    // site com páginas: elemento de outra página (breadcrumb, comentário, camadas) leva até ela
+    const pg = el?.closest("body > [data-pagina]")?.getAttribute("data-pagina");
+    const irPagina = (window as { forjaIrPagina?: (n: string) => void }).forjaIrPagina;
+    if (pg && pg !== "*" && pg !== document.documentElement.getAttribute("data-pagina-atual") && irPagina) irPagina(pg);
     desenha();
     const itens = sel.map((f) => item(porFid(f)!));
     envia(el
-      ? { type: "select", fid: sel[sel.length - 1], rect: retangulo(el), tag: el.tagName.toLowerCase(), path: caminho(el), itens, estilo: estiloDe(el) }
-      : { type: "select", fid: null, rect: null, tag: "", path: [], itens: [], estilo: {} });
+      ? { type: "select", fid: sel[sel.length - 1], rect: retangulo(el), tag: el.tagName.toLowerCase(), path: caminho(el), itens, estilo: estiloDe(el),
+          href: el.getAttribute("href") }
+      : { type: "select", fid: null, rect: null, tag: "", path: [], itens: [], estilo: {}, href: null });
   };
 
   // ---- edição de texto (duplo clique): contenteditable no próprio elemento, sai para a fonte
@@ -251,6 +307,7 @@ function inspetor() {
   }, true);
 
   document.addEventListener("mouseover", (e) => {
+    realceFora = false;
     if (!escolhendo()) return;
     hover = alvo(e.target as Element);
     desenha();
@@ -260,7 +317,73 @@ function inspetor() {
     hover = null;
     desenha();
   });
+  document.addEventListener("mousedown", (e) => {
+    if (modo !== "edit" || editando || e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+    const el = alvo(e.target as Element);
+    if (el && sel.some((f) => porFid(f)?.contains(el))) {
+      arrasto = { x0: e.clientX, y0: e.clientY, ativo: false, alvo: null, onde: "depois" };
+    }
+  }, true);
+  document.addEventListener("dragstart", (e) => { if (modo === "edit") e.preventDefault(); }, true);   // <img>/<a> nativos
+  document.addEventListener("mousemove", (e) => {
+    if ((redim || arrasto) && e.buttons === 0) return solta(false);   // soltou fora da página e voltou
+    if (redim) {
+      const { el, dir, x0, y0, w0, h0 } = redim;
+      if (dir !== "s") el.style.setProperty("width", `${(redim.w = Math.max(8, Math.round(w0 + e.clientX - x0)))}px`, "important");
+      if (dir !== "e") el.style.setProperty("height", `${(redim.h = Math.max(8, Math.round(h0 + e.clientY - y0)))}px`, "important");
+      return desenha();
+    }
+    if (!arrasto) return;
+    if (!arrasto.ativo && Math.hypot(e.clientX - arrasto.x0, e.clientY - arrasto.y0) < 6) return;
+    if (!arrasto.ativo) {
+      arrasto.ativo = true;
+      document.documentElement.style.userSelect = "none";
+      getSelection()?.removeAllRanges();
+    }
+    let t = alvo(document.elementFromPoint(e.clientX, e.clientY));
+    // o destino natural é um irmão do que está sendo arrastado (reordenar); fora do pai, o elemento sob o mouse
+    const origem = porFid(sel[sel.length - 1]);
+    for (let u: Element | null = t; u && u !== document.body; u = u.parentElement)
+      if (u.parentElement === origem?.parentElement && u.hasAttribute("data-fid")) { t = u; break; }
+    const valido = t && t !== document.body && !sel.some((f) => porFid(f)?.contains(t));
+    arrasto.alvo = valido ? t : null;
+    if (!valido || !t) return void (linha.style.display = "none");
+    const r = t.getBoundingClientRect();
+    const pai = t.parentElement ? getComputedStyle(t.parentElement) : null;
+    const lado = !!pai && ((pai.display.includes("flex") && !pai.flexDirection.startsWith("column")) || pai.display.includes("grid"));
+    arrasto.onde = (lado ? e.clientX < r.left + r.width / 2 : e.clientY < r.top + r.height / 2) ? "antes" : "depois";
+    Object.assign(linha.style, lado
+      ? { display: "block", left: `${(arrasto.onde === "antes" ? r.left : r.right) - 2}px`, top: `${r.top}px`, width: "4px", height: `${r.height}px` }
+      : { display: "block", left: `${r.left}px`, top: `${(arrasto.onde === "antes" ? r.top : r.bottom) - 2}px`, width: `${r.width}px`, height: "4px" });
+    desenha();
+  }, true);
+  document.addEventListener("mouseup", () => solta(true), true);
+  // soltar: a alça sempre aplica; o arrasto só se o botão foi solto dentro da página (fora, cancela)
+  const solta = (dentro: boolean) => {
+    document.documentElement.style.userSelect = "";
+    if (redim) {
+      const { el, w, h } = redim;
+      redim = null;
+      engoleClique = true;
+      if (w !== null || h !== null) envia({ type: "redimensionar", fid: el.getAttribute("data-fid"), w, h });
+    } else if (arrasto) {
+      const a = arrasto;
+      arrasto = null;
+      linha.style.display = "none";
+      if (a.ativo) {
+        engoleClique = dentro;
+        if (a.alvo && dentro) envia({ type: "mover", fids: sel, alvo: a.alvo.getAttribute("data-fid"), onde: a.onde });
+      }
+      desenha();
+    }
+  };
   document.addEventListener("click", (e) => {
+    if (engoleClique) {   // o clique que fecha um arrasto não é seleção
+      engoleClique = false;
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     if (editando && editando.el.contains(e.target as Node)) return;   // clique dentro do texto: é o cursor
     if (escolhendo()) {
       e.preventDefault();
@@ -300,6 +423,8 @@ function inspetor() {
     // Esc sem nada para limpar: quem está fora (a apresentação em tela cheia) decide o que fazer
     if (e.key === "Escape" && !(escolhendo() && sel.length)) return envia({ type: "atalho", acao: "sair" });
     if (!escolhendo() || !sel.length) return;
+    if (modo === "edit" && (e.key === "Delete" || e.key === "Backspace")) return envia({ type: "atalho", acao: "apagar" }), e.preventDefault();
+    if (modo === "edit" && (e.ctrlKey || e.metaKey) && k === "d") return envia({ type: "atalho", acao: "duplicar" }), e.preventDefault();
     const atual = porFid(sel[sel.length - 1]);
     if (e.key === "ArrowUp" && atual) {
       const pai = alvo(atual.parentElement);
@@ -320,7 +445,7 @@ function inspetor() {
       reposto = 0;
       const el = porFid(sel[sel.length - 1]);
       if (el) envia({ type: "select", fid: sel[sel.length - 1], rect: retangulo(el), tag: el.tagName.toLowerCase(), path: caminho(el),
-                      itens: sel.map((f) => item(porFid(f)!)), estilo: estiloDe(el) });
+                      itens: sel.map((f) => item(porFid(f)!)), estilo: estiloDe(el), href: el.getAttribute("href") });
     });
   }, true);
   addEventListener("resize", () => {
@@ -413,15 +538,36 @@ function inspetor() {
       // tag dentro do mesmo tipo de pai
       const base = porFid(d.fid);
       if (base) {
-        const cls = (base.getAttribute("class") || "").trim().split(/\s+/).filter(Boolean).sort().join(" ");
+        const cls = classes(base).sort().join(" ");
         const paiCls = (base.parentElement?.getAttribute("class") || "").trim();
         const iguais = [...document.querySelectorAll(base.tagName)].filter((el) => {
           if (!el.hasAttribute("data-fid") || camada.contains(el)) return false;
-          const c = (el.getAttribute("class") || "").trim().split(/\s+/).filter(Boolean).sort().join(" ");
+          const c = classes(el).sort().join(" ");
           return cls ? c === cls : !c && (el.parentElement?.getAttribute("class") || "").trim() === paiCls;
         }).slice(0, 60).map((el) => el.getAttribute("data-fid")!);
         seleciona([d.fid, ...iguais.filter((f) => f !== d.fid)]);
       }
+    } else if (d.type === "arvore") {
+      const nos: object[] = [];
+      const anda = (el: Element, nivel: number) => {
+        for (const f of el.children) {
+          if (f === camada || nos.length >= 3000) continue;
+          const tem = f.hasAttribute("data-fid");
+          if (tem) {
+            const direto = [...f.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join(" ").trim().replace(/\s+/g, " ");
+            const c = getComputedStyle(f);
+            nos.push({ ...item(f), sec: f.getAttribute("data-section") || "", texto: (direto || (f.children.length ? "" : f.textContent || "")).trim().slice(0, 48),
+                       nivel, oculto: c.display === "none" || c.visibility === "hidden" });
+          }
+          anda(f, tem ? nivel + 1 : nivel);
+        }
+      };
+      if (document.body) anda(document.body, 0);
+      envia({ type: "arvore", nos });
+    } else if (d.type === "realce") {
+      hover = typeof d.fid === "string" ? porFid(d.fid) : null;
+      realceFora = !!hover;
+      desenha();
     } else if (d.type === "highlight" && Array.isArray(d.fids)) {
       filhos.length = 0;
       seleciona(d.fids.filter((f: unknown) => typeof f === "string"));
@@ -445,9 +591,12 @@ function inspetor() {
         if (!el) continue;
         for (const [k, v] of Object.entries(d.estilos as Record<string, unknown>))
           if (!PROPS.includes(k) || typeof v !== "string") continue;
-          else if (v) el.style.setProperty(k, v);
+          else if (v) el.style.setProperty(k, v, "important");   // vence as regras @media já salvas
           else el.style.removeProperty(k);
       }
+      desenha();
+    } else if (d.type === "setPagina" && typeof d.nome === "string") {
+      (window as { forjaIrPagina?: (n: string) => void }).forjaIrPagina?.(d.nome);
       desenha();
     } else if (d.type === "setTela" && typeof d.nome === "string") {
       (window as { forjaIrTela?: (n: string) => void }).forjaIrTela?.(d.nome);

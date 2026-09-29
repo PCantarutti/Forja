@@ -6,30 +6,36 @@ import { type Effort, Menu, ModeEffortMenu } from "./Controls";
 import DesignAjustes, { type Sistema } from "./DesignAjustes";
 import DesignAcessibilidade from "./DesignAcessibilidade";
 import DesignAtividade from "./DesignAtividade";
+import DesignCamadas from "./DesignCamadas";
+import DesignCaptura, { type Bloco, type Paleta } from "./DesignCaptura";
 import DesignEditar from "./DesignEditar";
 import DesignFluxo from "./DesignFluxo";
+import DesignRevisao, { type ProblemaVisual, type Revisao } from "./DesignRevisao";
+import DesignModelos, { type Modelo } from "./DesignModelos";
 import DesignPerguntas, { type Pergunta } from "./DesignPerguntas";
 import DesignPlano, { type Plano } from "./DesignPlano";
 import DesignVariacoes, { Miniatura, type Variacao } from "./DesignVariacoes";
-import { type Item, type Modo, type NoCaminho, type Problema, docEstatico, enviar as paraIframe, lerMensagem, paraCanvas, ponte } from "./designCanvas";
+import { type Item, type Modo, type NoArvore, type NoCaminho, type Problema, docEstatico, enviar as paraIframe, lerMensagem, paraCanvas, ponte } from "./designCanvas";
 import { ArrowLeft, ArrowRight, Bubble, Check, ChevronDown, Code, Cube, Download, Edit, ExternalLink, Globe, Image, Minus, Mira, Paperclip, Play, Plus,
   Split, TelaCheia, Undo, X } from "./icons";
 import { Markdown, PromptRow, StatsRow, aggregate } from "./MessageView";
 import ModelPicker from "./ModelPicker";
 
 // Tela Design: chat à esquerda (no feitio do chat do agente: bolhas, raciocínio colapsável e a linha
-// de métricas), canvas à direita. Cada pedido vai pela rota mais barata (o backend decide, você pode
-// forçar) e vira uma versão nova; desfazer/refazer só movem qual versão está à vista.
+// de métricas), canvas à direita. Cada pedido à IA vai pela rota mais barata (o backend decide, você
+// pode forçar) e vira uma versão nova. Ajuste à mão fica no rascunho até você salvar a versão. O
+// histórico é uma árvore: editar a partir de uma versão antiga abre um ramo, sem apagar nada.
 
 type Mensagem = {
   id: number; role: "user" | "assistant"; content: string; status: string | null; thinking: string;
-  versao: number | null; fids: string[]; entrada?: number | null; rota?: string | null; secao?: string | null;
+  versao: number | null; base?: number | null; fids: string[]; entrada?: number | null; rota?: string | null; secao?: string | null;
   stats: Stats[]; comentarios: number[]; plano: Plano | null;
   perguntas?: Pergunta[] | null; respostas?: { pergunta: string; resposta: string }[] | null;
   referencias?: Referencia[]; mensagem?: string; sugestoes?: string[]; passos?: string[]; mais?: number; menos?: number;
   variacoes?: Variacao[] | null; escolhida?: number | null;
 };
-type Referencia = { tipo: "imagem" | "documento" | "pagina"; nome: string; data?: string; texto?: string };
+type Referencia = { tipo: "imagem" | "documento" | "pagina"; nome: string; data?: string; texto?: string;
+                    captura_id?: string; blocos?: Bloco[]; paleta?: Paleta; largura?: number };
 type Comentario = {
   id: number; texto: string; fids: string[]; status: "pendente" | "aplicado" | "descartado"; orfao: boolean;
   versao_criada: number; versao_aplicada: number | null;
@@ -39,6 +45,8 @@ type Projeto = {
   secoes: string[]; comentarios: Comentario[]; rodando: number | null;
   imagens: { total: number; pendentes: number; nomes: string[]; conversa: number | null; disponivel: boolean };
   sistema: string | null;
+  rascunho: { base: number; rev: number; passos: string[]; mudancas: number } | null;
+  edicao: { desfazer: boolean; refazer: boolean };
 };
 type Patch = { fid: string; html: string };
 type Geracao = {
@@ -47,12 +55,12 @@ type Geracao = {
   vivo?: Stats; secoes?: { nome: string; status: string }[]; n?: number; doc?: string;
 };
 type Selecao = { fid: string; tag: string; path: NoCaminho[]; itens: Item[]; rect: { x: number; y: number; w: number; h: number } | null;
-                 estilo: Record<string, string> };
-const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+                 estilo: Record<string, string>; href: string | null };
+const ZOOMS = [0.25, 0.33, 0.5, 0.75, 1, 1.25, 1.5, 2];
 type Par = { provider: string; model: string };
 type Modelos = { plano: Par; geracao: Par; edicao: Par };
 type Rota = "auto" | "tokens" | "secao" | "documento" | "variacoes";
-type Viewport = "desktop" | "tablet" | "mobile";
+type Viewport = "desktop" | "tablet" | "mobile" | "lado";
 
 const KEY = "forja.design.preferencias";
 const REDESENHO_MS = 1500;   // canvas durante a geração do documento: re-renderiza o parcial nesse ritmo
@@ -67,14 +75,22 @@ const ROTAS: { id: Rota; label: string; hint: string }[] = [
 ];
 const ROTULO_ROTA: Record<string, string> = {
   plano: "plano", etapas: "em etapas", fragmento: "fragmento", tokens: "só tokens", secao: "seção",
-  documento: "documento inteiro", texto: "texto · sem IA", restaurar: "restauração", variacoes: "variações",
+  documento: "documento inteiro", texto: "texto · sem IA", restaurar: "restauração", variacoes: "variações", manual: "ajustes à mão",
   variacao: "variação · sem IA", ajuste: "ajuste · sem IA", sistema: "design system · sem IA", tweaks: "ajustes da IA", imagens: "imagens",
 };
 const VIEWPORTS: { id: Viewport; label: string; largura: number | null }[] = [
   { id: "desktop", label: "Desktop", largura: null },
   { id: "tablet", label: "Tablet", largura: 768 },
   { id: "mobile", label: "Celular", largura: 375 },
+  { id: "lado", label: "Lado a lado", largura: null },
 ];
+// "Lado a lado": as três larguras juntas num quadro (só visualização; clicar no nome abre aquela largura)
+const QUADROS: { id: Viewport; label: string; w: number; h: number }[] = [
+  { id: "desktop", label: "Desktop", w: 1440, h: 900 },
+  { id: "tablet", label: "Tablet", w: 768, h: 1024 },
+  { id: "mobile", label: "Celular", w: 375, h: 812 },
+];
+const VAO = 48;   // espaço entre os quadros (px na escala 1)
 const EXPORTS: { formato: "html" | "pdf" | "png" | "pptx"; fids?: boolean; label: string; hint: string }[] = [
   { formato: "html", label: "HTML limpo", hint: "Um arquivo só, sem o script do canvas e sem data-fid" },
   { formato: "html", fids: true, label: "HTML com data-fid", hint: "Mantém os ids estáveis (para voltar a editar em outro lugar)" },
@@ -99,16 +115,25 @@ const contaSlides = (html: string) => (html.match(/<section\b[^>]*\sdata-slide(?
 /** Telas do protótipo (seções de topo com data-tela), na ordem. */
 const nomesTelas = (html: string) =>
   [...html.matchAll(/<section\b[^>]*\sdata-tela(?=[\s=>])[^>]*>/gi)].map((m) => /data-section="([^"]+)"/.exec(m[0])?.[1] ?? "").filter(Boolean);
+/** Árvore do histórico: versão → de qual nasceu (as antigas, sem base, da anterior; 0 = raiz). */
+const paisDe = (ms: Mensagem[]) =>
+  new Map(ms.filter((m) => m.versao).map((m) => [m.versao!, m.base || (m.versao! > 1 ? m.versao! - 1 : 0)]));
+const filhoMaisNovo = (pais: Map<number, number>, v: number) => Math.max(0, ...[...pais].filter(([, b]) => b === v).map(([f]) => f));
+/** Páginas do site (seções de topo com data-pagina; "*" = comum a todas), na ordem. */
+const nomesPaginas = (html: string) =>
+  [...new Set([...html.matchAll(/<(?:section|header|footer|nav|main|div)\b[^>]*\sdata-pagina="([^"*]+)"/gi)].map((m) => m[1]))];
+const slugPagina = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 const rotulo = (n: { tag: string; cls: string }) => n.tag + (n.cls ? "." + n.cls.split(/\s+/)[0] : "");
 const milhar = (n: number) => (n >= 1000 ? `${(n / 1000).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} mil` : String(n));
 
-type Preferencias = { modelos: Modelos; esforco: Effort; sistema?: string; perguntar?: boolean };
+type Preferencias = { modelos: Modelos; esforco: Effort; sistema?: string; perguntar?: boolean;
+                      revisarVisao?: boolean; revisarAuto?: boolean };
 
 function lerPreferencias(provider: string, model: string): Preferencias {
   const par = { provider, model };
   try {
     const p = JSON.parse(localStorage.getItem(KEY) ?? "null");
-    if (p?.modelos?.geracao?.model) return { modelos: { plano: par, edicao: par, ...p.modelos }, esforco: p.esforco ?? "baixo", sistema: p.sistema ?? "" };
+    if (p?.modelos?.geracao?.model) return { ...p, modelos: { plano: par, edicao: par, ...p.modelos }, esforco: p.esforco ?? "baixo", sistema: p.sistema ?? "" };
     const antigo = JSON.parse(localStorage.getItem("forja.design.modelo") ?? "null");   // fase 1: um modelo só
     if (antigo?.model) return { modelos: { plano: antigo, geracao: antigo, edicao: antigo }, esforco: "baixo" };
   } catch {
@@ -150,6 +175,19 @@ export default function DesignView(props: {
   const [abrirApresentar, setAbrirApresentar] = useState(false);
   const [zoom, setZoom] = useState(1);                       // só da página gerada (o app não muda)
   const [abrirZoom, setAbrirZoom] = useState(false);
+  const [abrirSalvar, setAbrirSalvar] = useState(false);
+  const [camadas, setCamadas] = useState(false);
+  const [nomeModelo, setNomeModelo] = useState<string | null>(null);   // "Salvar como modelo" aberto
+  const [paginaAtual, setPaginaAtual] = useState("");
+  const [novaPagina, setNovaPagina] = useState<{ nome: string; desc: string } | null>(null);
+  const [captura, setCaptura] = useState<Referencia | null>(null);   // janela dos blocos da página capturada
+  const [revisao, setRevisao] = useState<Revisao | null>(null);
+  const [revisando, setRevisando] = useState(false);
+  const depoisDeGerar = useRef<() => void>(() => {});
+  // largura (px de CSS) em que a página está à vista: decide se a edição vale para Desktop, Tablet ou Celular
+  const [vwCanvas, setVwCanvas] = useState(0);
+  const [nosCamadas, setNosCamadas] = useState<NoArvore[]>([]);
+  const [nomeVersao, setNomeVersao] = useState("");
   const [comparar, setComparar] = useState<number | null>(null);   // versão aberta ao lado da atual
   const [htmlVersoes, setHtmlVersoes] = useState<Record<number, string>>({});
   const palco = useRef<HTMLDivElement>(null);
@@ -173,6 +211,7 @@ export default function DesignView(props: {
   const iframe = useRef<HTMLIFrameElement>(null);
   const campo = useRef<HTMLTextAreaElement>(null);
   const versaoNoCanvas = useRef(0);
+  const htmlNoCanvas = useRef("");   // com rascunho, a versão fica e o HTML muda: é ele que decide recarregar
   const temCanvas = useRef(false);
   const nVivo = useRef(-1);
   const corte = useRef<AbortController | null>(null);
@@ -190,12 +229,13 @@ export default function DesignView(props: {
     const patches = fim?.patches ?? [];
     if (p && patches.length && fim?.base === versaoNoCanvas.current && temCanvas.current) {
       patches.forEach((x) => paraIframe(janela(), { type: "patch", fid: x.fid, html: x.html }));
-    } else if (!(p && p.atual === versaoNoCanvas.current && temCanvas.current)) {
-      // mesma versão já no canvas (recarga pelo carimbo, patch já aplicado): não recarrega o iframe
+    } else if (!(p && p.html === htmlNoCanvas.current && temCanvas.current)) {
+      // mesmo HTML já no canvas (recarga pelo carimbo, patch já aplicado): não recarrega o iframe
       setSrcBase(p?.html ?? "");
       temCanvas.current = !!p?.html;
     }
     versaoNoCanvas.current = p?.atual ?? 0;
+    htmlNoCanvas.current = p?.html ?? "";
     setProjeto(p);
   }, []);
 
@@ -235,6 +275,7 @@ export default function DesignView(props: {
         setDocVivo("");
         const fim = ultimoEvento.current as Geracao | null;   // escrito no callback do SSE
         carregar(conv, fim?.status === "ok" ? fim : null);
+        if (fim?.status === "ok" && fim.versao) depoisDeGerar.current();
       }
     }
   }, [carregar]);
@@ -276,6 +317,8 @@ export default function DesignView(props: {
   useEffect(() => fimChat.current?.scrollIntoView({ block: "end" }), [projeto?.mensagens.length, rodando, aba]);
   useEffect(() => paraIframe(janela(), { type: "setMode", mode: modo }), [modo]);
   useEffect(() => paraIframe(janela(), { type: "setMulti", on: multi }), [multi]);
+  // Camadas aberto: a árvore acompanha cada mudança (o patch vai antes pela mesma fila de mensagens)
+  useEffect(() => { if (camadas) paraIframe(janela(), { type: "arvore" }); }, [camadas, projeto?.html]);
 
   // Campo que cresce com o texto até CAMPO_MAX, como o do agente.
   useEffect(() => {
@@ -313,8 +356,13 @@ export default function DesignView(props: {
 
   const modelosDe = () => ({ ...prefs.modelos });
 
+  const paginaDoPedido = () => {
+    const h = projeto?.html ?? "";
+    const ps = nomesTelas(h).length ? [] : nomesPaginas(h);
+    return ps.length ? (ps.includes(paginaAtual) ? paginaAtual : ps[0]) : "";
+  };
   async function pedir(extra: { rota?: string; secao?: string; comentarios?: number[]; pedido?: string;
-                                 respostas?: { pergunta: string; resposta: string }[]; fids?: string[] } = {}) {
+                                 respostas?: { pergunta: string; resposta: string }[]; fids?: string[]; pagina?: string } = {}) {
     const pedido = (extra.pedido ?? texto).trim();
     if (rodando || (!pedido && !extra.comentarios?.length && !["secao", "tweaks", "variacoes"].includes(extra.rota ?? ""))) return;
     const anexos = refs;
@@ -335,7 +383,9 @@ export default function DesignView(props: {
       await ouvir(`/design/${id}/gerar`, { method: "POST", body: JSON.stringify({
         pedido, fids, rota: extra.rota ?? rota, secao: extra.secao ?? "", comentarios: extra.comentarios ?? [],
         esforco: prefs.esforco, modelos: modelosDe(), sistema: prefs.sistema ?? "", ...prefs.modelos.geracao,
-        perguntar: prefs.perguntar !== false, respostas: extra.respostas ?? [], referencias: anexos }) }, id);
+        perguntar: prefs.perguntar !== false, respostas: extra.respostas ?? [], referencias: anexos,
+        // site com páginas: seção nova entra na página que está à vista
+        pagina: extra.pagina ?? paginaDoPedido() }) }, id);
       props.onConversationChanged();
     } catch (e: any) {
       props.onError(e.message);
@@ -484,6 +534,32 @@ export default function DesignView(props: {
     if (geracao?.message_id) await api.post(`/design/${geracao.message_id}/cancelar`, {}).catch(() => {});
   }
 
+  /** Ctrl+Z: primeiro o rascunho (ajuste por ajuste); sem rascunho, volta para a versão de onde esta nasceu. */
+  function desfazer() {
+    if (!projeto || rodando) return;
+    if (projeto.edicao.desfazer) return acaoRascunho("desfazer");
+    if (projeto.rascunho) return props.onError("O rascunho não tem mais o que desfazer aqui (o backend reiniciou): salve ou descarte.");
+    const pai = paisDe(projeto.mensagens).get(projeto.atual);
+    if (pai) ir(pai);
+  }
+  /** Ctrl+Shift+Z: refaz no rascunho; sem rascunho, desce para o filho mais novo da versão atual. */
+  function refazer() {
+    if (!projeto || rodando) return;
+    if (projeto.edicao.refazer) return acaoRascunho("refazer");
+    const filho = filhoMaisNovo(paisDe(projeto.mensagens), projeto.atual);
+    if (!projeto.rascunho && filho) ir(filho);
+  }
+  async function acaoRascunho(acao: "desfazer" | "refazer" | "descartar" | "salvar", descricao = "") {
+    if (!projeto) return;
+    try {
+      mostrar(await api.post<Projeto>(`/design/${projeto.conv_id}/rascunho/${acao}`, { descricao }));
+      if (acao === "salvar") { setNomeVersao(""); setAbrirSalvar(false); }
+    } catch (e: any) {
+      props.onError(e.message);
+    }
+  }
+  const salvarVersao = () => { if (projeto?.rascunho) acaoRascunho("salvar", nomeVersao); };
+
   async function ir(versao: number) {
     if (!projeto || rodando || versao < 1 || versao > projeto.total || versao === projeto.atual) return;
     try {
@@ -502,7 +578,7 @@ export default function DesignView(props: {
     }
   }
 
-  /** Duplo clique no canvas: o texto vai direto para a fonte (versão nova), sem chamar o modelo. */
+  /** Duplo clique no canvas: o texto vai direto para a fonte (no rascunho), sem chamar o modelo. */
   async function salvarTexto(fid: string, html: string) {
     if (!projeto) return;
     try {
@@ -526,7 +602,66 @@ export default function DesignView(props: {
     }
   }
 
-  /** Mudança direta, sem modelo (sliders, design system): versão nova e patch no canvas. */
+  /** Revisão visual (3 larguras, Chromium no backend); com `fila`, os achados já viram comentários. */
+  async function revisar(fila: boolean) {
+    if (!projeto || revisando) return;
+    setRevisando(true);
+    try {
+      const m = prefs.revisarVisao !== false ? prefs.modelos.edicao : { provider: "", model: "" };
+      const r = await api.post<Revisao>(`/design/${projeto.conv_id}/revisao`, { ...m, esforco: prefs.esforco, fila });
+      setRevisao(r);
+      if (r.na_fila) carregar(projeto.conv_id);
+    } catch (e: any) {
+      props.onError(e.message);
+    } finally {
+      setRevisando(false);
+    }
+  }
+  depoisDeGerar.current = () => { if (prefs.revisarAuto !== false) revisar(true); };
+  async function paraFila(ps: ProblemaVisual[]) {
+    if (!projeto) return;
+    try {
+      const r = await api.post<{ na_fila: number; projeto: Projeto }>(`/design/${projeto.conv_id}/revisao/fila`, { problemas: ps });
+      mostrar(r.projeto);
+      setRevisao((x) => (x ? { ...x, na_fila: x.na_fila + r.na_fila } : x));
+    } catch (e: any) {
+      props.onError(e.message);
+    }
+  }
+  function mostrarProblema(p: ProblemaVisual) {
+    if (viewport !== p.largura) escolherViewport(p.largura);
+    setTimeout(() => { selecionar([p.fid]); paraIframe(janela(), { type: "scrollTo", fid: p.fid }); }, viewport !== p.largura ? 600 : 0);
+  }
+
+  /** Projeto vazio a partir de um modelo guardado: vira a v1 na hora, sem IA. */
+  async function usarModelo(m: Modelo) {
+    try {
+      const id = await props.ensureConversation();
+      mostrar(await api.post<Projeto>(`/design/${id}/modelo/${m.id}`));
+      props.onConversationChanged();
+    } catch (e: any) {
+      props.onError(e.message);
+    }
+  }
+  async function salvarModelo() {
+    const nome = (nomeModelo ?? "").trim();
+    if (!projeto || !nome) return;
+    try {
+      await api.post("/design-modelos", { conv_id: projeto.conv_id, nome });
+      setNomeModelo(null);
+      setAbrirExport(false);
+    } catch (e: any) {
+      props.onError(e.message);
+    }
+  }
+
+  /** Modo Editar: apagar, duplicar, mover, trocar imagem e link (no rascunho, sem IA). */
+  async function operar(op: "apagar" | "duplicar" | "mover" | "imagem" | "link", fids: string[], extra: { alvo?: string; onde?: string; valor?: string } = {}) {
+    await semIA("operacao", { op, fids, ...extra });
+    if (op === "apagar") selecionar([]);
+  }
+
+  /** Mudança direta, sem modelo (sliders, design system): rascunho e patch no canvas. */
   async function semIA(caminho: string, corpo: unknown) {
     if (!projeto) return;
     try {
@@ -618,6 +753,25 @@ export default function DesignView(props: {
   };
   const alternarInspecao = () => setModo((m) => (m === "inspect" ? "view" : "inspect"));
   const alternarComentario = () => setModo((m) => (m === "comment" ? "view" : "comment"));
+  const escopo: "desktop" | "tablet" | "mobile" = vwCanvas && vwCanvas <= 480 ? "mobile" : vwCanvas && vwCanvas <= 820 ? "tablet" : "desktop";
+  const escopoRef = useRef(escopo);
+  escopoRef.current = escopo;
+  useEffect(() => {
+    const el = iframe.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setVwCanvas(el.offsetWidth));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [chave, srcBase, modo]);
+  /** Lado a lado entra já no zoom que cabe as três larguras; ao sair, volta ao tamanho real. */
+  const escolherViewport = (v: Viewport) => {
+    if (v === "lado" && areaCanvas.current) {
+      const cabe = (areaCanvas.current.clientWidth - 40) / (QUADROS.reduce((t, q) => t + q.w, 0) + VAO * 2);
+      setZoom(ZOOMS.filter((z) => z <= cabe).pop() ?? ZOOMS[0]);
+      setModo("view");
+    } else if (viewport === "lado") setZoom(1);
+    setViewport(v);
+  };
   const alternarEdicao = () => setModo((m) => (m === "edit" ? "view" : "edit"));
 
   // Mensagens do canvas. Os handlers mudam a cada render; o ouvinte (fixo) chama o mais recente.
@@ -630,13 +784,20 @@ export default function DesignView(props: {
       paraIframe(janela(), { type: "setMulti", on: multi });
       paraIframe(janela(), { type: "setSlide", n: slides.atual });
       if (tela) paraIframe(janela(), { type: "setTela", nome: tela });
+      if (paginaAtual) paraIframe(janela(), { type: "setPagina", nome: paginaAtual });
       if (aba === "acessibilidade") paraIframe(janela(), { type: "auditar" });
       paraIframe(janela(), { type: "showPins", pins: pinsAtuais() });
       if (selecao) selecionar(selecao.itens.map((i) => i.fid));
-    } else if (m.type === "select") setSelecao(m.fid ? { fid: m.fid, tag: m.tag, path: m.path, itens: m.itens, rect: m.rect, estilo: m.estilo } : null);
+      if (camadas) paraIframe(janela(), { type: "arvore" });
+    } else if (m.type === "arvore") setNosCamadas(m.nos);
+    else if (m.type === "select") setSelecao(m.fid ? { fid: m.fid, tag: m.tag, path: m.path, itens: m.itens, rect: m.rect, estilo: m.estilo, href: m.href } : null);
     else if (m.type === "textEdited") salvarTexto(m.fid, m.html);
+    else if (m.type === "mover") operar("mover", m.fids, { alvo: m.alvo, onde: m.onde });
+    else if (m.type === "redimensionar") semIA("estilo", { fids: [m.fid], largura: escopoRef.current, estilos: {
+      ...(m.w ? { width: `${m.w}px` } : {}), ...(m.h ? { height: `${m.h}px` } : {}) } });
     else if (m.type === "slides") setSlides({ atual: m.atual, total: m.total });
     else if (m.type === "tela") setTela(m.nome);
+    else if (m.type === "pagina") setPaginaAtual(m.nome);
     else if (m.type === "auditoria") setAuditoria({ itens: m.itens, escopo: m.escopo });
     else if (m.type === "pin") {
       setAba("comentarios");
@@ -646,7 +807,9 @@ export default function DesignView(props: {
     } else if (m.type === "atalho") {
       if (m.acao === "inspect") alternarInspecao();
       else if (m.acao === "comentar") alternarComentario();
-      else if (m.acao !== "sair" && projeto) ir(projeto.atual + (m.acao === "undo" ? -1 : 1));
+      else if (m.acao === "undo") desfazer();
+      else if (m.acao === "redo") refazer();
+      else if ((m.acao === "apagar" || m.acao === "duplicar") && selecao) operar(m.acao, selecao.itens.map((i) => i.fid));
     }
   };
   useEffect(() => {
@@ -659,13 +822,19 @@ export default function DesignView(props: {
   // Ctrl+Shift+C (inspecionar, como no navegador). Campos de texto ficam com o Ctrl+Z deles.
   useEffect(() => {
     const tecla = (e: KeyboardEvent) => {
+      const emCampo = !!(e.target as HTMLElement).closest("input, textarea, select, [contenteditable]");
+      if (modo === "edit" && selecao && !emCampo && (e.key === "Delete" || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d"))) {
+        e.preventDefault();
+        return operar(e.key === "Delete" ? "apagar" : "duplicar", selecao.itens.map((i) => i.fid));
+      }
       if (!(e.ctrlKey || e.metaKey) || !projeto) return;
       const k = e.key.toLowerCase();
       if (e.shiftKey && k === "c") alternarInspecao();
       else if (e.shiftKey && k === "m") alternarComentario();
+      else if (k === "s" && !e.shiftKey) salvarVersao();
       else if ((e.target as HTMLElement).closest("input, textarea, [contenteditable]")) return;
-      else if (k === "z" && !e.shiftKey) ir(projeto.atual - 1);
-      else if (k === "y" || (k === "z" && e.shiftKey)) ir(projeto.atual + 1);
+      else if (k === "z" && !e.shiftKey) desfazer();
+      else if (k === "y" || (k === "z" && e.shiftKey)) refazer();
       else return;
       e.preventDefault();
     };
@@ -680,6 +849,8 @@ export default function DesignView(props: {
   const secaoSel = selecao?.path.find((n) => n.sec)?.sec;
   const nSlides = contaSlides(html);
   const telas = nomesTelas(html);
+  const paginas = telas.length ? [] : nomesPaginas(html);
+  const ladoALado = viewport === "lado" && !nSlides;
   const largura = nSlides ? null : VIEWPORTS.find((v) => v.id === viewport)!.largura;
   // miniaturas pela fonte mais nova (o iframe principal pode estar na versão antiga + patches)
   const fonteMini = rodando && docVivo ? docVivo : projeto?.html ?? "";
@@ -689,6 +860,23 @@ export default function DesignView(props: {
   }, [fonteMini]);
   const mensagens = projeto?.mensagens ?? [];
   const versoes = mensagens.filter((m) => m.versao).reverse();
+  // árvore do histórico: a versão nasce de `base` (as antigas, sem base, da anterior)
+  const pais = paisDe(mensagens);
+  const paiDe = (v: number) => pais.get(v) ?? 0;
+  const filhoDe = (v: number) => filhoMaisNovo(pais, v);
+  const chaveArvore = versoes.map((m) => `${m.versao}:${m.base}`).join();
+  const arvore = useMemo(() => {
+    // em profundidade a partir das raízes; o primeiro filho segue na mesma coluna, os outros são ramos
+    const filhos = new Map<number, number[]>();
+    [...pais].sort((a, b) => a[0] - b[0]).forEach(([v, b]) => filhos.set(b, [...(filhos.get(b) ?? []), v]));
+    const out: { v: number; nivel: number; ramo: boolean }[] = [];
+    const anda = (v: number, nivel: number, ramo: boolean) => {
+      out.push({ v, nivel, ramo });
+      (filhos.get(v) ?? []).forEach((f, i) => anda(f, nivel + (i ? 1 : 0), i > 0));
+    };
+    (filhos.get(0) ?? []).forEach((r, i) => anda(r, i, i > 0));
+    return out;
+  }, [chaveArvore]);   // eslint-disable-line react-hooks/exhaustive-deps
   const btn = "grid size-8 place-items-center rounded-lg text-muted hover:bg-raised hover:text-fg disabled:opacity-30 disabled:hover:bg-transparent";
   const abaBtn = (on: boolean) => `rounded-lg px-2.5 py-1 text-xs ${on ? "bg-raised text-fg" : "text-muted hover:text-fg"}`;
 
@@ -718,9 +906,11 @@ export default function DesignView(props: {
             Comentários{!!pendentes.length && <span className="ml-1 rounded-full bg-amber-500/20 px-1.5 text-[10.5px] text-amber-300">{pendentes.length}</span>}
           </button>
           <button className={abaBtn(aba === "ajustes")} onClick={() => setAba("ajustes")}>Ajustes</button>
-          <button className={abaBtn(aba === "acessibilidade")} title="Acessibilidade (sem IA)"
+          <button className={abaBtn(aba === "acessibilidade")} title="Revisão visual nas 3 larguras e acessibilidade"
                   onClick={() => { setAba("acessibilidade"); auditar(); }}>
-            A11y{!!auditoria.itens?.filter((x) => x.gravidade === "erro").length && aba !== "acessibilidade" &&
+            Revisão{!!revisao?.problemas.length && aba !== "acessibilidade" &&
+              <span className="ml-1 rounded-full bg-amber-500/20 px-1.5 text-[10.5px] text-amber-300">{revisao.problemas.length}</span>}
+            {!!auditoria.itens?.filter((x) => x.gravidade === "erro").length && aba !== "acessibilidade" &&
               <span className="ml-1 rounded-full bg-red-500/20 px-1.5 text-[10.5px] text-red-300">{auditoria.itens!.filter((x) => x.gravidade === "erro").length}</span>}
           </button>
           <button className={abaBtn(aba === "versoes")} onClick={() => { setAba("versoes"); versoes.slice(0, 12).forEach((m) => htmlDaVersao(m.versao!)); }}>Versões{!!total && <span className="ml-1 text-faint">{total}</span>}</button>
@@ -736,6 +926,10 @@ export default function DesignView(props: {
                     (Shift+clique junta vários) e peça: só ele vai ao modelo. Duplo clique num texto edita direto,
                     sem IA. Mudança de estilo geral mexe só nos tokens.</p>
                 </div>
+              )}
+              {!mensagens.length && !rodando && (
+                <DesignModelos onPedido={(t) => { setTexto(t); requestAnimationFrame(() => campo.current?.focus()); }}
+                               onUsar={usarModelo} onErro={props.onError} />
               )}
               {mensagens.map((m, i) => {
                 if (m.role === "user") {
@@ -885,6 +1079,12 @@ export default function DesignView(props: {
           )}
 
           {aba === "acessibilidade" && (
+            <DesignRevisao revisao={revisao} rodando={revisando} desabilitado={rodando || !projeto?.html}
+                           modelo={prefs.modelos.edicao.model} comVisao={prefs.revisarVisao !== false} auto={prefs.revisarAuto !== false}
+                           onComVisao={(v) => setPrefs((p) => ({ ...p, revisarVisao: v }))} onAuto={(v) => setPrefs((p) => ({ ...p, revisarAuto: v }))}
+                           onRevisar={revisar} onMostrar={mostrarProblema} onFila={paraFila} />
+          )}
+          {aba === "acessibilidade" && (
             <DesignAcessibilidade itens={auditoria.itens} escopo={auditoria.escopo} desabilitado={rodando || !projeto?.html}
                                   onVerificar={auditar}
                                   onMostrar={(fid) => { selecionar([fid]); paraIframe(janela(), { type: "scrollTo", fid }); }}
@@ -894,8 +1094,27 @@ export default function DesignView(props: {
 
           {aba === "versoes" && (
             <div className="flex flex-col gap-1 py-2">
-              {versoes.map((m) => (
-                <div key={m.id} className={`group flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] ${m.versao === atual ? "bg-accent-soft text-accent-text" : "text-fg-2 hover:bg-raised"}`}>
+              <p className="px-2 pb-1 text-[11.5px] leading-snug text-faint">
+                Ajustes à mão ficam no rascunho até você salvar (Ctrl+S). Para abrir um ramo, vá até uma versão antiga e siga
+                editando: a próxima versão nasce dela, sem apagar as outras.
+              </p>
+              {projeto?.rascunho && (
+                <div className="rounded-lg border border-amber-400/40 bg-amber-500/5 px-2.5 py-2 text-[12.5px]">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-amber-300">Rascunho sobre a v{projeto.rascunho.base}</span>
+                    <span className="text-faint">{projeto.rascunho.mudancas} {projeto.rascunho.mudancas === 1 ? "ajuste" : "ajustes"}</span>
+                    <span className="flex-1" />
+                    <button onClick={() => setAbrirSalvar(true)} className="rounded border border-line px-1.5 text-[11px] hover:bg-raised">Salvar versão</button>
+                    <button onClick={() => acaoRascunho("descartar")} className="rounded border border-line px-1.5 text-[11px] hover:bg-raised">Descartar</button>
+                  </div>
+                  <ul className="mt-1 text-[11.5px] leading-snug text-faint">
+                    {projeto.rascunho.passos.slice(-6).map((x, i) => <li key={i} className="truncate">· {x}</li>)}
+                  </ul>
+                </div>
+              )}
+              {arvore.map((n) => versoes.find((x) => x.versao === n.v)!).map((m, i) => (
+                <div key={m.id} style={{ marginLeft: arvore[i].nivel * 14 }}
+                     className={`group flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] ${arvore[i].nivel ? "border-l border-line-strong" : ""} ${m.versao === atual ? "bg-accent-soft text-accent-text" : "text-fg-2 hover:bg-raised"}`}>
                   <button onClick={() => ir(m.versao!)} disabled={rodando} className="shrink-0" title="Mostrar esta versão">
                     {htmlVersoes[m.versao!] ? <Miniatura html={htmlVersoes[m.versao!]} titulo={`Miniatura da v${m.versao}`} />
                       : <div className="grid h-[163px] w-[243px] place-items-center rounded-lg border border-dashed border-line text-[11px] text-faint"
@@ -903,6 +1122,7 @@ export default function DesignView(props: {
                   </button>
                   <div className="flex min-w-0 flex-1 flex-col gap-1">
                     <button onClick={() => ir(m.versao!)} disabled={rodando} className="truncate text-left">{m.content}</button>
+                    {arvore[i].ramo && <span className="self-start rounded bg-raised px-1.5 text-[10.5px] text-muted">ramo da v{paiDe(m.versao!)}</span>}
                     {m.versao !== atual && (
                       <button onClick={() => { setComparar(m.versao!); htmlDaVersao(m.versao!); }}
                               className={`self-start rounded border px-1.5 text-[11px] ${comparar === m.versao ? "border-accent-line text-accent-text" : "border-line hover:bg-raised"}`}>
@@ -947,6 +1167,11 @@ export default function DesignView(props: {
                   <span key={k} className="inline-flex items-center gap-1 rounded-lg border border-line py-0.5 pr-1 pl-1 text-[11.5px] text-fg-2">
                     {r.tipo === "imagem" && r.data ? <img src={r.data} alt="" className="size-5 rounded object-cover" /> : <span>{r.tipo === "pagina" ? "🌐" : "📄"}</span>}
                     <span className="max-w-40 truncate" title={r.nome}>{r.nome}</span>
+                    {r.tipo === "pagina" && !!r.blocos && (
+                      <button onClick={() => setCaptura(r)} disabled={!projeto?.html || rodando}
+                              title={projeto?.html ? "Escolher blocos do site para trazer e usar a paleta dele" : "Gere o design primeiro; depois dá para trazer blocos"}
+                              className="rounded border border-line px-1 text-[10.5px] hover:bg-raised disabled:opacity-40">blocos</button>
+                    )}
                     <button onClick={() => setRefs((x) => x.filter((_, j) => j !== k))} title="Tirar" className="rounded p-0.5 hover:bg-raised"><X className="size-3" /></button>
                   </span>
                 ))}
@@ -1045,6 +1270,10 @@ export default function DesignView(props: {
       <div className="flex min-w-0 flex-1 flex-col bg-side">
         {/* sem espaço, a barra quebra em duas linhas (nunca no meio de um rótulo) em vez de cortar os menus */}
         <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-1 border-b border-line px-3 py-1 text-xs whitespace-nowrap text-muted">
+          <button onClick={() => setCamadas((v) => !v)} aria-pressed={camadas} disabled={!srcBase} title="Árvore de elementos da página"
+                  className={`rounded-lg px-2 py-1 disabled:opacity-30 ${camadas ? "bg-accent-soft text-accent-text" : "text-muted hover:bg-raised hover:text-fg"}`}>
+            Camadas
+          </button>
           <div className="relative">
             <button onClick={() => setAbrirZoom((v) => !v)} disabled={!srcBase} title="Zoom só da página gerada"
                     className="rounded-lg px-1.5 py-1 font-mono text-fg hover:bg-raised disabled:opacity-40">
@@ -1072,7 +1301,8 @@ export default function DesignView(props: {
                ["comment", "Comentar", Bubble, "Comentar: clique num elemento e escreva; o comentário entra na fila · Ctrl+Shift+M", alternarComentario],
                ["edit", "Editar", Edit, "Editar: clique num elemento e mude cor, fonte, espaçamento… direto, sem IA", alternarEdicao]] as const)
               .map(([id, rotuloModo, Icone, dica, alterna]) => (
-                <button key={id} aria-pressed={modo === id} title={dica} disabled={!srcBase} onClick={alterna}
+                <button key={id} aria-pressed={modo === id} title={ladoALado ? "No lado a lado é só visualização: abra uma largura para editar" : dica}
+                        disabled={!srcBase || ladoALado} onClick={alterna}
                         className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 disabled:opacity-30 ${modo === id
                           ? id === "comment" ? "bg-amber-500/15 text-amber-300" : "bg-accent-soft text-accent-text" : "text-muted hover:bg-raised hover:text-fg"}`}>
                   <Icone className="size-3.5" /> {rotuloModo}
@@ -1094,14 +1324,46 @@ export default function DesignView(props: {
             </button>
           )}
           <span className="mx-1 h-5 w-px bg-line" />
-          <button className={btn} title="Desfazer · Ctrl+Z" disabled={rodando || atual <= 1} onClick={() => ir(atual - 1)}>
+          <button className={btn} title={projeto?.rascunho ? "Desfazer o último ajuste do rascunho · Ctrl+Z" : "Voltar para a versão de onde esta nasceu · Ctrl+Z"}
+                  disabled={rodando || !(projeto?.edicao.desfazer || (!projeto?.rascunho && paiDe(atual)))} onClick={desfazer}>
             <Undo />
           </button>
-          <button className={btn} title="Refazer · Ctrl+Shift+Z" disabled={rodando || atual >= total} onClick={() => ir(atual + 1)}>
+          <button className={btn} title={projeto?.edicao.refazer ? "Refazer no rascunho · Ctrl+Shift+Z" : "Ir para a versão mais nova que nasceu desta · Ctrl+Shift+Z"}
+                  disabled={rodando || !(projeto?.edicao.refazer || (!projeto?.rascunho && filhoDe(atual)))} onClick={refazer}>
             <Undo className="size-4 -scale-x-100" />
           </button>
           <span className="ml-1.5">{total ? `v${atual} de ${total}` : "sem versões"}</span>
-          {atual > 0 && atual < total && !rodando && (
+          {projeto?.rascunho && (
+            <div className="relative flex items-center gap-1">
+              <span className="rounded-md bg-amber-500/15 px-1.5 py-0.5 text-amber-300" title={projeto.rascunho.passos.slice(-8).join("\n")}>
+                + rascunho · {projeto.rascunho.mudancas} {projeto.rascunho.mudancas === 1 ? "ajuste" : "ajustes"}
+              </span>
+              <button onClick={() => setAbrirSalvar((v) => !v)} disabled={rodando} title="Salvar o rascunho como versão nova · Ctrl+S"
+                      className="rounded-lg bg-accent px-2 py-1 font-medium text-accent-fg hover:brightness-110 disabled:opacity-40">
+                Salvar versão
+              </button>
+              <button onClick={() => acaoRascunho("descartar")} disabled={rodando} title="Joga fora os ajustes do rascunho e volta para a versão"
+                      className="rounded-lg px-1.5 py-1 text-muted hover:bg-raised hover:text-fg disabled:opacity-40">
+                Descartar
+              </button>
+              {abrirSalvar && (
+                <div className="absolute top-full left-0 z-30 mt-1 w-72 rounded-xl border border-line bg-surface p-2 shadow-xl" role="dialog" aria-label="Salvar versão">
+                  <input autoFocus value={nomeVersao} onChange={(e) => setNomeVersao(e.target.value)} placeholder={`Nome da v${total + 1} (opcional)`}
+                         aria-label="Nome da versão" maxLength={80}
+                         onKeyDown={(e) => { if (e.key === "Enter") salvarVersao(); else if (e.key === "Escape") setAbrirSalvar(false); }}
+                         className="w-full rounded-lg border border-line bg-raised px-2 py-1 text-[13px] text-fg focus:border-focus focus:outline-none" />
+                  <ul className="mt-1.5 max-h-40 overflow-y-auto text-[11.5px] leading-snug text-faint">
+                    {projeto.rascunho.passos.slice(-8).map((x, i) => <li key={i} className="truncate">· {x}</li>)}
+                  </ul>
+                  <div className="mt-1.5 flex justify-end gap-1.5">
+                    <button onClick={() => setAbrirSalvar(false)} className="rounded-lg px-2 py-0.5 text-muted hover:text-fg">Cancelar</button>
+                    <button onClick={salvarVersao} className="rounded-lg bg-accent px-2.5 py-0.5 font-medium text-accent-fg hover:brightness-110">Salvar v{total + 1}</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {atual > 0 && atual < total && !rodando && !projeto?.rascunho && (
             <button onClick={() => restaurar(atual)} title="Copia esta versão para o topo do histórico"
                     className="ml-2 rounded-lg border border-line px-2 py-1 text-fg hover:bg-raised">
               Restaurar como v{total + 1}
@@ -1119,6 +1381,50 @@ export default function DesignView(props: {
               ))}
             </div>
           ) : null}
+          {!telas.length && !nSlides && !!srcBase && (
+            <div className="relative flex items-center gap-0.5">
+              {paginas.length > 0 && (
+                <div className="flex max-w-72 shrink-0 items-center gap-0.5 overflow-x-auto rounded-lg border border-line p-0.5" role="tablist" aria-label="Páginas">
+                  {paginas.map((p) => (
+                    <button key={p} role="tab" aria-selected={(paginaAtual || paginas[0]) === p} onClick={() => paraIframe(janela(), { type: "setPagina", nome: p })}
+                            className={`shrink-0 rounded-md px-2 py-0.5 text-[11.5px] ${(paginaAtual || paginas[0]) === p ? "bg-raised text-fg" : "text-faint hover:text-fg"}`}>
+                      /{p}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <button onClick={() => setNovaPagina((v) => (v ? null : { nome: "", desc: "" }))} disabled={rodando}
+                      title={paginas.length ? "Nova página no site (a IA escreve; o link vai para o menu)" : "Transformar em site com várias páginas: esta vira “inicio” e a IA cria a nova"}
+                      className="rounded-lg border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40">+ Página</button>
+              {novaPagina && (
+                <form role="dialog" aria-label="Nova página" onSubmit={(e) => {
+                        e.preventDefault();
+                        const nome = slugPagina(novaPagina.nome);
+                        if (!nome) return;
+                        setNovaPagina(null);
+                        setPaginaAtual(nome);   // o canvas recarrega com a página nova e abre nela
+                        pedir({ rota: "secao", secao: nome, pagina: nome,
+                                pedido: `Crie a página “${novaPagina.nome.trim()}” do site${novaPagina.desc.trim() ? `: ${novaPagina.desc.trim()}` : "."}` });
+                      }}
+                      className="absolute top-full left-0 z-30 mt-1 w-80 rounded-xl border border-line bg-surface p-2.5 shadow-xl">
+                  <input autoFocus value={novaPagina.nome} onChange={(e) => setNovaPagina({ ...novaPagina, nome: e.target.value })}
+                         placeholder="Nome da página (ex.: Sobre, Contato)" aria-label="Nome da página" maxLength={40}
+                         className="w-full rounded-lg border border-line bg-raised px-2 py-1 text-[13px] text-fg focus:border-focus focus:outline-none" />
+                  <textarea value={novaPagina.desc} onChange={(e) => setNovaPagina({ ...novaPagina, desc: e.target.value })} rows={3}
+                            placeholder="O que tem nela (opcional)" aria-label="O que tem na página"
+                            className="mt-1.5 w-full resize-none rounded-lg border border-line bg-raised px-2 py-1 text-[13px] text-fg focus:border-focus focus:outline-none" />
+                  <p className="mt-1 text-[11px] leading-snug text-faint">
+                    {paginas.length ? "Cabeçalho e rodapé aparecem em todas." : "A página de agora vira /inicio; cabeçalho e rodapé passam a valer para todas."}
+                    {" "}O link “#/{slugPagina(novaPagina.nome) || "nome"}” entra no menu.
+                  </p>
+                  <div className="mt-1.5 flex justify-end gap-1.5">
+                    <button type="button" onClick={() => setNovaPagina(null)} className="rounded-lg px-2 py-0.5 text-muted hover:text-fg">Cancelar</button>
+                    <button type="submit" disabled={!slugPagina(novaPagina.nome)} className="rounded-lg bg-accent px-2.5 py-0.5 font-medium text-accent-fg hover:brightness-110 disabled:opacity-40">Criar página</button>
+                  </div>
+                </form>
+              )}
+            </div>
+          )}
           {!!telas.length && (
             <button onClick={() => setFluxo((v) => !v)} aria-pressed={fluxo} title="Mapa das telas e de quem leva a quem"
                     className={`rounded-lg border px-2 py-1 ${fluxo ? "border-accent-line bg-accent-soft text-accent-text" : "border-line text-fg hover:bg-raised"}`}>
@@ -1139,7 +1445,7 @@ export default function DesignView(props: {
           ) : (
             <div className="flex rounded-lg border border-line p-0.5" role="radiogroup" aria-label="Viewport">
               {VIEWPORTS.map((v) => (
-                <button key={v.id} role="radio" aria-checked={viewport === v.id} onClick={() => setViewport(v.id)}
+                <button key={v.id} role="radio" aria-checked={viewport === v.id} onClick={() => escolherViewport(v.id)}
                         title={v.largura ? `${v.largura} px de largura` : "Largura do canvas"}
                         className={`rounded-md px-2 py-0.5 ${viewport === v.id ? "bg-raised text-fg" : "text-faint hover:text-fg"}`}>
                   {v.label}
@@ -1194,6 +1500,19 @@ export default function DesignView(props: {
                     <span className="block text-[11.5px] text-faint">{x.hint}</span>
                   </button>
                 ))}
+                {nomeModelo === null ? (
+                  <button onClick={() => setNomeModelo(projeto?.titulo ?? "")} className="mt-1 block w-full rounded-lg border-t border-line px-2.5 pt-2 pb-1.5 text-left hover:bg-raised">
+                    <span className="block text-[13px] text-fg">Salvar como modelo…</span>
+                    <span className="block text-[11.5px] text-faint">Guarda o que está no canvas para começar outros projetos dele, sem IA</span>
+                  </button>
+                ) : (
+                  <form onSubmit={(e) => { e.preventDefault(); salvarModelo(); }} className="mt-1 flex items-center gap-1.5 border-t border-line px-2 pt-2 pb-1">
+                    <input autoFocus value={nomeModelo} onChange={(e) => setNomeModelo(e.target.value)} placeholder="Nome do modelo" aria-label="Nome do modelo" maxLength={80}
+                           onKeyDown={(e) => { if (e.key === "Escape") setNomeModelo(null); }}
+                           className="min-w-0 flex-1 rounded-lg border border-line bg-raised px-2 py-1 text-[13px] text-fg focus:border-focus focus:outline-none" />
+                    <button type="submit" disabled={!nomeModelo.trim()} className="rounded-lg bg-accent px-2 py-1 text-xs font-medium text-accent-fg disabled:opacity-40">Salvar</button>
+                  </form>
+                )}
                 <button onClick={mandarParaAgente} className="mt-1 block w-full rounded-lg border-t border-line px-2.5 pt-2 pb-1.5 text-left hover:bg-raised">
                   <span className="flex items-center gap-1.5 text-[13px] text-fg"><Code className="size-3.5" /> Mandar para o Agente…</span>
                   <span className="block text-[11.5px] text-faint">Grava o pacote (HTML, tokens, imagens, README) na pasta do projeto e abre o Agente com o pedido pronto</span>
@@ -1234,7 +1553,14 @@ export default function DesignView(props: {
           )}
         </nav>
         <div className="flex min-h-0 flex-1">
-        <div ref={areaCanvas} className={`relative flex min-w-0 flex-1 p-3 ${zoom > 1 ? "overflow-auto" : "overflow-hidden"}`} style={{ justifyContent: "safe center" }}>
+        {camadas && (
+          <DesignCamadas nos={nosCamadas} selecionados={selecao?.itens.map((i) => i.fid) ?? []}
+                         onSelecionar={(fids) => { selecionar(fids); if (fids.length) paraIframe(janela(), { type: "scrollTo", fid: fids[fids.length - 1] }); }}
+                         onRealce={(fid) => paraIframe(janela(), { type: "realce", fid })}
+                         onMover={(fids, alvo, onde) => operar("mover", fids, { alvo, onde })}
+                         onFechar={() => setCamadas(false)} />
+        )}
+        <div ref={areaCanvas} className={`relative flex min-w-0 flex-1 p-3 ${zoom > 1 || ladoALado ? "overflow-auto" : "overflow-hidden"}`} style={{ justifyContent: "safe center" }}>
           {modo === "comment" && selecao?.rect && iframe.current && areaCanvas.current && (() => {
             // a caixa fica logo abaixo do elemento (ou acima, se não couber), dentro da área do canvas
             const f = iframe.current.getBoundingClientRect(), a = areaCanvas.current.getBoundingClientRect();
@@ -1288,6 +1614,26 @@ export default function DesignView(props: {
           ) : fluxo && telas.length && srcBase ? (
             <DesignFluxo html={projeto?.html ?? srcBase} atual={tela || telas[0]} onFechar={() => setFluxo(false)}
                          onIr={(t) => { setFluxo(false); setTimeout(() => paraIframe(janela(), { type: "setTela", nome: t }), 150); }} />
+          ) : ladoALado && html ? (
+            <div aria-label="Três larguras lado a lado" className="flex items-start" style={{ gap: VAO * zoom }}
+                 onWheel={(e) => {   // Ctrl+roda no quadro: zoom (sobre um quadro, a roda rola a página dele)
+                   if (!e.ctrlKey) return;
+                   setZoom((z) => (e.deltaY < 0 ? ZOOMS.find((x) => x > z) ?? z : ZOOMS.filter((x) => x < z).pop() ?? z));
+                 }}>
+              {QUADROS.map((q) => (
+                <figure key={q.id} className="m-0 shrink-0">
+                  <figcaption className="mb-1.5 flex items-center gap-2 text-xs text-muted">
+                    <button onClick={() => escolherViewport(q.id)} title={`Abrir a ${q.label.toLowerCase()} sozinha, para editar`}
+                            className="rounded px-1 font-medium text-fg hover:bg-raised">{q.label}</button>
+                    <span className="font-mono text-faint">{q.w}px</span>
+                  </figcaption>
+                  <div className="relative overflow-hidden rounded-lg border border-line bg-white" style={{ width: q.w * zoom, height: q.h * zoom }}>
+                    <iframe title={`Quadro ${q.label}`} sandbox="allow-scripts" srcDoc={paraCanvas(html, false)}
+                            style={{ width: q.w, height: q.h, transform: `scale(${zoom})`, transformOrigin: "0 0" }} className="absolute top-0 left-0 border-0" />
+                  </div>
+                </figure>
+              ))}
+            </div>
           ) : html ? (
             // zoom: a caixa ocupa largura×z na tela e o iframe dentro tem largura/z, escalado de volta. Na
             // largura do canvas isso é o zoom do navegador (a página refaz o layout); em Tablet/Celular, lupa.
@@ -1306,7 +1652,10 @@ export default function DesignView(props: {
           <DesignEditar key={selecao.itens.map((i) => i.fid).join()} n={selecao.itens.length} estilo={selecao.estilo}
                         rotulo={rotulo(selecao.itens[selecao.itens.length - 1] ?? { tag: selecao.tag, cls: "" })}
                         onPrevia={(estilos) => paraIframe(janela(), { type: "setEstilo", fids: selecao.itens.map((i) => i.fid), estilos })}
-                        onSalvar={(estilos) => semIA("estilo", { fids: selecao.itens.map((i) => i.fid), estilos })}
+                        onSalvar={(estilos) => semIA("estilo", { fids: selecao.itens.map((i) => i.fid), estilos, largura: escopoRef.current })}
+                        escopo={escopo} larguraVista={vwCanvas}
+                        tag={selecao.tag} href={selecao.href}
+                        onOperar={(op, valor) => operar(op, selecao.itens.map((i) => i.fid), { valor })}
                         onFechar={() => setModo("view")} />
         ) : (
           <aside aria-label="Editar elemento" className="grid w-72 shrink-0 place-items-center border-l border-line bg-surface px-6 text-center text-[12.5px] text-faint">
@@ -1314,6 +1663,14 @@ export default function DesignView(props: {
           </aside>
         ))}
         </div>
+        {captura && (
+          <DesignCaptura nome={captura.nome} largura={captura.largura ?? 1440} blocos={captura.blocos ?? []}
+                         paleta={captura.paleta ?? { fundo: "", texto: "", destaque: "", fonte_texto: "", fonte_titulo: "" }}
+                         foto={refs.find((x) => x.tipo === "imagem" && x.captura_id === captura.captura_id)?.data ?? ""}
+                         onTrazer={async (indices) => { await semIA("captura", { captura_id: captura.captura_id, blocos: indices }); setCaptura(null); }}
+                         onPaleta={async () => { await semIA("paleta", { paleta: captura.paleta }); setCaptura(null); }}
+                         onFechar={() => setCaptura(null)} />
+        )}
         {apresentando && srcBase && (
           <Apresentacao html={projeto?.html ?? srcBase} slide={slides.atual} total={nSlides ? slides.total || nSlides : 0} palco={palco} iframe={telaCheia}
                         telaCheia={apresentando === "tela"} tela={tela}

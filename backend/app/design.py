@@ -7,6 +7,11 @@ são duas mensagens — a do usuário e a do assistente, cujo meta["design"] gua
 (desfazer/refazer só mudam essa marca; restaurar cria uma nova, o histórico nunca é apagado).
 Comentários são mensagens role="event" com meta["design_comentario"].
 
+Mudança feita à mão (Editar, texto, ajustes, variação, design system, arrastar...) não vira versão:
+entra no rascunho — uma mensagem role="event" com meta["design_rascunho"] = {base, html, passos, rev},
+em cima da versão atual — até o usuário salvar. O pedido à IA parte do rascunho e a versão que ela
+cria o absorve; com rascunho aberto, trocar de versão é recusado (salve ou descarte antes).
+
 Falha nunca altera o documento: resposta inválida, erro do modelo ou cancelamento fecham a
 mensagem sem versão, e a marca `atual` fica onde estava.
 
@@ -166,8 +171,8 @@ def projeto(conv_id: int) -> dict:
     """Tudo que a tela precisa: chat (sem o HTML de cada versão), comentários, versão atual e o HTML."""
     with db.session() as s:
         c = _conv(s, conv_id)
+        html, _, r = _base(s, conv_id)
         atual = _atual(s, conv_id)
-        html = _carimbada(s, atual) if atual else ""
         mensagens = []
         for m in c.messages:
             if m.role not in ("user", "assistant"):
@@ -177,6 +182,7 @@ def projeto(conv_id: int) -> dict:
                               "thinking": m.thinking or "", "versao": d.get("versao"), "fids": d.get("fids") or [],
                               "entrada": d.get("entrada"), "rota": d.get("rota"), "secao": d.get("secao"),
                               "stats": d.get("stats") or [], "comentarios": d.get("comentarios") or [],
+                              "base": d.get("base") if d.get("versao") else None,
                               "plano": d.get("plano") if m.status == "plano" else None,
                               "perguntas": d.get("perguntas") if m.status == "perguntas" else None,
                               "variacoes": d.get("variacoes") if m.status in ("variacoes", "ok") and d.get("variacoes") else None,
@@ -189,6 +195,11 @@ def projeto(conv_id: int) -> dict:
         return {"conv_id": conv_id, "titulo": c.title, "mensagens": mensagens,
                 "total": len(_versoes(s, conv_id)),
                 "atual": atual.meta["design"]["versao"] if atual else 0, "html": html,
+                "rascunho": {"base": r.meta["design_rascunho"]["base"], "rev": r.meta["design_rascunho"]["rev"],
+                             "passos": r.meta["design_rascunho"]["passos"][-30:],
+                             "mudancas": len(r.meta["design_rascunho"]["passos"])} if r else None,
+                "edicao": {"desfazer": bool(_PILHAS.get(conv_id, {}).get("desfazer")),
+                           "refazer": bool(_PILHAS.get(conv_id, {}).get("refazer"))},
                 "secoes": [e["attrs"]["data-section"] for e in design_html.secoes(html)] if html else [],
                 "comentarios": _comentarios(s, conv_id, html),
                 "imagens": _imagens(conv_id, html),
@@ -207,6 +218,7 @@ def ir_para(conv_id: int, versao: int) -> dict:
     """Desfazer/refazer/abrir do histórico: só move a marca."""
     with db.session() as s:
         _conv(s, conv_id)
+        _sem_rascunho(s, conv_id)
         if not any(m.meta["design"]["versao"] == versao for m in _versoes(s, conv_id)):
             raise ToolError(f"Versão {versao} não existe.")
         _marca_atual(s, conv_id, versao)
@@ -218,11 +230,12 @@ def restaurar(conv_id: int, versao: int) -> dict:
     """Versão antiga volta como uma versão nova, no topo do histórico."""
     with db.session() as s:
         _conv(s, conv_id)
+        _sem_rascunho(s, conv_id)
         velha = next((m for m in _versoes(s, conv_id) if m.meta["design"]["versao"] == versao), None)
         if not velha:
             raise ToolError(f"Versão {versao} não existe.")
         html = velha.meta["design"]["html"]
-    _nova_versao(conv_id, None, html, f"restaurada da v{versao}", rota="restaurar",
+    _nova_versao(conv_id, None, html, f"restaurada da v{versao}", rota="restaurar", base=versao,
                  passos=[f"Copiou a v{versao} para o topo do histórico"])
     return projeto(conv_id)
 
@@ -233,6 +246,10 @@ def _nova_versao(conv_id: int, message_id: int | None, html: str, descricao: str
     with db.session() as s:
         anterior = _atual(s, conv_id)
         anterior = anterior.meta["design"]["html"] if anterior else ""
+        r = _rascunho(s, conv_id)
+        if r and extra.get("rota") != "manual":   # a IA (ou as imagens) partiu do rascunho: ele vai junto
+            n_r = len(r.meta["design_rascunho"]["passos"])
+            extra["passos"] = [f"Incluiu {n_r} ajuste(s) manual(is) do rascunho", *(extra.get("passos") or [])]
     html = design_html.carimbar(design_imagens.preencher(html, anterior))
     extra["diff"] = design_html.diff(anterior, html)   # "código alterado" da atividade no chat
     with db.session() as s:
@@ -249,7 +266,11 @@ def _nova_versao(conv_id: int, message_id: int | None, html: str, descricao: str
         s.get(db.Conversation, conv_id).updated_at = db._now()
         s.flush()
         _marca_atual(s, conv_id, n)
+        r = _rascunho(s, conv_id)
+        if r:
+            s.delete(r)
         s.commit()
+    _PILHAS.pop(conv_id, None)
     return n
 
 
@@ -293,7 +314,7 @@ def comentar(conv_id: int, fids: list[str], texto: str) -> dict:
         atual = _atual(s, conv_id)
         if not atual:
             raise ToolError("Não há documento para comentar.")
-        html = _carimbada(s, atual)
+        html = _base(s, conv_id)[0]
         snap = [design_html.outer(html, f) for f in fids]
         if None in snap:
             raise ToolError("Um dos elementos não existe mais no documento.")
@@ -303,6 +324,28 @@ def comentar(conv_id: int, fids: list[str], texto: str) -> dict:
         s.get(db.Conversation, conv_id).updated_at = db._now()
         s.commit()
     return projeto(conv_id)
+
+
+NOME_LARGURA = {"desktop": "Desktop", "tablet": "Tablet", "mobile": "Celular"}
+
+
+def comentarios_da_revisao(conv_id: int, problemas: list[dict], maximo: int = 8) -> int:
+    """Revisão visual → fila de comentários (o que o modelo viu primeiro, depois o medido; sem repetir
+    comentário pendente igual). Devolve quantos entraram."""
+    with db.session() as s:
+        pendentes = {(tuple(x["fids"]), x["texto"]) for x in _comentarios(s, conv_id, _base(s, conv_id)[0]) if x["status"] == "pendente"}
+    n = 0
+    for p in sorted(problemas, key=lambda x: x.get("fonte") != "modelo"):
+        texto = f"Revisão visual ({NOME_LARGURA.get(p.get('largura'), 'Desktop')}): {p.get('detalhe', '')}".strip()[:MAX_COMENTARIO]
+        if n >= maximo or ((p.get("fid"),), texto) in pendentes or not p.get("fid"):
+            continue
+        try:
+            comentar(conv_id, [p["fid"]], texto)
+        except ToolError:
+            continue   # o elemento sumiu entre a revisão e agora
+        pendentes.add(((p["fid"],), texto))
+        n += 1
+    return n
 
 
 def descartar(conv_id: int, comentario_id: int) -> dict:
@@ -328,60 +371,151 @@ def _marca_comentarios(conv_id: int, ids: list[int], versao: int) -> None:
 
 
 def editar_texto(conv_id: int, fid: str, interno: str) -> dict:
-    """Duplo clique no canvas: o texto novo entra direto na fonte, sem chamar o modelo."""
-    with db.session() as s:
-        _conv(s, conv_id)
-        if any(r["conv_id"] == conv_id for r in _RUNS.values()):
-            raise ToolError("Espere a geração em andamento terminar.")
-        atual = _atual(s, conv_id)
-        if not atual:
-            raise ToolError("Não há documento.")
-        html = _carimbada(s, atual)
-        base = atual.meta["design"]["versao"]
-    e = design_html.por_fid(design_html.indexar(html), fid)
-    if not e or e["fim"] == e["fim_tag"] or e["tag"] in design_html.SEM_FID | {"style"}:
-        raise ToolError("Esse elemento não tem texto editável.")
+    """Duplo clique no canvas: o texto novo entra direto na fonte (no rascunho), sem chamar o modelo."""
     interno = re.sub(r"""\s(contenteditable|spellcheck)(\s*=\s*("[^"]*"|'[^']*'|[^\s>]+))?""", "", interno or "")
-    if re.search(r"<\s*/?\s*(script|style|html|head|body|iframe)\b", interno, re.I):
-        raise ToolError("O texto editado tem tag que não pode entrar ali.")
-    abre = re.findall(r"<([a-zA-Z][\w-]*)[^>]*?(?<!/)>", interno)
-    fechadas = re.findall(r"</([a-zA-Z][\w-]*)\s*>", interno)
-    for tag in {t.lower() for t in abre + fechadas} - design_html.VOID:   # o índice fecharia sozinho
-        if sum(t.lower() == tag for t in abre) != sum(t.lower() == tag for t in fechadas):
-            raise ToolError("O texto editado tem tag aberta sem fechar — nada mudou.")
-    fecha = html.rfind("<", e["fim_tag"], e["fim"])
-    novo = html[:e["fim_tag"]] + interno + html[fecha:]
-    depois = design_html.por_fid(design_html.indexar(novo), fid)
-    if not extrair_html(novo) or not depois or depois["fim"] != e["fim"] + len(novo) - len(html):
-        raise ToolError("O texto editado deixaria o HTML quebrado — nada mudou.")
+    tag = ["?"]
+
+    def faz(html: str):
+        e = design_html.por_fid(design_html.indexar(html), fid)
+        if not e or e["fim"] == e["fim_tag"] or e["tag"] in design_html.SEM_FID | {"style"}:
+            raise ValueError("Esse elemento não tem texto editável.")
+        tag[0] = e["tag"]
+        if re.search(r"<\s*/?\s*(script|style|html|head|body|iframe)\b", interno, re.I):
+            raise ValueError("O texto editado tem tag que não pode entrar ali.")
+        abre = re.findall(r"<([a-zA-Z][\w-]*)[^>]*?(?<!/)>", interno)
+        fechadas = re.findall(r"</([a-zA-Z][\w-]*)\s*>", interno)
+        for t in {t.lower() for t in abre + fechadas} - design_html.VOID:   # o índice fecharia sozinho
+            if sum(x.lower() == t for x in abre) != sum(x.lower() == t for x in fechadas):
+                raise ValueError("O texto editado tem tag aberta sem fechar — nada mudou.")
+        fecha = html.rfind("<", e["fim_tag"], e["fim"])
+        novo = html[:e["fim_tag"]] + interno + html[fecha:]
+        depois = design_html.por_fid(design_html.indexar(novo), fid)
+        if not extrair_html(novo) or not depois or depois["fim"] != e["fim"] + len(novo) - len(html):
+            raise ValueError("O texto editado deixaria o HTML quebrado — nada mudou.")
+        return novo, [fid]
     trecho = " ".join(re.sub(r"<[^>]+>", " ", interno).split())
-    _nova_versao(conv_id, None, novo, f"texto editado: {_descricao(trecho, 40)}", base=base,
-                 patches=[fid], rota="texto", passos=[f"Editou o texto de <{e['tag']}> direto no canvas (sem IA)"])
-    p = projeto(conv_id)   # o HTML salvo: carimbar de novo aqui sortearia outros ids
-    return {"projeto": p, "fim": {"base": base, "patches": [{"fid": fid, "html": design_html.outer(p["html"], fid) or ""}]}}
+    return _sem_ia(conv_id, faz, f"texto: {_descricao(trecho, 40)}", "texto",
+                   lambda: [f"Editou o texto de <{tag[0]}>: {_descricao(trecho, 40)}"])
 
 
-def _sem_ia(conv_id: int, faz, descricao: str, rota: str, passos: list[str] | None = None) -> dict:
-    """Mudança direta no documento (sliders, design system): versão nova, sem modelo, com patch."""
+# ------------------------------------------------------------------ rascunho
+
+_PILHAS: dict[int, dict] = {}   # conv_id -> {"desfazer": [estado], "refazer": [estado]}; estado = {html, passos} | None
+MAX_PILHA = 50
+# ponytail: a pilha do desfazer vive só na memória (fotos inteiras do HTML); some se o backend reiniciar,
+# o rascunho não. Guardar em disco se isso passar a incomodar.
+
+
+def _rascunho(s, conv_id: int) -> db.Message | None:
+    return next((m for m in s.query(db.Message).filter(db.Message.conversation_id == conv_id, db.Message.role == "event")
+                 .order_by(db.Message.id.desc()) if "design_rascunho" in (m.meta or {})), None)
+
+
+def _base(s, conv_id: int) -> tuple[str, int, db.Message | None]:
+    """(html, versão de base, rascunho): onde a próxima mudança entra e o que o canvas mostra."""
+    r = _rascunho(s, conv_id)
+    if r:
+        return r.meta["design_rascunho"]["html"], r.meta["design_rascunho"]["base"], r
+    atual = _atual(s, conv_id)
+    return (_carimbada(s, atual), atual.meta["design"]["versao"], None) if atual else ("", 0, None)
+
+
+def _sem_rascunho(s, conv_id: int) -> None:
+    if _rascunho(s, conv_id):
+        raise ToolError("Há ajustes no rascunho: salve como versão ou descarte antes de trocar de versão.")
+
+
+def _estado(s, conv_id: int) -> dict | None:
+    r = _rascunho(s, conv_id)
+    return {"html": r.meta["design_rascunho"]["html"], "passos": r.meta["design_rascunho"]["passos"]} if r else None
+
+
+def _por_estado(s, conv_id: int, estado: dict | None) -> None:
+    """Deixa o rascunho igual a `estado` (None = sem rascunho: o canvas volta à versão atual)."""
+    r = _rascunho(s, conv_id)
+    if estado is None:
+        if r:
+            s.delete(r)
+    elif r:
+        d = r.meta["design_rascunho"]
+        r.meta = {**r.meta, "design_rascunho": {**d, **estado, "rev": d["rev"] + 1}}
+    else:
+        atual = _atual(s, conv_id)
+        s.add(db.Message(conversation_id=conv_id, role="event", content="rascunho",
+                         meta={"design_rascunho": {"base": atual.meta["design"]["versao"], "rev": 1, **estado}}))
+    s.get(db.Conversation, conv_id).updated_at = db._now()   # o celular recarrega pelo carimbo
+
+
+def _sem_ia(conv_id: int, faz, descricao: str, rota: str, passos=None) -> dict:
+    """Mudança direta, sem modelo: entra no rascunho (não cria versão) e volta com patch para o canvas.
+    `passos` pode ser uma função, para quando o texto só se sabe depois de `faz`."""
     with db.session() as s:
         _conv(s, conv_id)
         if any(r["conv_id"] == conv_id for r in _RUNS.values()):
             raise ToolError("Espere a geração em andamento terminar.")
-        atual = _atual(s, conv_id)
-        if not atual:
+        html, base, r = _base(s, conv_id)
+        if not html:
             raise ToolError("Não há documento.")
-        html = _carimbada(s, atual)
-        base = atual.meta["design"]["versao"]
-    try:
-        novo, mudou = faz(html)
-    except ValueError as e:
-        raise ToolError(str(e)) from e
-    if novo == html:
-        return {"projeto": projeto(conv_id), "fim": None}
-    _nova_versao(conv_id, None, novo, descricao, base=base, patches=mudou, rota=rota, passos=passos or [])
+        try:
+            novo, mudou = faz(html)
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        if novo == html:
+            return {"projeto": projeto(conv_id), "fim": None}
+        novo = design_html.carimbar(novo)   # elemento novo (duplicado, colado) ganha data-fid
+        antes = _estado(s, conv_id)
+        passos = (passos() if callable(passos) else passos) or [descricao]
+        _por_estado(s, conv_id, {"html": novo, "passos": ((antes or {}).get("passos") or []) + passos})
+        s.commit()
+    pilha = _PILHAS.setdefault(conv_id, {"desfazer": [], "refazer": []})
+    pilha["desfazer"] = (pilha["desfazer"] + [antes])[-MAX_PILHA:]
+    pilha["refazer"] = []
     p = projeto(conv_id)
     return {"projeto": p, "fim": {"base": base, "status": "ok",
                                   "patches": [{"fid": f, "html": design_html.outer(p["html"], f) or ""} for f in mudou]}}
+
+
+def rascunho_desfazer(conv_id: int, refazer: bool = False) -> dict:
+    """Ctrl+Z / Ctrl+Shift+Z dentro do rascunho (o canvas recarrega: pode ter mudado qualquer coisa)."""
+    pilha = _PILHAS.get(conv_id) or {"desfazer": [], "refazer": []}
+    de, para = ("refazer", "desfazer") if refazer else ("desfazer", "refazer")
+    if not pilha[de]:
+        raise ToolError("Nada para " + ("refazer" if refazer else "desfazer") + " no rascunho.")
+    with db.session() as s:
+        _conv(s, conv_id)
+        if any(r["conv_id"] == conv_id for r in _RUNS.values()):
+            raise ToolError("Espere a geração em andamento terminar.")
+        pilha[para].append(_estado(s, conv_id))
+        _por_estado(s, conv_id, pilha[de].pop())
+        s.commit()
+    return projeto(conv_id)
+
+
+def salvar_versao(conv_id: int, descricao: str = "") -> dict:
+    """O usuário decide: o rascunho vira a próxima versão (com os passos dele na atividade)."""
+    with db.session() as s:
+        _conv(s, conv_id)
+        r = _rascunho(s, conv_id)
+        if not r:
+            raise ToolError("Não há ajustes no rascunho para salvar.")
+        d = r.meta["design_rascunho"]
+    passos = d["passos"]
+    descricao = _descricao(descricao.strip(), 80) if descricao.strip() else (
+        _descricao(passos[0], 60) if len(passos) == 1 else f"{len(passos)} ajustes manuais")
+    _nova_versao(conv_id, None, d["html"], descricao, base=d["base"], rota="manual", passos=passos)
+    return projeto(conv_id)
+
+
+def descartar_rascunho(conv_id: int) -> dict:
+    with db.session() as s:
+        _conv(s, conv_id)
+        r = _rascunho(s, conv_id)
+        if r:
+            s.delete(r)
+            s.get(db.Conversation, conv_id).updated_at = db._now()
+            s.commit()
+    _PILHAS.pop(conv_id, None)
+    return projeto(conv_id)
 
 
 # Modo Editar do canvas: o painel mexe só nestas propriedades, no style="" do próprio elemento.
@@ -389,43 +523,252 @@ ESTILOS = ("color", "background-color", "font-size", "font-weight", "font-family
            "text-align", "padding", "margin", "border-radius", "border", "width", "height", "opacity", "gap")
 
 
-def editar_estilo(conv_id: int, fids: list[str], estilos: dict) -> dict:
-    """Painel do modo Editar: as propriedades entram no style="" de cada elemento (valor vazio tira)."""
+# Estilo por largura: Tablet e Celular não vão no style="" (valeria em todas as larguras), e sim num
+# bloco próprio com @media, por classe fx-<fid> (a classe sobrevive ao export; o data-fid não) e com
+# !important, para vencer o style="" do Desktop. A ordem do bloco (tablet antes) deixa o celular ganhar.
+LARGURAS = {"tablet": 820, "mobile": 480}
+_BLOCO_RESP = re.compile(r"<style data-forja-responsivo[^>]*>(.*?)</style>\s*", re.S)
+_MEDIA = re.compile(r"@media \(max-width: (\d+)px\) \{(.*?)\n\}", re.S)
+_REGRA = re.compile(r"\.fx-(\w+) \{([^}]*)\}")
+
+
+def _decl(texto: str) -> dict:
+    out = {}
+    for parte in html_lib.unescape(texto).replace('"', "'").split(";"):
+        if ":" in parte:
+            k, v = parte.split(":", 1)
+            out[k.strip().lower()] = v.replace("!important", "").strip()
+    return out
+
+
+def _responsivo(html: str) -> dict:
+    """{largura: {fid: {prop: valor}}} do bloco que o painel mantém."""
+    m = _BLOCO_RESP.search(html)
+    out: dict = {}
+    for media in _MEDIA.finditer(m.group(1) if m else ""):
+        out[int(media.group(1))] = {r.group(1): _decl(r.group(2)) for r in _REGRA.finditer(media.group(2))}
+    return out
+
+
+def _bloco(regras: dict, fid_bloco: str | None) -> str:
+    partes = []
+    for largura in sorted(regras, reverse=True):   # 820 antes de 480: o menor vem depois e ganha
+        linhas = [f"  .fx-{f} {{ " + " ".join(f"{k}: {v} !important;" for k, v in d.items()) + " }"
+                  for f, d in regras[largura].items() if d]
+        if linhas:
+            partes.append(f"@media (max-width: {largura}px) {{\n" + "\n".join(linhas) + "\n}")
+    if not partes:
+        return ""
+    fid = f' data-fid="{fid_bloco}"' if fid_bloco else ""
+    return f"<style data-forja-responsivo{fid}>\n/* estilos por largura (modo Editar do Forja) */\n" + "\n".join(partes) + "\n</style>\n"
+
+
+def editar_estilo(conv_id: int, fids: list[str], estilos: dict, largura: str = "desktop") -> dict:
+    """Painel do modo Editar: no Desktop as propriedades entram no style="" de cada elemento; em Tablet
+    e Celular, numa regra @media só daquela largura para baixo (valor vazio tira)."""
     if not fids or not isinstance(estilos, dict) or not estilos:
         raise ToolError("Nada para mudar.")
+    if largura not in ("desktop", *LARGURAS):
+        raise ToolError("largura deve ser desktop, tablet ou mobile.")
     for k, v in estilos.items():
         if k not in ESTILOS:
             raise ToolError(f"Propriedade que o painel não edita: {k}")
         # nada que feche a declaração, saia do atributo ou busque rede
-        if not isinstance(v, str) or len(v) > 200 or re.search(r"""[;{}<>"\\]|url\s*\(|expression|@import""", v, re.I):
+        if not isinstance(v, str) or len(v) > 200 or re.search(r"""[;{}<>"\\]|url\s*\(|expression|@import|!""", v, re.I):
             raise ToolError(f"Valor inválido para {k}.")
 
     def faz(html: str):
         mudou = []
+        if largura != "desktop":
+            regras = _responsivo(html)
+            por_fid = regras.setdefault(LARGURAS[largura], {})
         for fid in dict.fromkeys(fids):
             e = design_html.por_fid(design_html.indexar(html), fid)
             if not e or e["tag"] in design_html.SEM_FID | {"style"}:
                 raise ValueError("Elemento não encontrado na versão atual.")
             abre = html[e["ini"]:e["fim_tag"]]
-            m = re.search(r"""\sstyle\s*=\s*("([^"]*)"|'([^']*)')""", abre, re.I)
-            decl = {}
-            atual = html_lib.unescape((m.group(2) or m.group(3) or "") if m else "").replace('"', "'")
-            for parte in atual.split(";"):
-                if ":" in parte:
-                    k, v = parte.split(":", 1)
-                    decl[k.strip().lower()] = v.strip()
+            if largura == "desktop":
+                m = re.search(r"""\sstyle\s*=\s*("([^"]*)"|'([^']*)')""", abre, re.I)
+                decl = _decl((m.group(2) or m.group(3) or "") if m else "")
+                novo = abre
+            else:
+                decl = por_fid.setdefault(fid, {})
+                classes = (e["attrs"].get("class") or "").split()
+                novo = abre if f"fx-{fid}" in classes else design_html._attr(abre, "class", " ".join([*classes, f"fx-{fid}"]))
             for k, v in estilos.items():
                 if v.strip():
                     decl[k] = v.strip()
                 else:
                     decl.pop(k, None)
-            estilo = "; ".join(f"{k}: {v}" for k, v in decl.items()) or None
-            html = html[:e["ini"]] + design_html._attr(abre, "style", estilo) + html[e["fim_tag"]:]
+            if largura == "desktop":
+                novo = design_html._attr(abre, "style", "; ".join(f"{k}: {v}" for k, v in decl.items()) or None)
+            html = html[:e["ini"]] + novo + html[e["fim_tag"]:]
             mudou.append(fid)
+        if largura != "desktop":
+            m = _BLOCO_RESP.search(html)
+            fid_bloco = re.search(r'data-fid="(\w+)"', m.group(0)[:200]).group(1) if m and 'data-fid="' in m.group(0)[:200] else None
+            bloco = _bloco(regras, fid_bloco)
+            if m:
+                html = html[:m.start()] + bloco + html[m.end():]
+            else:
+                corte = html.lower().rfind("</head>")
+                html = html[:corte] + bloco + html[corte:] if corte >= 0 else bloco + html
+            # o <style> já existia (tem fid): troca por patch; o primeiro bloco obriga o canvas a recarregar
+            mudou = mudou + [fid_bloco] if fid_bloco and bloco else []
         return html, mudou
     props = ", ".join(estilos)
+    onde = {"desktop": "", "tablet": " só no Tablet e menores", "mobile": " só no Celular"}[largura]
     return _sem_ia(conv_id, faz, f"edição: {_descricao(props, 48)}", "edicao",
-                   [f"{k}: {v or '(removido)'} em {len(fids)} elemento(s) (modo Editar, sem IA)" for k, v in estilos.items()])
+                   [f"{k}: {v or '(removido)'} em {len(fids)} elemento(s){onde} (modo Editar, sem IA)" for k, v in estilos.items()])
+
+
+# Edição direta de estrutura no canvas (modo Editar): nada disso chama modelo.
+OPERACOES = ("apagar", "duplicar", "mover", "imagem", "link")
+_IMAGEM_OK = re.compile(r"^data:image/(png|jpeg|webp|gif|svg\+xml);base64,[A-Za-z0-9+/=]+$")
+_LINK_OK = re.compile(r"^(https?://|mailto:|tel:|#|/|\./|\.\./|[\w-]+\.html?\b)", re.I)
+INTOCAVEIS = design_html.SEM_FID | {"style", "body"}
+
+
+def _patch_de(html: str, fids: list[str]) -> list[str]:
+    """O menor ancestral comum que dá para trocar por patch; [] = o canvas recarrega (era o body)."""
+    els = design_html.indexar(html)
+    cadeias = []
+    for f in fids:
+        e = design_html.por_fid(els, f)
+        cadeia = []
+        while e is not None:
+            cadeia.append(e)
+            e = els[e["pai"]] if e["pai"] is not None else None
+        cadeias.append(cadeia)
+    comum = next((e for e in cadeias[0] if all(e in c for c in cadeias[1:])), None) if cadeias else None
+    f = design_html._fid(comum) if comum else None
+    return [f] if f and comum["tag"] not in ("body", "html") else []
+
+
+def operar(conv_id: int, op: str, fids: list[str], alvo: str = "", onde: str = "depois", valor: str = "") -> dict:
+    """Apagar, duplicar, mover (antes/depois/dentro de `alvo`), trocar imagem (<img>) e link (<a>)."""
+    if op not in OPERACOES:
+        raise ToolError(f"Operação desconhecida: {op}")
+    fids = [f for f in dict.fromkeys(fids or []) if f]
+    if not fids or len(fids) > 60:
+        raise ToolError("Selecione de 1 a 60 elementos.")
+    if op == "imagem" and (len(valor) > 12_000_000 or not _IMAGEM_OK.match(valor)):
+        raise ToolError("A imagem tem de vir como data URL (PNG, JPEG, WebP, GIF ou SVG) de até ~9 MB.")
+    if op == "link" and valor and (len(valor) > 2000 or not _LINK_OK.match(valor) or re.search(r'[\s"<>]', valor)):
+        raise ToolError("Link inválido: use http(s)://, mailto:, tel:, #âncora ou um caminho.")
+    if op == "mover" and onde not in ("antes", "depois", "dentro"):
+        raise ToolError("onde deve ser antes, depois ou dentro.")
+    info: dict = {}
+
+    def faz(html: str):
+        els = design_html.indexar(html)
+        alvos = [design_html.por_fid(els, f) for f in fids]
+        if None in alvos:
+            raise ValueError("Um dos elementos não existe mais no documento.")
+        if any(e["tag"] in INTOCAVEIS for e in alvos):
+            raise ValueError("Esse elemento não pode ser mexido assim.")
+        # de trás para frente: cortar um trecho não desloca os que vêm antes
+        ordem = sorted(alvos, key=lambda e: e["ini"], reverse=True)
+        if op == "apagar":
+            pais = _patch_de(html, fids)
+            pai_fids = [design_html._fid(els[e["pai"]]) for e in alvos if e["pai"] is not None]
+            for e in ordem:
+                html = design_html.remover(html, design_html._fid(e))
+            vivos = [f for f in pai_fids if f and design_html.outer(html, f)]
+            return html, _patch_de(html, vivos) if vivos else pais
+        if op == "duplicar":
+            for e in ordem:   # a cópia logo depois do original; o carimbo dá ids novos à cópia
+                html = html[:e["fim"]] + "\n" + html[e["ini"]:e["fim"]] + html[e["fim"]:]
+            return html, _patch_de(design_html.carimbar(html), fids)
+        if op == "mover":
+            a = design_html.por_fid(els, alvo)
+            if not a or a["tag"] in {"html", "head"} | design_html.SEM_FID:
+                raise ValueError("Destino inválido.")
+            if onde == "dentro" and (a["tag"] in design_html.VOID or a["fim"] == a["fim_tag"]):
+                raise ValueError("Esse destino não aceita filhos.")
+            if any(e["ini"] <= a["ini"] < e["fim"] for e in alvos):
+                raise ValueError("Não dá para mover um elemento para dentro dele mesmo.")
+            trechos = [html[e["ini"]:e["fim"]] for e in sorted(alvos, key=lambda e: e["ini"])]
+            de_onde = [f for e in alvos if e["pai"] is not None and (f := design_html._fid(els[e["pai"]]))]
+            for e in ordem:
+                html = design_html.remover(html, design_html._fid(e))
+            a = design_html.por_fid(design_html.indexar(html), alvo)
+            pos = a["ini"] if onde == "antes" else a["fim"] if onde == "depois" else html.rfind("<", a["fim_tag"], a["fim"])
+            html = html[:pos] + "\n".join(trechos) + ("\n" if onde == "antes" else "") + html[pos:]
+            return html, _patch_de(html, [*fids, alvo, *de_onde])   # o pai antigo também mudou
+        if op == "imagem":
+            e = alvos[0]
+            if e["tag"] != "img":
+                raise ValueError("Troca de imagem só em <img>.")
+            tag = design_html._attr(design_html._attr(e["txt"], "srcset", None), "src", valor)
+            if "data-slot" in e["attrs"]:
+                tag = design_html._attr(tag, "data-slot-status", "pronta")   # "Gerar imagens" não passa por cima
+            return html[:e["ini"]] + tag + html[e["fim_tag"]:], fids[:1]
+        # link
+        e = alvos[0]
+        if e["tag"] != "a":
+            raise ValueError("Link só em <a>.")
+        info["antes"] = e["attrs"].get("href") or ""
+        return html[:e["ini"]] + design_html._attr(e["txt"], "href", valor or None) + html[e["fim_tag"]:], fids[:1]
+
+    n = len(fids)
+    texto = {"apagar": f"Apagou {n} elemento(s)", "duplicar": f"Duplicou {n} elemento(s)",
+             "mover": f"Moveu {n} elemento(s) para {onde} de {alvo}", "imagem": "Trocou a imagem",
+             "link": f"Link: {valor or '(removido)'}"}[op]
+    return _sem_ia(conv_id, faz, texto, op, [f"{texto} (modo Editar, sem IA)"])
+
+
+def usar_modelo(conv_id: int, modelo_id: str) -> dict:
+    """Projeto vazio começa de um modelo guardado: o HTML dele vira a v1, sem IA."""
+    from . import design_modelos
+    m = design_modelos.pegar(modelo_id)
+    with db.session() as s:
+        c = _conv(s, conv_id)
+        if _versoes(s, conv_id) or any(r["conv_id"] == conv_id for r in _RUNS.values()):
+            raise ToolError("O projeto já tem design: comece um projeto novo para usar o modelo.")
+        if c.title == "Nova conversa":
+            c.title = m["nome"]
+            s.commit()
+    _nova_versao(conv_id, None, m["html"], f"modelo: {m['nome']}", rota="modelo",
+                 passos=[f"Começou do modelo “{m['nome']}” (sem IA)"])
+    return projeto(conv_id)
+
+
+def inserir_captura(conv_id: int, captura_id: str, indices: list[int]) -> dict:
+    """Blocos escolhidos da página capturada viram seções no fim da página (no rascunho, sem IA)."""
+    from . import design_referencias
+    html_blocos, nomes = design_referencias.blocos(captura_id, indices)
+
+    def faz(html: str):
+        corte = html.lower().rfind("</body>")
+        if corte < 0:
+            raise ValueError("O documento não tem </body>.")
+        return design_imagens.preencher(html[:corte] + html_blocos + "\n" + html[corte:]), []   # seção nova: recarrega
+    return _sem_ia(conv_id, faz, f"{len(nomes)} bloco(s) da captura", "captura",
+                   [f"Trouxe o bloco {n} da página capturada (sem IA)" for n in nomes])
+
+
+# token do :root → qual cor/fonte da paleta capturada ele recebe (pelo nome, em português ou inglês)
+_PAPEL = [("fundo", r"--(cor-)?(fundo|bg|background|superficie-base)$"), ("texto", r"--(cor-)?(texto|text|fg|foreground)$"),
+          ("destaque", r"--(cor-)?(primaria|primary|destaque|accent|marca|brand)$"),
+          ("fonte_titulo", r"--(fonte|font)-(titulo|heading|display|titulos)$"), ("fonte_texto", r"--(fonte|font)-(texto|body|corpo|base)$")]
+
+
+def aplicar_paleta(conv_id: int, paleta: dict) -> dict:
+    """Cores e fontes da página capturada nos tokens que o design já tem (sem IA, no rascunho)."""
+    with db.session() as s:
+        html = _base(s, conv_id)[0]
+    raiz = design_html.root_css(html)
+    nomes = re.findall(r"(--[\w-]+)\s*:", raiz)
+    tokens = {}
+    for papel, padrao in _PAPEL:
+        v = str((paleta or {}).get(papel) or "").strip().replace('"', "'")
+        alvo = next((n for n in nomes if re.search(padrao, n)), None)
+        if v and alvo and design_html.token_valido(alvo, v) and not re.search(r"[;{}<>]", v):
+            tokens[alvo] = v
+    if not tokens:
+        raise ToolError("O design não tem tokens de fundo, texto, destaque ou fonte com nome reconhecível para receber a paleta.")
+    return ajustar_tokens(conv_id, tokens)
 
 
 def ajustar_tokens(conv_id: int, tokens: dict) -> dict:
@@ -445,7 +788,7 @@ def ajustar_tokens(conv_id: int, tokens: dict) -> dict:
 
 
 def escolher_variacao(conv_id: int, message_id: int, indice: int) -> dict:
-    """Variação escolhida no card: vira versão (só tokens, sem IA) e o card lembra qual foi."""
+    """Variação escolhida no card: entra no rascunho (só tokens, sem IA) e o card lembra qual foi."""
     with db.session() as s:
         m = s.get(db.Message, message_id)
         vs = ((m.meta or {}).get("design") or {}).get("variacoes") if m and m.conversation_id == conv_id else None
@@ -577,7 +920,8 @@ def _referencias(refs: list[dict] | None) -> tuple[str, list[str], list[dict]]:
 
 def start(conv_id: int, pedido: str, modelos: dict, fids: list[str] | None = None, rota: str = "auto",
           secao: str = "", comentarios: list[int] | None = None, esforco: str = "baixo", ds_id: str = "",
-          perguntar: bool = False, respostas: list[dict] | None = None, referencias: list[dict] | None = None) -> dict:
+          perguntar: bool = False, respostas: list[dict] | None = None, referencias: list[dict] | None = None,
+          pagina: str = "") -> dict:
     pedido = (pedido or "").strip()
     if rota not in ROTAS:
         raise ToolError(f"rota deve ser {', '.join(ROTAS)}.")
@@ -586,9 +930,7 @@ def start(conv_id: int, pedido: str, modelos: dict, fids: list[str] | None = Non
         c = _conv(s, conv_id)
         if any(r["conv_id"] == conv_id for r in _RUNS.values()):
             raise ToolError("Já tem uma geração rodando neste projeto.")
-        atual = _atual(s, conv_id)
-        html_base = _carimbada(s, atual) if atual else ""
-        base = atual.meta["design"]["versao"] if atual else 0
+        html_base, base, _ = _base(s, conv_id)
         pend = []
         if comentarios:   # "aplicar agora" / "aplicar pendentes": vira edição de fragmento
             pend = [x for x in _comentarios(s, conv_id, html_base)
@@ -645,8 +987,14 @@ def start(conv_id: int, pedido: str, modelos: dict, fids: list[str] | None = Non
         nome = design_html.slug(secao or alvo or "") or "nova"
         existente = next((e for e in design_html.secoes(html_base) if e["attrs"]["data-section"] == nome), None)
         nova = existente is None
+        pagina = design_html.slug(pagina) if nova else ""
+        pagina_nova = bool(pagina) and pagina not in design_html.paginas(html_base)
+        if pagina and not (design_html.e_slides(html_base) or design_html.e_prototipo(html_base)):
+            html_base = design_html.paginar(html_base)   # primeira página nova: o site passa a ter páginas
+        else:
+            pagina = ""
         if nova:
-            html_base = design_html.inserir_secao(html_base, nome)
+            html_base = design_html.inserir_secao(html_base, nome, pagina)
             nomes = [e["attrs"]["data-section"] for e in design_html.secoes(html_base)]
         alvo_fid = design_html.placeholder(html_base, nome) if nova else existente["attrs"]["data-fid"]
         atual_sec = None if nova else design_html.outer(html_base, alvo_fid)
@@ -656,7 +1004,11 @@ def start(conv_id: int, pedido: str, modelos: dict, fids: list[str] | None = Non
                           pedido or f"Refaça a seção {nome} com um design melhor.")
         slide, tela = design_html.e_slides(html_base), design_html.e_prototipo(html_base)
         sistema = "slide" if slide else "tela" if tela else "secao"
-        extra = {"secao": nome, "alvo": alvo_fid, "nova": nova, "slide": slide, "tela": tela}
+        extra = {"secao": nome, "alvo": alvo_fid, "nova": nova, "slide": slide, "tela": tela,
+                 "pagina": pagina, "pagina_nova": pagina_nova and bool(pagina)}
+        if extra["pagina_nova"]:
+            user += (f"\n\nEsta seção é uma PÁGINA NOVA do site (“{pagina}”): ela aparece sozinha, entre o cabeçalho "
+                     "e o rodapé que já existem. Escreva o conteúdo completo da página dentro desta <section>.")
     elif modo == "documento" and not html_base:   # forçado num projeto vazio: tudo de uma vez
         user = f"Pedido: {pedido}"
         sistema = "documento"
@@ -875,13 +1227,17 @@ async def _rodar(run: dict, mensagens: list[dict]) -> None:
                 antes = dict(re.findall(r"(--[\w-]+)\s*:\s*([^;}]+)", raiz))
                 passos = [f"{k}: {antes.get(k, '').strip()} → {v}" for k, v in tokens.items()]
             else:  # secao
-                sec, css = design_html.ler_secao(texto, run["secao"], run.get("slide", False), run.get("tela", False))
+                sec, css = design_html.ler_secao(texto, run["secao"], run.get("slide", False), run.get("tela", False), run.get("pagina", ""))
                 mensagem, sugs = design_html.rodape(texto.rsplit("</style>", 1)[-1] if "</style>" in texto else texto)
                 resp = {"patches": [{"fid": run["alvo"], "html": sec}], "css": css}
                 passos = [f"{'Criou' if run.get('nova') else 'Refez'} a seção “{run['secao']}”"]
                 if css.strip():
                     passos.append("Escreveu o CSS dela")
             html, mudou = design_html.aplicar(base_html, resp)
+            if run.get("pagina_nova"):
+                html, tem_menu = design_html.link_no_menu(html, run["pagina"], run["pagina"].replace("-", " ").capitalize())
+                passos.append(f"Pôs o link “#/{run['pagina']}” no menu do cabeçalho" if tem_menu
+                              else "Não achei um <nav> no cabeçalho comum para pôr o link da página")
             if not extrair_html(html):
                 raise ValueError("o documento ficaria inválido")
         except ValueError as e:

@@ -90,10 +90,13 @@ def test_texto_e_ajuste_sem_ia_tambem_tem_atividade():
     conv = _projeto()
     h1 = re.search(r'<h1 data-fid="(\w+)"', design.projeto(conv)["html"]).group(1)
     design.editar_texto(conv, h1, "Padaria Sol")
-    assert "sem IA" in _ultima(conv)["passos"][0]
     design.ajustar_tokens(conv, {"--raio-md": "16px"})
+    r = design.projeto(conv)["rascunho"]   # à mão: rascunho, não versão
+    assert r["mudancas"] == 2 and "Padaria Sol" in r["passos"][0] and design.projeto(conv)["total"] == 1
+    design.salvar_versao(conv)
     m = _ultima(conv)
-    assert m["passos"] == ["--raio-md → 16px (painel de ajustes, sem IA)"] and m["mais"] == 1 and m["menos"] == 1
+    assert m["rota"] == "manual" and m["content"] == "v2: 2 ajustes manuais"
+    assert m["passos"][1] == "--raio-md → 16px (painel de ajustes, sem IA)" and m["mais"] >= 1 and m["menos"] >= 1
 
 
 # ------------------------------------------------------------------ perguntas antes do design
@@ -202,12 +205,12 @@ def test_pagina_de_referencia_capturada(tmp_path):
     srv = HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        texto, foto = asyncio.run(design_referencias.pagina(f"http://127.0.0.1:{srv.server_port}/"))
+        texto, foto, celular = asyncio.run(design_referencias.pagina(f"http://127.0.0.1:{srv.server_port}/"))
     finally:
         srv.shutdown()
     assert texto["nome"] == "Café Aurora" and "rgb(16, 24, 32)" in texto["texto"] and "Georgia" in texto["texto"]
     assert "H1: Café da manhã" in texto["texto"] and "12px" in texto["texto"]
-    assert foto["tipo"] == "imagem" and foto["data"].startswith("data:image/jpeg;base64,")
+    assert foto["tipo"] == celular["tipo"] == "imagem" and foto["data"].startswith("data:image/jpeg;base64,")
     with pytest.raises(ToolError):
         asyncio.run(design_referencias.pagina("ftp://x"))
 

@@ -22,6 +22,7 @@ from .agent import RUNS, Run, RunRequest, _load, _save, active_run
 from .parsing import split_think
 from .browser import MANAGER
 from .tools import REGISTRY, ToolError
+from . import design_modelos, design_revisao
 
 
 settings.apply()
@@ -866,6 +867,7 @@ class DesignBody(BaseModel):
     perguntar: bool = False           # projeto vazio: perguntas curtas antes do plano
     respostas: list[dict] = []        # [{pergunta, resposta}] do card de perguntas
     referencias: list[dict] = []      # [{tipo: imagem|documento|pagina, nome, data|texto}]
+    pagina: str = ""                  # site com páginas: seção nova vai para esta (nova: cria a página)
 
 
 class DesignAprovarBody(BaseModel):
@@ -927,7 +929,7 @@ async def design_gerar(conv_id: int, body: DesignBody):
     try:
         msg = design.start(conv_id, body.pedido, _design_modelos(body), body.fids, body.rota, body.secao,
                            body.comentarios, body.esforco, body.sistema, body.perguntar, body.respostas,
-                           body.referencias)
+                           body.referencias, body.pagina)
     except ToolError as e:
         raise HTTPException(400, str(e))
     return _sse_design(msg["id"])
@@ -970,13 +972,133 @@ def design_texto(conv_id: int, body: DesignTextoBody):
 class DesignEstiloBody(BaseModel):
     fids: list[str]
     estilos: dict[str, str]
+    largura: str = "desktop"   # tablet/mobile: regra @media só daquela largura para baixo
 
 
 @app.post("/api/design/{conv_id}/estilo")
 def design_estilo(conv_id: int, body: DesignEstiloBody):
     """Modo Editar do canvas: propriedades no style="" dos elementos, sem modelo."""
     try:
-        return design.editar_estilo(conv_id, body.fids, body.estilos)
+        return design.editar_estilo(conv_id, body.fids, body.estilos, body.largura)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+class DesignOperacaoBody(BaseModel):
+    op: str
+    fids: list[str]
+    alvo: str = ""
+    onde: str = "depois"
+    valor: str = ""
+
+
+@app.post("/api/design/{conv_id}/operacao")
+def design_operacao(conv_id: int, body: DesignOperacaoBody):
+    """Modo Editar: apagar, duplicar, mover, trocar imagem e link, sem modelo (vai para o rascunho)."""
+    try:
+        return design.operar(conv_id, body.op, body.fids, body.alvo, body.onde, body.valor)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+class DesignRevisaoBody(BaseModel):
+    provider: str = ""
+    model: str = ""        # vazio: só a medição (sem modelo)
+    esforco: str = "baixo"
+    fila: bool = False     # manda os problemas para a fila de comentários
+
+
+@app.post("/api/design/{conv_id}/revisao")
+async def design_revisao_rota(conv_id: int, body: DesignRevisaoBody):
+    """Revisão visual: a página em 3 larguras num Chromium headless (medição) e, se o modelo lê imagem, o olhar dele."""
+    try:
+        r = await design_revisao.revisar(design.projeto(conv_id)["html"], body.provider, body.model, body.esforco)
+        r["na_fila"] = design.comentarios_da_revisao(conv_id, r["problemas"]) if body.fila else 0
+        return r
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+class DesignFilaBody(BaseModel):
+    problemas: list[dict]
+
+
+@app.post("/api/design/{conv_id}/revisao/fila")
+def design_revisao_fila(conv_id: int, body: DesignFilaBody):
+    """Achados da revisão escolhidos na tela → comentários pendentes."""
+    try:
+        n = design.comentarios_da_revisao(conv_id, body.problemas[:20], maximo=20)
+        return {"na_fila": n, "projeto": design.projeto(conv_id)}
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+class DesignCapturaBody(BaseModel):
+    captura_id: str
+    blocos: list[int]
+
+
+@app.post("/api/design/{conv_id}/captura")
+def design_captura(conv_id: int, body: DesignCapturaBody):
+    """Blocos escolhidos da página de referência entram como seções (rascunho, sem IA)."""
+    try:
+        return design.inserir_captura(conv_id, body.captura_id, body.blocos)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+class DesignPaletaBody(BaseModel):
+    paleta: dict[str, str]
+
+
+@app.post("/api/design/{conv_id}/paleta")
+def design_paleta(conv_id: int, body: DesignPaletaBody):
+    """Cores e fontes da página capturada nos tokens do design (rascunho, sem IA)."""
+    try:
+        return design.aplicar_paleta(conv_id, body.paleta)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+class DesignModeloBody(BaseModel):
+    conv_id: int
+    nome: str
+
+
+@app.get("/api/design-modelos")
+def design_modelos_listar():
+    return design_modelos.listar()
+
+
+@app.get("/api/design-modelos/{mid}")
+def design_modelos_pegar(mid: str):
+    try:
+        return design_modelos.pegar(mid)
+    except ToolError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/design-modelos")
+def design_modelos_salvar(body: DesignModeloBody):
+    """Guarda o que está no canvas do projeto (o rascunho, se houver) como modelo."""
+    try:
+        return design_modelos.salvar(body.nome, design.projeto(body.conv_id)["html"])
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/design-modelos/{mid}")
+def design_modelos_apagar(mid: str):
+    try:
+        return design_modelos.apagar(mid)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/design/{conv_id}/modelo/{mid}")
+def design_usar_modelo(conv_id: int, mid: str):
+    try:
+        return design.usar_modelo(conv_id, mid)
     except ToolError as e:
         raise HTTPException(400, str(e))
 
@@ -1182,6 +1304,25 @@ def design_ir(conv_id: int, body: DesignVersaoBody):
 def design_restaurar(conv_id: int, body: DesignVersaoBody):
     try:
         return design.restaurar(conv_id, body.versao)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+class DesignSalvarBody(BaseModel):
+    descricao: str = ""
+
+
+@app.post("/api/design/{conv_id}/rascunho/{acao}")
+def design_rascunho(conv_id: int, acao: str, body: DesignSalvarBody | None = None):
+    """Ajustes à mão ficam no rascunho: salvar (vira versão), descartar, desfazer, refazer."""
+    try:
+        if acao == "salvar":
+            return design.salvar_versao(conv_id, (body or DesignSalvarBody()).descricao)
+        if acao == "descartar":
+            return design.descartar_rascunho(conv_id)
+        if acao in ("desfazer", "refazer"):
+            return design.rascunho_desfazer(conv_id, acao == "refazer")
+        raise HTTPException(404, "Ação desconhecida.")
     except ToolError as e:
         raise HTTPException(400, str(e))
 
