@@ -391,6 +391,10 @@ async def get_activity():
             e["alertas"] = r.alertas  # "pode estar travada": a interface notifica quando sobe
     for r in list(design._RUNS.values()):   # geração do Design também acende a bolinha da conversa
         entrada(r["conv_id"])["running"] = True
+    for r in list(comparar._RUNS.values()):  # comparação e lote de imagem também
+        entrada(r["conv_id"])["running"] = True
+    for c in lotes.pendentes():
+        entrada(c)["running"] = True
     for a in subagents.ativas():
         entrada(a["conversation_id"])["subagents"] += 1
     vivos = 0
@@ -405,6 +409,10 @@ async def get_activity():
         pass
     # Carimbo da lista de conversas: conversa criada, apagada ou renomeada em outro aparelho recarrega a barra.
     with db.session() as s:
+        if por_conversa:  # tipo de cada conversa: a interface escolhe o aviso de "terminou" por ele
+            for cid, kind in s.execute(select(db.Conversation.id, db.Conversation.kind)
+                                       .where(db.Conversation.id.in_(list(por_conversa)))):
+                por_conversa[cid]["kind"] = kind
         n, maior, ultima = s.execute(select(func.count(db.Conversation.id), func.max(db.Conversation.id),
                                             func.max(db.Conversation.updated_at))).one()
     try:  # card em andamento cuja conversa acabou vai para Revisão; o carimbo avisa as telas do board

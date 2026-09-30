@@ -22,6 +22,33 @@ from . import db, downloads, imagegen, mirror
 from .imagegen import _c, _existe
 from .tools import ToolError
 
+# Conversas com lote ou ampliação rodando (conv_id -> quantos): o /api/activity acende a bolinha e a
+# interface avisa quando zera. Todo alvo recebe o conv_id como 1º argumento.
+_PENDENTES: dict[int, int] = {}
+_pendentes_lock = threading.Lock()
+
+
+def pendentes() -> list[int]:
+    with _pendentes_lock:
+        return [c for c, n in _PENDENTES.items() if n > 0]
+
+
+def _disparar(alvo, *args) -> None:
+    with _pendentes_lock:
+        _PENDENTES[args[0]] = _PENDENTES.get(args[0], 0) + 1
+
+    def rodar():
+        try:
+            alvo(*args)
+        finally:
+            with _pendentes_lock:
+                if _PENDENTES.get(args[0], 0) <= 1:
+                    _PENDENTES.pop(args[0], None)
+                else:
+                    _PENDENTES[args[0]] -= 1
+    threading.Thread(target=rodar, daemon=True).start()
+
+
 DESCARTADAS = "descartadas"
 MAX_VARIACOES = 50  # o sd-cli é sequencial; acima disso é espera, não geração
 SEED_MAX = 2**31 - 1
@@ -180,7 +207,7 @@ def start(conv_id: int, prompt: str, opts: dict | None = None, models: list[str]
                 meta={"job": job["id"], "count": count, "seed_mode": seed_mode,
                       "opts": opts, "images": imagens})
 
-    threading.Thread(target=_trabalhar, args=(conv_id, msg.id, prompt, opts, job["id"], refs), daemon=True).start()
+    _disparar(_trabalhar, conv_id, msg.id, prompt, opts, job["id"], refs)
     return msg.to_dict()
 
 
@@ -288,7 +315,7 @@ def _nova_ampliacao(conv_id: int, origem: str, saida: str, prompt: str, opts: di
     job = downloads.create("lote", f"ampliar {_base(origem)}")
     nova = _save(conv_id, role="assistant", content="", status="running",
                  meta={"job": job["id"], "count": 1, "seed_mode": "fixa", "opts": opts, "images": imagens})
-    threading.Thread(target=_ampliar_trabalho, args=(conv_id, nova.id, job["id"]), daemon=True).start()
+    _disparar(_ampliar_trabalho, conv_id, nova.id, job["id"])
     return nova.to_dict()
 
 
@@ -448,7 +475,7 @@ def continuar(message_id: int, confirm: bool = False) -> dict:
             i.update(status="pendente", error="")
         job = downloads.create("lote", f"ampliar {_base(imagens[0]['path'])}")
         _patch(message_id, status="running", meta={"job": job["id"], "images": imagens})
-        threading.Thread(target=_ampliar_trabalho, args=(msg["conversation_id"], message_id, job["id"]), daemon=True).start()
+        _disparar(_ampliar_trabalho, msg["conversation_id"], message_id, job["id"])
         return {"ok": True}
     with db.session() as s:
         pedido = (s.query(db.Message)
@@ -466,8 +493,7 @@ def continuar(message_id: int, confirm: bool = False) -> dict:
     downloads.update(job["id"], done=0, total=faltam)
     _patch(message_id, status="running", meta={"job": job["id"], "images": imagens})
     opts = msg["meta"].get("opts") or {}
-    threading.Thread(target=_trabalhar, args=(msg["conversation_id"], message_id, prompt, opts, job["id"], refs),
-                     daemon=True).start()
+    _disparar(_trabalhar, msg["conversation_id"], message_id, prompt, opts, job["id"], refs)
     return {"ok": True}
 
 

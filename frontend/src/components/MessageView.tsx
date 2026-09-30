@@ -1,4 +1,4 @@
-import { createContext, memo, useContext, useEffect, useRef, useState } from "react";
+import { Children, createContext, isValidElement, memo, useContext, useEffect, useRef, useState } from "react";
 import CartaoEstado, { botaoEstado, botaoEstadoPrimario } from "./CartaoEstado";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -7,35 +7,42 @@ import { createPortal } from "react-dom";
 import type { Approval, AskQuestion, Attachment, Message, Preview, SlotImagem, SlotsPendentes, Task, ToolCall, Stats } from "../types";
 import { SourceChip, SourceList } from "./Sources";
 import { useStickyBottom } from "../useStickyBottom";
-import { Brain, Check, Chevron, Edit, ChevronDown, Clipboard, Split, Clock, Copy, Cube, Download, Eye, EyeOff, FolderOpen, Gauge, Shield, Tokens, X } from "./icons";
+import { Brain, Check, Chevron, Edit, ChevronDown, Clipboard, Split, Clock, Copy, Cube, Download, Eye, EyeOff, FolderOpen, Gauge, Play, Shield, Tokens, X } from "./icons";
 import type { CardMini } from "./BoardView";
 
 /** Quem fornece isto ganha o botão "Testar" nos blocos de código (código, linguagem do bloco).
- * Só o Comparar fornece: no chat o bloco continua só com o copiar. */
+ * O App fornece para a tela inteira; o Comparar fornece o dele por cima (uma pasta por modelo). */
 export const TestarCodigo = createContext<((codigo: string, linguagem: string) => void) | null>(null);
+
+// O que o backend sabe rodar (baterias.APELIDOS): HTML no navegador, Python e JavaScript no terminal.
+const TESTAVEIS = new Set(["html", "htm", "xhtml", "py", "python", "python3", "js", "javascript", "node", "mjs"]);
 
 /** Bloco de código com botão de copiar no canto (aparece ao passar o mouse). */
 function CodeBlock(props: React.ComponentProps<"pre">) {
   const ref = useRef<HTMLPreElement>(null);
   const testar = useContext(TestarCodigo);
+  // A linguagem vem da classe do <code> (```python → language-python); sem ela, HTML se reconhece pelo começo.
+  const code = Children.toArray(props.children).find(isValidElement) as React.ReactElement<{ className?: string; children?: unknown }> | undefined;
+  const lang = /language-([\w-]+)/.exec(code?.props.className ?? "")?.[1]?.toLowerCase() ?? "";
+  const inicio = String(code?.props.children ?? "").trimStart().slice(0, 200).toLowerCase();
+  const testavel = TESTAVEIS.has(lang) || (!lang && (inicio.startsWith("<!doctype") || inicio.includes("<html")));
   // ponytail: o texto vem do DOM já renderizado, sem remontar o AST do markdown
   return (
     <div className="group relative">
       <BotaoDeCanto>
-        {testar && (
-          <button
-            title="Testar este código: HTML abre no navegador, Python e JavaScript rodam no terminal"
-            onClick={() => {
-              const code = ref.current?.querySelector("code");
-              const lang = /language-([\w-]+)/.exec(code?.className ?? "")?.[1] ?? "";
-              testar(ref.current?.textContent ?? "", lang);
-            }}
-            className="mr-1 rounded-md border border-line bg-surface px-2 py-0.5 text-[11px] text-muted hover:bg-raised hover:text-fg"
-          >
-            ▶ Testar
-          </button>
-        )}
-        <CopyButton text={() => ref.current?.textContent ?? ""} bg />
+        <span className="inline-flex items-stretch gap-1">
+          {testar && testavel && (
+            <button
+              title="Testar este código: HTML abre no navegador, Python e JavaScript rodam no terminal"
+              onClick={() => testar(ref.current?.textContent ?? "", lang)}
+              // estica até a altura do copiar (items-stretch) e usa a mesma moldura: os dois lado a lado
+              className="flex items-center gap-1 rounded-md border border-line bg-surface/90 px-2 text-[11.5px] text-muted backdrop-blur hover:bg-raised hover:text-fg"
+            >
+              <Play className="size-3" /> Testar
+            </button>
+          )}
+          <CopyButton text={() => ref.current?.textContent ?? ""} bg />
+        </span>
       </BotaoDeCanto>
       <pre ref={ref} {...props} />
     </div>
@@ -55,7 +62,7 @@ function CodeBlock(props: React.ComponentProps<"pre">) {
 function BotaoDeCanto({ children }: { children: React.ReactNode }) {
   return (
     <div className="pointer-events-none sticky top-1.5 z-10 h-0 text-right">
-      <div className="pointer-events-auto mr-1.5 inline-block opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+      <div className="pointer-events-auto mt-2 mr-2 inline-block opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
         {children}
       </div>
     </div>
