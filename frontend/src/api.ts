@@ -1,10 +1,14 @@
 // Sem token no web: a fronteira é o nginx. Existe para o código que vem do desktop (fetch de download) ser o mesmo.
-export const auth = (): Record<string, string> => ({});
+export const auth = (): Record<string, string> => (materiaEstudos ? { "X-Forja-Materia": materiaEstudos } : {});
+// A matéria aberta na tela Estudos: toda chamada leva (o backend só lê em /api/estudos), e as abas filtram e marcam
+// por ela sem passar nada adiante. null = "Tudo". ponytail: global de módulo, só uma tela Estudos por janela.
+let materiaEstudos: string | null = null;
+export const setMateriaEstudos = (m: string | null) => { materiaEstudos = m; };
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`/api${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    headers: { "Content-Type": "application/json", ...auth(), ...init?.headers },
   });
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
@@ -54,7 +58,7 @@ export async function enviarArquivo<T>(path: string, file: File): Promise<T> {
 
 /** Lê um SSE via fetch (EventSource não faz POST nem aceita AbortSignal). Chama onEvent a cada `data:`. */
 export async function streamSSE(path: string, init: RequestInit, onEvent: (ev: any) => void) {
-  const r = await fetch(`/api${path}`, { ...init, headers: { "Content-Type": "application/json", ...init.headers } });
+  const r = await fetch(`/api${path}`, { ...init, headers: { "Content-Type": "application/json", ...auth(), ...init.headers } });
   if (!r.ok || !r.body) {
     const b = await r.json().catch(() => ({}));
     // O status vai junto, como no req(): 409 é pergunta (confirmar), não falha.
