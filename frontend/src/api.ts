@@ -1,3 +1,6 @@
+// Sem token no web: a fronteira é o nginx. Existe para o código que vem do desktop (fetch de download) ser o mesmo.
+export const auth = (): Record<string, string> => ({});
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`/api${path}`, {
     ...init,
@@ -38,6 +41,15 @@ export async function uploadReferencia(file: File): Promise<string> {
   const r = await fetch("/api/imagens/referencia", { method: "POST", body: form });
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `HTTP ${r.status}`);
   return (await r.json()).path;
+}
+
+/** Arquivo para uma rota que recebe multipart `file` (o material da tela Estudos). */
+export async function enviarArquivo<T>(path: string, file: File): Promise<T> {
+  const form = new FormData();
+  form.append("file", file);
+  const r = await fetch(`/api${path}`, { method: "POST", body: form, headers: auth() });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `HTTP ${r.status}`);
+  return r.json();
 }
 
 /** Lê um SSE via fetch (EventSource não faz POST nem aceita AbortSignal). Chama onEvent a cada `data:`. */

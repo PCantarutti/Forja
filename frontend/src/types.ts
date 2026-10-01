@@ -55,7 +55,7 @@ export type Conversation = {
   id: number;
   title: string;
   updated_at: string;
-  kind?: "chat" | "agent" | "maestro" | "imagem" | "video" | "comparar" | "pesquisa" | "design";
+  kind?: "chat" | "agent" | "maestro" | "imagem" | "video" | "comparar" | "pesquisa" | "design" | "estudos";
   workspace?: string | null;
   workspace_label?: string;
   pinned?: boolean;
@@ -262,6 +262,193 @@ export type PesquisaEstado = {
 
 export type PesquisaFormato = "auto" | "produto" | "comparar" | "guia" | "checagem";
 export type PesquisaProfundidade = "rapida" | "normal" | "funda" | "personalizado";
+
+// ------------------------------------------------------------------ estudos
+
+export type EstudosPreferencias = {
+  nivel: "iniciante" | "intermediario" | "avancado";
+  objetivo: "vestibular" | "concurso" | "faculdade" | "entender";
+  tom: "direto" | "didatico" | "formal";
+  tamanho: "curto" | "medio" | "completo";
+  extras: ("exemplos" | "mnemonicos" | "pegadinhas" | "quadro")[];
+  observacoes: string;
+};
+
+export type EstudosMaterial = {
+  id: number; n: number; nome: string; arquivo: string; chars: number; paginas: number; ocr: boolean;
+  uso: "conteudo" | "prova";   // prova = simulado: vira o perfil do que cai, não conteúdo do resumo
+};
+
+export type EstudosTopico = { titulo: string; objetivo: string; pontos: string[]; status: "fila" | "escrevendo" | "pronto" | "erro" };
+
+export type EstudosEstado = {
+  message_id: number;
+  tema: string;
+  preferencias: EstudosPreferencias;
+  web: boolean;
+  profundidade: "rapida" | "normal" | "funda";
+  motor: "forja" | "claude";   // claude = o pedido fica para o Claude via MCP
+  status: "rodando" | "aguardando" | "pronto" | "erro" | "cancelado";
+  etapa: "material" | "web" | "plano" | "escrita" | "pronto";
+  aviso: string;
+  titulo: string;
+  perfil: { banca?: string; formato?: string; estilo?: string; topicos?: string[]; questoes?: number };
+  materiais: { id: number; nome: string; uso: string; pedacos: number; feitos: number }[];
+  rodada: number;
+  fontes: PesquisaFonte[];
+  topicos: EstudosTopico[];
+  texto: string;   // o resumo em Markdown (cresce seção a seção)
+  stats: PesquisaEstado["stats"];
+};
+
+export type EstudosProjeto = {
+  id: number;
+  titulo: string;
+  materiais: EstudosMaterial[];
+  resumos: { message_id: number; titulo: string; status: string; criado: string }[];
+  resumo: EstudosEstado | null;
+  rodando: number | null;
+  provas: EstudosProvaResumo[];
+  topicos: string[];   // os que a prova pode cobrar (do último resumo com texto)
+  duvidas: Record<string, number>;   // perguntas por conversa: "geral" e "questao:<entrega>:<id>"
+  revisao: EstudosPainel;
+};
+
+/** Estado de revisão espaçada de um item (Leitner: caixa 1 a 5; acertou na 5, dominado). */
+export type EstudosLeitner = { caixa: number; proxima: string; acertos: number; erros: number; dominada: boolean; vence: boolean };
+export type EstudosItemRevisao = EstudosLeitner & { chave: string; topico: string } & (
+  | { tipo: "erro"; questao: EstudosQuestao; resposta: number | boolean | string | null; prova: string; tentativa_id: number }
+  | { tipo: "cartao"; id: string; frente: string; verso: string; origem: "resumo" | "erro" });
+
+export type EstudosTarefa = { id: string; tipo: "estudar" | "revisar" | "simulado"; texto: string; topico: string; minutos: number; feito: boolean };
+export type EstudosPlano = { data: string; minutos: number; criado: string; dias: { dia: string; tarefas: EstudosTarefa[] }[] };
+
+export type EstudosPainel = {
+  hoje: string;
+  itens: EstudosItemRevisao[];
+  vencem: number;
+  plano: EstudosPlano | null;
+  geracoes: { message_id: number; status: string; n: number; motor: "forja" | "claude"; aviso: string; criado: string }[];
+};
+
+export type EstudosFlashcards = {
+  message_id: number;
+  tipo: "flashcards";
+  quantos: number;
+  motor: "forja" | "claude";
+  status: EstudosEstado["status"];
+  aviso: string;
+  partes: { id: string; topicos: string[]; n: number; status: "fila" | "gerando" | "ok" | "erro" }[];
+  cartoes: { id: string; frente: string; verso: string; topico: string }[];
+  stats: PesquisaEstado["stats"];
+};
+
+export type EstudosDesempenho = {
+  entregas: { message_id: number; prova_id: number; titulo: string; nota: number; acertos: number; n: number;
+              modo: "prova" | "treino"; segundos: number; criado: string }[];
+  topicos: { topico: string; pontos: number; max: number; pct: number | null; ultima: number | null }[];
+  fracos: string[];
+  lembrete: boolean;   // há celular pareado para o aviso do cronograma (no Forja web, nunca)
+  revisao: { erros: number; cartoes: number; vencem: number; dominados: number };
+  plano: EstudosPlano | null;
+};
+
+export type EstudosDuvidaMsg = {
+  id: number;
+  role: "user" | "assistant";
+  texto: string;
+  status: "rodando" | "aguardando" | "pronto" | "erro" | "cancelado";
+  trecho: string;   // trecho do resumo marcado ("explique de outro jeito")
+  motor: string;
+  aviso: string;
+  modelo: string;
+  criado: string;
+};
+
+export type EstudosTipoQuestao = "me" | "vf" | "disc";
+
+export type EstudosQuestao = {
+  id: string;
+  tipo: EstudosTipoQuestao;
+  enunciado: string;
+  pontos: number;
+  topico: string;
+  dificuldade: "facil" | "media" | "dificil";
+  alternativas?: string[];
+  // o resto só vem depois da primeira entrega (a prova sai sem gabarito até lá)
+  correta?: number | boolean;
+  explicacao?: string;
+  por_alternativa?: string[];
+  resposta_modelo?: string;
+  rubrica?: { criterio: string; pontos: number }[];
+  pagina?: string;
+  verificada?: boolean;
+};
+
+export type EstudosProvaConfig = {
+  me: number; vf: number; disc: number;
+  dificuldade: "facil" | "media" | "dificil" | "mista";
+  topicos: string[];
+  estilo: boolean;     // imitar a prova anexada
+  tempo: number;       // minutos; 0 = sem cronômetro
+  instrucoes: string;
+  alternativas: number;
+};
+
+export type EstudosPlanejada = {
+  id: string; tipo: EstudosTipoQuestao; topico: string; dificuldade: string; motivo: string;
+  status: "fila" | "gerando" | "verificando" | "ok" | "descartada";
+};
+
+export type EstudosProva = {
+  message_id: number;
+  tipo: "prova";
+  titulo: string;
+  config: EstudosProvaConfig;
+  motor: "forja" | "claude";
+  status: EstudosEstado["status"];
+  etapa: string;
+  aviso: string;
+  planejadas: EstudosPlanejada[];
+  questoes: EstudosQuestao[];
+  revelada: boolean;
+  stats: PesquisaEstado["stats"];
+};
+
+export type EstudosCorrecao = {
+  resposta: number | boolean | string | null;
+  certa: boolean | null;   // null = discursiva com nota parcial (ou ainda sendo corrigida)
+  pontos: number;
+  max: number;
+  feedback: string;
+  pendente?: boolean;
+  criterios?: { criterio: string; pontos: number; max: number }[];
+};
+
+export type EstudosTentativa = {
+  message_id: number;
+  tipo: "tentativa";
+  prova_id: number;
+  titulo: string;
+  segundos: number;
+  modo?: "prova" | "treino";
+  correcao: Record<string, EstudosCorrecao>;
+  motor: "forja" | "claude";
+  status: EstudosEstado["status"];
+  etapa: string;
+  aviso: string;
+  pontos: number; max: number; nota: number; acertos: number;
+  por_topico: { topico: string; pontos: number; max: number }[];
+  questoes: EstudosQuestao[];   // as da prova, já com gabarito
+  stats: PesquisaEstado["stats"];
+};
+
+export type EstudosProvaResumo = {
+  message_id: number; titulo: string; status: string; n: number; config: EstudosProvaConfig;
+  motor: "forja" | "claude"; criado: string;
+  tentativas: { message_id: number; status: string; nota: number; pontos: number; max: number; acertos: number;
+                segundos: number; criado: string; modo?: "prova" | "treino" }[];
+};
 
 // ------------------------------------------------------------------ IA local (llama.cpp / sd.cpp)
 

@@ -9,6 +9,9 @@ services:
     # pasta nascem com dono root. Vazio = root (Windows/Docker Desktop, onde o dono não importa).
     user: "${FORJA_UID:-0}:${FORJA_GID:-0}"
     environment:
+      # Fuso do usuário: o container nasce em UTC e, depois das 21h, o "hoje" da revisão e do cronograma
+      # (tela Estudos) já seria amanhã. Outro fuso: TZ=... no .env.
+      TZ: ${TZ:-America/Sao_Paulo}
       HOME: ${FORJA_HOME:-/root}  # usuário não-root precisa de uma home gravável (npm, uv, git)
       WORKSPACE_ROOT: /workspace
       WORKSPACE_HOST: ${WORKSPACE_PATH}
