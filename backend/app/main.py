@@ -1699,6 +1699,17 @@ def estudos_flashcard_apagar(conv_id: int, cartao_id: str):
     return _revisao("apagar_cartao", conv_id, cartao_id)
 
 
+@app.get("/api/estudos-figura/{conv_id}/{material_id}/{figura}")
+def estudos_figura(conv_id: int, material_id: int, figura: str):
+    """O recorte de uma figura do PDF (questão com figura): um <img> na tela."""
+    from . import estudos_figuras
+    try:
+        p = estudos_figuras.arquivo(conv_id, material_id, figura)
+    except ToolError as e:
+        raise HTTPException(404, str(e))
+    return FileResponse(p, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
+
+
 @app.get("/api/estudos/{conv_id}/flashcards.csv")
 def estudos_flashcards_csv(conv_id: int):
     """Para o Anki: frente, verso e o tópico como etiqueta."""
