@@ -48,6 +48,8 @@ async def lifespan(_app):
     from . import estudos_revisao
     lembrete = asyncio.create_task(estudos_revisao.vigia())  # Estudos: o aviso do dia (no web, sem celular, não sai)
     vivas.add(lembrete)
+    from . import estudos_piloto
+    estudos_piloto.retomar()  # Estudos: piloto que estava rodando quando o servidor caiu (o item interrompido é refeito)
     async with mcp_servidor.gerente():  # /mcp: o Claude controlando o Forja; o gerente vive com o app
         yield
     task.cancel()
@@ -1917,6 +1919,35 @@ def estudos_cronograma_marcar(conv_id: int, body: MarcarBody):
 @app.delete("/api/estudos/{conv_id}/cronograma")
 def estudos_cronograma_apagar(conv_id: int):
     return _revisao("apagar_plano", conv_id)
+
+
+class PilotoBody(BaseModel):
+    ate: str                        # AAAA-MM-DD: prepara o cronograma até este dia
+    provider: str = ""
+    model: str = ""
+    ex_provider: str = ""
+    ex_model: str = ""
+    preferencias: dict = {}
+    web: bool = True
+    profundidade: str = "normal"
+    questoes: int = 10              # por prova
+
+
+# async: o piloto vive numa task do loop (um endpoint síncrono roda numa thread sem loop)
+@app.post("/api/estudos/{conv_id}/piloto")
+async def estudos_piloto_comecar(conv_id: int, body: PilotoBody):
+    from . import estudos_piloto
+    try:
+        return estudos_piloto.start(conv_id, body.ate, body.provider, body.model, body.ex_provider, body.ex_model,
+                                    body.preferencias, body.web, body.profundidade, body.questoes)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/estudos/{conv_id}/piloto/pausar")
+async def estudos_piloto_pausar(conv_id: int):
+    from . import estudos_piloto
+    return estudos_piloto.pausar(conv_id)
 
 
 @app.post("/api/estudos/pdf")
