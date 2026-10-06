@@ -8,6 +8,7 @@ import ImagensView from "./components/ImagensView";
 import CompararView from "./components/CompararView";
 import PesquisaView from "./components/PesquisaView";
 import EstudosView from "./components/EstudosView";
+import TtsView from "./components/TtsView";
 import DesignView from "./components/DesignView";
 import PlansPanel, { type PlanEntry } from "./components/PlansPanel";
 import ChangesPanel, { type ChangesAction } from "./components/ChangesPanel";
@@ -2455,6 +2456,14 @@ export default function App() {
               notify(titulo, corpo, true, currentId);   // force: a pesquisa é longa, o aviso vale mesmo em foco
               if (currentId !== null) setUnread((u) => new Set(u).add(currentId));
             }}
+          />
+        ) : section === "tts" ? (
+          <TtsView
+            conv={currentId}
+            carimbo={activity.lista}
+            ensureConversation={ensureConversation}
+            onError={setError}
+            onConversationChanged={refreshConversations}
           />
         ) : section === "estudos" ? (
           <EstudosView

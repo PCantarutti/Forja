@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response,
                                StreamingResponse)
 from pydantic import BaseModel
@@ -23,7 +23,7 @@ from .agent import RUNS, Run, RunRequest, _load, _save, active_run
 from .parsing import split_think
 from .browser import MANAGER
 from .tools import REGISTRY, ToolError
-from . import design_modelos, design_repo, design_revisao
+from . import design_modelos, design_repo, design_revisao, tts
 
 
 settings.apply()
@@ -417,7 +417,7 @@ async def get_activity():
     for r in list(estudos._RUNS.values()):   # e o resumo/prova da tela Estudos (dúvida não: viraria "Estudo pronto")
         if r.get("tipo") != "duvida":
             entrada(r["conv_id"])["running"] = True
-    for c in lotes.pendentes():
+    for c in [*lotes.pendentes(), *tts.pendentes()]:
         entrada(c)["running"] = True
     for a in subagents.ativas():
         entrada(a["conversation_id"])["subagents"] += 1
@@ -519,6 +519,86 @@ class ModeloImagemBody(BaseModel):
 
 class ContinuarBody(BaseModel):
     confirm: bool = False
+
+
+# ------------------------------------------------------------------ Voz (texto para fala, tts.py)
+# O motor roda no Windows pelo forja-runner, no Python que o Forja Desktop instalou (ver o docstring de tts.py).
+
+def _tts(f, *a):
+    try:
+        return f(*a)
+    except ToolError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/tts")
+async def tts_estado():
+    return await asyncio.to_thread(_tts, tts.estado)
+
+
+@app.post("/api/tts/modelos")
+def tts_modelo(body: dict):
+    return _tts(tts.salvar_modelo, body)
+
+
+@app.delete("/api/tts/modelos")
+def tts_modelo_apagar(nome: str):
+    return tts.apagar_modelo(nome)
+
+
+@app.post("/api/tts/vozes")
+async def tts_voz(nome: str = Form(...), texto: str = Form(""), file: UploadFile = File(...)):
+    return _tts(tts.salvar_voz, nome, texto, file.filename or "", await file.read())
+
+
+@app.delete("/api/tts/vozes/{vid}")
+def tts_voz_apagar(vid: str):
+    return _tts(tts.apagar_voz, vid)
+
+
+@app.post("/api/tts/{conv_id}/gerar")
+async def tts_gerar(conv_id: int, body: dict):
+    return await asyncio.to_thread(_tts, tts.gerar, conv_id, body)
+
+
+@app.post("/api/tts/baixar")
+async def tts_baixar(body: dict):
+    return await asyncio.to_thread(_tts, tts.baixar, str(body.get("repo") or ""), str(body.get("file") or ""))
+
+
+@app.post("/api/tts/descarregar")
+async def tts_descarregar():
+    await asyncio.to_thread(_tts, tts.liberar_gpu)
+    return {"ok": True}
+
+
+@app.post("/api/tts/cancelar/{message_id}")
+def tts_cancelar(message_id: int):
+    tts.cancelar(message_id)
+    return {"ok": True}
+
+
+@app.get("/api/tts/arquivo")
+def tts_arquivo(path: str):
+    try:
+        return FileResponse(tts.servivel(path))
+    except ToolError:
+        raise HTTPException(404, "Áudio não encontrado")
+
+
+# A janela de busca de modelos (ModelSearch.tsx, a mesma do desktop) chama /api/local/*: aqui só existe a aba voz.
+@app.get("/api/local/search")
+async def local_search(q: str, kind: str = "voz", sort: str = "relevancia"):
+    if kind != "voz":
+        raise HTTPException(400, "No Docker a busca de modelos é só a de voz.")
+    return {"models": await asyncio.to_thread(_tts, tts.buscar_hf, q, sort, 20)}
+
+
+@app.get("/api/local/repo")
+async def local_repo(repo: str, kind: str = "voz"):
+    if kind != "voz":
+        raise HTTPException(400, "No Docker a busca de modelos é só a de voz.")
+    return await asyncio.to_thread(_tts, tts.repo_info, repo)
 
 
 @app.get("/api/imagens/estado")
@@ -2207,8 +2287,8 @@ def create_conversation(body: dict | None = None):
         except workspace.WorkspaceError as e:
             raise HTTPException(400, str(e))
     kind = (body or {}).get("kind") or "agent"
-    if kind not in ("chat", "agent", "maestro", "imagem", "comparar", "pesquisa", "design", "estudos"):
-        raise HTTPException(400, "kind deve ser chat, agent, maestro, imagem, comparar, pesquisa, design ou estudos")
+    if kind not in ("chat", "agent", "maestro", "imagem", "comparar", "pesquisa", "design", "estudos", "tts"):
+        raise HTTPException(400, "kind deve ser chat, agent, maestro, imagem, comparar, pesquisa, design, estudos ou tts")
     with db.session() as s:
         c = db.Conversation(workspace=folder, kind=kind)
         s.add(c)

@@ -6,9 +6,14 @@ fica só o registro em memória, com a mesma API (create/update/finish/cancel/ca
 """
 from __future__ import annotations
 
+import os
+import shutil
 import threading
 import time
 import uuid
+from pathlib import Path
+
+import httpx
 
 _JOBS: dict[str, dict] = {}
 _lock = threading.Lock()
@@ -87,3 +92,65 @@ def list_jobs() -> list[dict]:
         return sorted((dict(j) for j in _JOBS.values()), key=lambda j: j["started"])
 
 
+
+
+# ------------------------------------------------------------------ download (modelos da tela Voz)
+# O mesmo _fetch do desktop: a tela Voz baixa modelo do Hugging Face direto para a pasta do Windows (montada no
+# container), com retomada pelo .part.
+
+def _fetch(url: str, dest: Path, job: dict, base: int, total_all: int, headers: dict | None = None) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_suffix(dest.suffix + ".part")
+    ja_tem = part.stat().st_size if part.exists() else 0
+    cabecalho = dict(headers or {})
+    if ja_tem:
+        cabecalho["Range"] = f"bytes={ja_tem}-"
+    try:
+        with httpx.stream("GET", url, follow_redirects=True, timeout=httpx.Timeout(30, read=120),
+                          headers=cabecalho) as r:
+            if r.status_code == 416:  # já estava inteiro
+                raise _Pronto()
+            if r.status_code >= 400:
+                raise RuntimeError(f"HTTP {r.status_code} em {url}")
+            retomou = r.status_code == 206
+            if ja_tem and not retomou:
+                ja_tem = 0  # servidor ignorou o Range: recomeça
+            size = int(r.headers.get("content-length") or 0) + (ja_tem if retomou else 0)
+            update(job["id"], total=total_all or (base + size), detail=dest.name + (" (retomando)" if retomou else ""))
+            _espaco(dest.parent, size - ja_tem)
+            got = ja_tem
+            update(job["id"], done=base + got)
+            with open(part, "ab" if retomou else "wb") as f:
+                for chunk in r.iter_bytes(1 << 20):
+                    if cancelled(job["id"]):
+                        raise _Cancelled()
+                    f.write(chunk)
+                    got += len(chunk)
+                    update(job["id"], done=base + got)
+        if cancelled(job["id"]):
+            raise _Cancelled()
+    except _Pronto:
+        pass
+    except _Cancelled:
+        part.unlink(missing_ok=True)
+        raise
+    os.replace(part, dest)
+
+
+class _Pronto(Exception):
+    """O servidor disse que o arquivo já está inteiro no .part."""
+
+
+class _Cancelled(Exception):
+    pass
+
+
+def _espaco(pasta: Path, precisa: int) -> None:
+    if precisa <= 0:
+        return
+    try:
+        livre = shutil.disk_usage(pasta).free
+    except OSError:
+        return
+    if livre < precisa + (500 << 20):
+        raise RuntimeError(f"Espaço insuficiente em {pasta}: faltam {(precisa + (500 << 20) - livre) / 2 ** 30:.1f} GB")

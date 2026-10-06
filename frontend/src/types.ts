@@ -55,7 +55,7 @@ export type Conversation = {
   id: number;
   title: string;
   updated_at: string;
-  kind?: "chat" | "agent" | "maestro" | "imagem" | "video" | "comparar" | "pesquisa" | "design" | "estudos";
+  kind?: "chat" | "agent" | "maestro" | "imagem" | "video" | "comparar" | "pesquisa" | "design" | "estudos" | "tts";
   workspace?: string | null;
   workspace_label?: string;
   pinned?: boolean;
@@ -913,7 +913,9 @@ export type HfRepo = {
   readme: string;
 };
 export type HfFile = { path: string; size: number; quant: string; shards: number; papel?: string;
-  tipo?: "esrgan" | "seedvr2" | "spandrel" | "vae"; subpasta?: string }; // tipo/subpasta: só na busca de ampliação
+  tipo?: "esrgan" | "seedvr2" | "spandrel" | "vae" | "fish" | "f5"; subpasta?: string; // tipo/subpasta: ampliação e voz
+  nome?: string; arquitetura?: string }; // voz: o Fish baixa o repo inteiro (path ""), o rótulo vem em `nome`
+export type KindBusca = "text" | "image" | "video" | "ampliar" | "voz";
 
 // ------------------------------------------------------------------ Maestro
 // A Maestro planeja e verifica; os Workers implementam. O estado real vive no SQLite do backend
